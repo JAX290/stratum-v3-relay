@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.log
+*.jsonl
+*.tar
+*.tar.gz
+*.zip
+*.bak
+*.tmp
+.env
+*.env
+local-*.json
+*-backup*/
+pool-benchmark-results*.json

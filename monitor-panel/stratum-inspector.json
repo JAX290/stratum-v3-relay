@@ -1,0 +1,23 @@
+{
+  "relays": [
+    {"id":"hashhut-ru","pool_id":"hashhut","name":"Hash-Hut","region":"俄罗斯","role":"主线路","priority":1,"listen_port":10001,"upstream_host":"ru.pool.hash-hut.net","upstream_port":9999,"external":true},
+    {"id":"hashhut-eu","pool_id":"hashhut","name":"Hash-Hut","region":"欧洲","role":"备用 1","priority":2,"listen_port":9999,"upstream_host":"eu.pool.hash-hut.net","upstream_port":9999,"external":true},
+    {"id":"hashhut-by","pool_id":"hashhut","name":"Hash-Hut","region":"白俄罗斯","role":"备用 2","priority":3,"listen_port":10002,"upstream_host":"by.pool.hash-hut.net","upstream_port":9999,"external":true},
+
+    {"id":"litecoinpool-usw","pool_id":"litecoinpool","name":"LitecoinPool.org","region":"美国西部","role":"主线路","priority":1,"listen_port":11001,"upstream_host":"us2.litecoinpool.org","upstream_port":8080},
+    {"id":"litecoinpool-use","pool_id":"litecoinpool","name":"LitecoinPool.org","region":"美国东部","role":"备用 1","priority":2,"listen_port":11002,"upstream_host":"us.litecoinpool.org","upstream_port":3333},
+    {"id":"litecoinpool-eu","pool_id":"litecoinpool","name":"LitecoinPool.org","region":"欧洲","role":"备用 2","priority":3,"listen_port":11003,"upstream_host":"eu.litecoinpool.org","upstream_port":8080},
+
+    {"id":"viabtc-io","pool_id":"viabtc","name":"ViaBTC","region":"Global IO","role":"主线路","priority":1,"listen_port":11101,"upstream_host":"ltc.viabtc.io","upstream_port":443},
+    {"id":"viabtc-top","pool_id":"viabtc","name":"ViaBTC","region":"Global TOP","role":"备用 1","priority":2,"listen_port":11102,"upstream_host":"ltc.viabtc.top","upstream_port":443},
+    {"id":"viabtc-cc","pool_id":"viabtc","name":"ViaBTC","region":"Global CC","role":"备用 2","priority":3,"listen_port":11103,"upstream_host":"ltc.viabtc.cc","upstream_port":443},
+
+    {"id":"f2pool-global","pool_id":"f2pool","name":"F2Pool","region":"全球","role":"主线路","priority":1,"listen_port":11201,"upstream_host":"ltc.f2pool.com","upstream_port":3335},
+    {"id":"f2pool-asia","pool_id":"f2pool","name":"F2Pool","region":"亚洲","role":"备用 1","priority":2,"listen_port":11202,"upstream_host":"ltc-asia.f2pool.com","upstream_port":3335},
+    {"id":"f2pool-eu","pool_id":"f2pool","name":"F2Pool","region":"欧洲","role":"备用 2","priority":3,"listen_port":11203,"upstream_host":"ltc-euro.f2pool.com","upstream_port":8888},
+
+    {"id":"longpool-asia-8080","pool_id":"longpool","name":"LongPool","region":"亚洲 8080","role":"主线路","priority":1,"listen_port":11301,"upstream_host":"ltc-doge-asia.longpool.org","upstream_port":8080},
+    {"id":"longpool-asia-8880","pool_id":"longpool","name":"LongPool","region":"亚洲 8880","role":"备用 1","priority":2,"listen_port":11302,"upstream_host":"ltc-doge-asia.longpool.org","upstream_port":8880},
+    {"id":"longpool-usw","pool_id":"longpool","name":"LongPool","region":"美国西部","role":"备用 2","priority":3,"listen_port":11303,"upstream_host":"ltc-doge-usw-01.longpool.org","upstream_port":8443}
+  ]
+}

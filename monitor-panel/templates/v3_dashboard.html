@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Stratum V3 中转管理</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='v3.css') }}">
+</head>
+<body>
+  {% set navigation = [('overview','总览'),('miners','矿机'),('routes','线路与端口'),('alerts','报警'),('settings','设置'),('logs','日志')] %}
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="brand"><span class="brand-mark"></span><span>Stratum V3</span><small>中转管理</small></div>
+      <nav aria-label="主导航">
+        {% for key,label in navigation %}<a class="{{'active' if page==key}}" href="{{url_for('dashboard_page',page=key)}}">{{label}}</a>{% endfor %}
+      </nav>
+      <div class="header-actions"><a href="{{url_for('dashboard_page',page=page)}}">刷新</a><a href="{{url_for('logout')}}">退出</a></div>
+    </div>
+  </header>
+
+  <main class="page-shell">
+    {% for message in get_flashed_messages() %}<div class="flash" role="status">{{message}}</div>{% endfor %}
+    {% macro worker_table(workers) -%}
+      {% if workers %}
+      <div class="worker-list">
+        {% for worker in workers %}
+        <article class="worker-card">
+          <div class="worker-main">
+            <div class="worker-name"><b>{{worker.name}}</b><span class="tag {{'success' if worker.status=='online' else 'muted'}}">{{worker.status_text}}</span></div>
+            <div><small>算力板/连接</small><b>{{worker.details|length}} / {{worker.active}} 在线</b></div>
+            <div><small>来源IP</small><b>{{worker.sources|join(', ')}}</b></div>
+            <div><small>提交/接受/拒绝</small><b>{{worker.submitted}} / {{worker.accepted}} / {{worker.rejected}}</b></div>
+            <div><small>拒绝率</small><b class="{{'danger-text' if worker.reject_percent>1}}">{{worker.reject_percent}}%</b></div>
+            <div><small>估算算力</small><b>{{worker.hashrate}}</b></div>
+            <div><small>最后出现</small><b>{{worker.last_seen}}</b></div>
+          </div>
+          <details class="worker-details">
+            <summary>查看同名矿工明细（{{worker.details|length}}）</summary>
+            <div class="table-wrap"><table><thead><tr><th>线路/端口</th><th>来源IP</th><th>矿机软件</th><th>状态</th><th>连接/断开时间</th><th>提交/接受/拒绝</th><th>拒绝率</th><th>响应</th><th>最近Share</th></tr></thead><tbody>
+              {% for detail in worker.details %}<tr><td>{{detail.route}}{% if detail.listen_port %} :{{detail.listen_port}}{% endif %}</td><td>{{detail.source_ip}}:{{detail.source_port}}</td><td>{{detail.agent}}</td><td>{{detail.status}}</td><td>{{detail.connected_at}}<br><small>{{detail.disconnected_at or '仍在连接'}}</small></td><td>{{detail.submitted}} / {{detail.accepted}} / {{detail.rejected}}</td><td>{{detail.reject_percent}}%</td><td>{{detail.latency_ms}} ms</td><td>{{detail.last_share}}</td></tr>{% endfor %}
+            </tbody></table></div>
+          </details>
+        </article>
+        {% endfor %}
+      </div>
+      {% else %}<div class="empty">暂无矿工</div>{% endif %}
+    {%- endmacro %}
+
+    {% if page == 'overview' %}
+      <div class="page-title"><div><h1>关键看板</h1><p>矿机连接、服务器资源、端口监听和可复制转发地址</p></div></div>
+      <section class="metric-strip priority-strip">
+        <div><small>当前连接</small><b>{{overview.connections}}</b></div>
+        <div><small>在线矿工</small><b class="success-text">{{overview.online_workers}}</b></div>
+        <div><small>最近断开</small><b>{{overview.recent_workers}}</b></div>
+        <div><small>离线/失效</small><b class="{{'danger-text' if overview.offline_workers or overview.invalid_workers}}">{{overview.offline_workers}} / {{overview.invalid_workers}}</b></div>
+        <div><small>拒绝率</small><b class="{{'danger-text' if overview.reject_percent>1}}">{{overview.reject_percent}}%</b></div>
+        <div><small>报警中</small><b class="{{'danger-text' if alerting}}">{{alerting}}</b></div>
+      </section>
+      <div class="overview-grid">
+        <section class="panel">
+          <div class="section-head"><div><h2>服务器资源</h2><p>资源异常时优先看这里</p></div></div>
+          <div class="overview-cards">
+            <div><small>系统负载</small><b>{{server.load}}</b></div>
+            <div><small>内存</small><b>{{server.memory}}</b></div>
+            <div><small>磁盘</small><b>{{server.disk}}</b></div>
+            <div><small>运行时间</small><b>{{server.uptime}}</b></div>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="section-head"><div><h2>核心服务</h2><p>必须保持 active</p></div></div>
+          <div class="status-grid compact-status">{% for name,value in services.items() %}<div class="status-item {{'ok' if value=='active' else 'bad'}}"><span></span><div><b>{{name}}</b><small>{{value}}</small></div></div>{% endfor %}</div>
+        </section>
+      </div>
+      <section class="panel">
+        <div class="section-head"><div><h2>端口监听与当前转发地址</h2><p>复制给矿机使用；修改端口映射请进入“线路与端口”。</p></div><a class="text-link" href="{{url_for('dashboard_page',page='routes')}}">管理端口</a></div>
+        {% if not relay_status.ok %}<div class="flash danger-flash"><b>当前 VPS 公网 IP 无法获取</b><br>{{relay_status.message}}。系统已通过企业微信发送告警；为避免误复制 Tailscale 或管理面板访问域名，下面不会生成转发地址。</div>{% endif %}
+        <div class="table-wrap"><table class="overview-routes"><thead><tr><th>端口</th><th>监听</th><th>当前上游</th><th>映射核验</th><th>转发地址</th><th>操作</th></tr></thead><tbody>{% for row in overview_routes %}<tr><td><code>:{{row.port}}</code><small>{{row.endpoint.pool}} · {{row.endpoint.region}}</small></td><td><span class="tag {{'success' if row.listening else 'danger'}}">{{'监听中' if row.listening else '未监听'}}</span></td><td>{{row.endpoint.host}}:{{row.endpoint.port}}</td><td><span class="tag {{'success' if row.synced else 'danger'}}">{{'一致' if row.synced else '不一致'}}</span></td><td>{% if row.relay_url %}<code class="copy-value">{{row.relay_url}}</code>{% else %}<span class="danger-text">当前IP无法获取</span>{% endif %}</td><td>{% if row.relay_url %}<button class="secondary compact copy-button" type="button" data-copy="{{row.relay_url}}">复制</button>{% else %}<button class="secondary compact copy-button" type="button" disabled>不可复制</button>{% endif %}</td></tr>{% endfor %}</tbody></table></div>
+      </section>
+    {% endif %}
+
+    {% if page == 'miners' %}
+      <div class="page-title"><div><h1>矿机</h1><p>连接、Worker、Share与估算算力</p></div></div>
+      {% for pool in pools %}
+        <section class="panel">
+          <div class="section-head"><div><h2>{{pool.name}}</h2><p>{{pool.summary.connections}} 个连接 · {{pool.summary.workers}} 个活跃Worker</p></div></div>
+          <div class="mini-metrics"><div><small>提交</small><b>{{pool.summary.submitted}}</b></div><div><small>接受</small><b>{{pool.summary.accepted}}</b></div><div><small>拒绝</small><b>{{pool.summary.rejected}}</b></div></div>
+          <h3 class="worker-section-title">在线与最近断开</h3>
+          {{worker_table(pool.worker_groups.online)}}
+          <details class="worker-status-group">
+            <summary>离线矿工（超过15分钟未连接） · {{pool.worker_groups.offline|length}}</summary>
+            {{worker_table(pool.worker_groups.offline)}}
+          </details>
+          <details class="worker-status-group">
+            <summary>失效矿工（超过24小时未连接） · {{pool.worker_groups.invalid|length}}</summary>
+            {{worker_table(pool.worker_groups.invalid)}}
+          </details>
+        </section>
+      {% endfor %}
+    {% endif %}
+
+    {% if page == 'routes' %}
+      <div class="page-title"><div><h1>线路与端口</h1><p>动态端口可独立测试和应用；修改只影响新连接</p></div></div>
+      {% for group in route_groups %}
+        <section class="panel route-panel">
+          <div class="section-head"><div><h2>{{group.name}}</h2><p>三个端口互相独立</p></div>
+            <form class="template-apply" method="post" action="{{url_for('save_group',group_id=group.id)}}"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="mode" value="template"><select name="template_id"><option value="">选择整组模板</option>{% for template in config.templates %}<option value="{{template.id}}" {{'selected' if template.id==group.template_id}}>{{template.name}}</option>{% endfor %}</select><button class="secondary">应用整组模板</button></form>
+          </div>
+          <div class="route-list">
+          {% for row in group.rows %}
+            <form class="route-row" method="post" action="{{url_for('apply_route',port=row.port)}}">
+              <input type="hidden" name="csrf" value="{{csrf}}">
+              <div class="route-identity"><code>:{{row.port}}</code><span class="tag {{'success' if row.synced else 'danger'}}">{{'已同步' if row.synced else '配置不一致'}}</span></div>
+              <div class="route-current"><small>当前配置</small><b>{{row.endpoint.host}}:{{row.endpoint.port}}</b><span>实际：{{(row.actual.host ~ ':' ~ row.actual.port) if row.actual else '未读取到映射'}}</span></div>
+              <div class="route-control"><label for="endpoint-{{row.port}}">候选上游</label><select id="endpoint-{{row.port}}" name="endpoint_id">{% for endpoint in config.endpoints %}<option value="{{endpoint.id}}" {{'selected' if endpoint.id==row.endpoint_id}}>{{endpoint.pool}} · {{endpoint.region}} · {{endpoint.host}}:{{endpoint.port}}</option>{% endfor %}<option value="__custom__">自定义地址…</option></select><input name="custom_target" placeholder="host:port 或 stratum+tcp://host:port"></div>
+              <div class="route-health"><small>最近检测</small><b class="{{'success-text' if row.health_ok else 'muted-text'}}">{{'正常' if row.health_ok else '待确认'}}</b><span>{{row.last_check}}{{(' · '~row.latency~' ms') if row.latency is not none else ''}}</span></div>
+              <div class="route-actions"><button class="secondary" formaction="{{url_for('test_route',port=row.port)}}">测试</button><button>应用修改</button></div>
+            </form>
+          {% endfor %}
+          </div>
+        </section>
+      {% endfor %}
+      <section class="panel"><h2>固定矿池端口</h2><div class="table-wrap"><table><thead><tr><th>端口</th><th>矿池</th><th>区域</th><th>上游地址</th></tr></thead><tbody>{% for route in config.fixed_routes %}{% set endpoint=endpoint_map[route.endpoint_id] %}<tr><td><code>:{{route.port}}</code></td><td>{{endpoint.pool}}</td><td>{{endpoint.region}}</td><td>{{endpoint.host}}:{{endpoint.port}}</td></tr>{% endfor %}</tbody></table></div></section>
+    {% endif %}
+
+    {% if page == 'alerts' %}
+      <div class="page-title"><div><h1>报警</h1><p>当前异常、阈值和企业微信通知</p></div></div>
+      <section class="panel"><h2>当前地址异常</h2>{% set ns=namespace(count=0) %}{% for endpoint in endpoint_rows %}{% if endpoint.alerting %}{% set ns.count=ns.count+1 %}<div class="alert-row"><div><b>{{endpoint.pool}} · {{endpoint.region}}</b><span>{{endpoint.host}}:{{endpoint.port}}</span></div><div><span class="tag danger">连续失败 {{endpoint.failures}} 次</span><small>{{endpoint.last_check}}</small></div></div>{% endif %}{% endfor %}{% if ns.count==0 %}<div class="empty">当前没有地址报警</div>{% endif %}</section>
+      <div class="two-column"><section class="panel"><h2>报警阈值</h2><p class="section-note">矿池TCP可达但不回应独立Stratum探测时仅记录稳定性，不发送通知。</p><form class="form-grid" method="post" action="{{url_for('save_alerts')}}"><input type="hidden" name="csrf" value="{{csrf}}"><label>TCP失败次数<input name="failure_count" type="number" min="1" max="20" value="{{config.settings.failure_alert_count}}"></label><label>重复间隔（分钟）<input name="repeat_minutes" type="number" min="1" max="1440" value="{{config.settings.alert_repeat_seconds//60}}"></label><label>最低连接数<input name="min_connections" type="number" min="0" value="{{alert_settings.MIN_CONNECTIONS}}"></label><label>内存阈值（%）<input name="mem_threshold" type="number" min="1" max="99" value="{{alert_settings.MEM_THRESHOLD}}"></label><label>磁盘阈值（%）<input name="disk_threshold" type="number" min="1" max="99" value="{{alert_settings.DISK_THRESHOLD}}"></label><div class="form-actions"><button>保存设置</button></div></form></section>
+      <section class="panel"><h2>通知控制</h2><div class="detail-list"><div><span>企业微信Webhook</span><b>{{'已配置' if wechat_configured else '未配置'}}</b></div><div><span>旧版每分钟监控</span><b>{{'运行中' if legacy_enabled else '已暂停'}}</b></div></div><div class="button-row"><form method="post" action="{{url_for('test_wechat')}}"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary">发送测试通知</button></form><form method="post" action="{{url_for('toggle_monitor')}}"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="enabled" value="{{0 if legacy_enabled else 1}}"><button class="{{'danger-button' if legacy_enabled else ''}}">{{'暂停旧监控' if legacy_enabled else '恢复旧监控'}}</button></form></div></section></div>
+    {% endif %}
+
+    {% if page == 'settings' %}
+      <div class="page-title"><div><h1>设置</h1><p>模板、地址库和检测策略</p></div></div>
+      <section class="panel"><h2>挖矿模板</h2><div class="template-grid">{% for template in config.templates %}<form class="template-editor" method="post" action="{{url_for('edit_template',template_id=template.id)}}"><input type="hidden" name="csrf" value="{{csrf}}"><label>名称<input name="name" value="{{template.name}}"></label><label>结算模式<input name="settlement" value="{{template.settlement}}"></label>{% for number in range(3) %}<label>{{['主地址','备用1','备用2'][number]}}<select name="endpoint_{{number}}">{% for endpoint in config.endpoints %}<option value="{{endpoint.id}}" {{'selected' if endpoint.id==template.endpoint_ids[number]}}>{{endpoint.pool}} · {{endpoint.region}}</option>{% endfor %}</select></label>{% endfor %}<div class="button-row"><button name="action" value="save">保存</button><button class="secondary" name="action" value="copy">复制</button><button class="danger-button" name="action" value="delete">删除</button></div></form>{% endfor %}</div></section>
+      <section class="panel"><h2>地址稳定性</h2><p class="section-note">{% if config.settings.get('endpoint_probe_enabled', True) %}自动探测已开启：正在使用地址每{{config.settings.active_probe_seconds//60}}分钟，模板地址每{{config.settings.template_probe_seconds//60}}分钟。{% else %}自动探测已关闭：后台不会持续 mining.subscribe 探测矿池，手动“立即检测”仍可使用。{% endif %}</p><form class="form-grid" method="post" action="{{url_for('save_probe_settings')}}"><input type="hidden" name="csrf" value="{{csrf}}"><label>自动探测<select name="endpoint_probe_enabled"><option value="0" {{'selected' if not config.settings.get('endpoint_probe_enabled', True)}}>关闭自动探测</option><option value="1" {{'selected' if config.settings.get('endpoint_probe_enabled', True)}}>开启自动探测</option></select></label><label>正在使用地址间隔（分钟）<input name="active_probe_minutes" type="number" min="1" max="10080" value="{{[1, config.settings.active_probe_seconds//60]|max}}"></label><label>模板保存地址间隔（分钟）<input name="template_probe_minutes" type="number" min="1" max="10080" value="{{[1, config.settings.template_probe_seconds//60]|max}}"></label><label>批量采样<select name="endpoint_batch_probe_enabled"><option value="0" {{'selected' if not config.settings.get('endpoint_batch_probe_enabled', False)}}>关闭小时/每日批量采样</option><option value="1" {{'selected' if config.settings.get('endpoint_batch_probe_enabled', False)}}>开启小时/每日批量采样</option></select></label><label>每小时采样轮数<input name="hourly_samples" type="number" min="0" max="200" value="{{config.settings.get('hourly_samples',0)}}"></label><label>每日采样轮数<input name="daily_samples" type="number" min="0" max="500" value="{{config.settings.get('daily_samples',0)}}"></label><div class="form-actions"><button>保存探测设置</button></div></form><p class="section-note">建议：如果矿池已开始屏蔽持续探测，直接关闭自动探测；如果仍想保留稳定性数据，可填 240 分钟或 360 分钟，并关闭批量采样。</p><div class="table-wrap"><table><thead><tr><th>矿池/区域</th><th>地址</th><th>用途</th><th>状态</th><th>24小时成功率</th><th>P95</th><th>抖动</th><th>操作</th></tr></thead><tbody>{% for endpoint in endpoint_rows %}<tr><td><b>{{endpoint.pool}}</b><small>{{endpoint.region}}</small></td><td>{{endpoint.host}}:{{endpoint.port}}</td><td>{{endpoint.usage}}</td><td><span class="tag {{'success' if endpoint.ok else 'muted'}}">{{'正常' if endpoint.ok else '待确认'}}</span></td><td>{{endpoint.success}}</td><td>{{endpoint.p95}}</td><td>{{endpoint.jitter}}</td><td><form method="post" action="{{url_for('test_endpoint',endpoint_id=endpoint.id)}}"><input type="hidden" name="csrf" value="{{csrf}}"><button class="secondary compact">立即检测</button></form></td></tr>{% endfor %}</tbody></table></div></section>
+    {% endif %}
+
+    {% if page == 'logs' %}
+      <div class="page-title"><div><h1>日志</h1><p>服务运行、报警事件和配置审计</p></div></div>
+      <section class="panel"><h2>服务日志</h2><pre>{{logs.journal}}</pre></section>
+      <section class="panel"><h2>报警事件</h2><pre>{{logs.events}}</pre></section>
+      <div class="two-column"><section class="panel"><h2>配置审计</h2>{% for row in audit %}<div class="audit-row"><b>{{row.action}}</b><span>{{row.display_time}} · {{row.actor}}</span></div>{% else %}<div class="empty">暂无审计记录</div>{% endfor %}</section><section class="panel"><h2>配置历史与回滚</h2>{% for name in history[:15] %}<form class="history-row" method="post" action="{{url_for('rollback')}}"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="name" value="{{name}}"><code>{{name}}</code><button class="secondary compact">回滚</button></form>{% else %}<div class="empty">暂无历史版本</div>{% endfor %}</section></div>
+    {% endif %}
+  </main>
+  <script>
+    document.addEventListener('click', async (event) => {
+      const button = event.target.closest('[data-copy]');
+      if (!button) return;
+      const value = button.getAttribute('data-copy') || '';
+      try {
+        await navigator.clipboard.writeText(value);
+      } catch (error) {
+        const input = document.createElement('textarea');
+        input.value = value;
+        document.body.appendChild(input);
+        input.select();
+        document.execCommand('copy');
+        input.remove();
+      }
+      const original = button.textContent;
+      button.textContent = '已复制';
+      setTimeout(() => { button.textContent = original; }, 1200);
+    });
+  </script>
+</body>
+</html>
