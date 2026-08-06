@@ -8,7 +8,7 @@
 - `stratum-inspector-v3` 透明转发 Stratum 流量，同时观察 Worker、Job、Share；
 - 管理面板用于查看矿机状态、服务器资源、端口监听、当前转发地址、报警、日志和配置；
 - 企业微信机器人用于发送异常告警；
-- 代码可以放入 GitHub 私有仓库，半年后或更换 VPS 后可重新一键部署。
+- 代码放在 GitHub 公开仓库中，半年后或更换 VPS 后可重新一键部署。
 
 ## 端口规划
 
@@ -51,11 +51,11 @@
 
 ## 新 VPS 一键部署
 
-推荐把 `monitor-panel/` 上传到 GitHub 私有仓库。更换 VPS 后，在新 VPS 上 clone 仓库，然后执行：
+更换 VPS 后，在新 VPS 上 clone 公开仓库，然后执行：
 
 ```bash
 cd /root
-git clone git@github.com:<你的GitHub用户名>/<你的私有仓库>.git stratum-v3
+git clone https://github.com/JAX290/stratum-v3-relay.git stratum-v3
 cd /root/stratum-v3/monitor-panel
 chmod +x bootstrap-vps.sh
 ./bootstrap-vps.sh
@@ -167,9 +167,9 @@ https://xxxxx.ts.net/
 
 手机安装 Tailscale 并登录同一个账号后，打开这个地址即可进入面板。
 
-## GitHub 私有仓库建议
+## GitHub 仓库维护建议
 
-建议只提交 `monitor-panel/` 目录，不要提交外层目录里的压缩包、备份、迁移包、本地测试页面等文件。
+建议只提交 `README.md` 和 `monitor-panel/` 目录，不要提交外层目录里的压缩包、备份、迁移包、本地测试页面等文件。
 
 首次上传：
 
@@ -179,7 +179,7 @@ cd C:\Users\小米\Documents\miner
 git add monitor-panel
 git commit -m "Initial Stratum V3 relay panel deployment"
 git branch -M main
-git remote add origin git@github.com:<你的GitHub用户名>/<你的私有仓库>.git
+git remote add origin https://github.com/JAX290/stratum-v3-relay.git
 git push -u origin main
 ```
 
