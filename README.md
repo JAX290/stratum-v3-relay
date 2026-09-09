@@ -14,6 +14,18 @@ monitor-panel/
 monitor-panel/README.md
 ```
 
+## 矿场电脑加密入口
+
+`secure-relay/` 提供 Windows 图形客户端和 VPS TLS 入口。矿机先连接矿场局域网内的值守电脑，再由客户端加密传输到现有 V3 中转服务器。
+
+Windows 成品位于：
+
+```text
+secure-relay/client/木林森中转.exe
+```
+
+安装和配置说明见 [secure-relay/README.md](secure-relay/README.md)。
+
 ## 新 VPS 一键部署
 
 ```bash
