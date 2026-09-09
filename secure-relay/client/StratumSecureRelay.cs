@@ -5,6 +5,7 @@ using System.IO;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Net.NetworkInformation;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Reflection;
@@ -22,8 +23,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Stratum V3 TLS client for mine-site LAN relaying")]
 [assembly: AssemblyCompany("Stratum V3 Relay")]
 [assembly: AssemblyProduct("木林森中转")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 
 [DataContract]
 public sealed class AppConfig
@@ -98,7 +99,8 @@ public sealed class RelayManager
         try {
             foreach (int port in ports) {
                 TcpListener listener = new TcpListener(listenIp, port);
-                listener.Start(256);
+                try { listener.Start(256); }
+                catch (SocketException ex) { throw new InvalidOperationException("本地端口 " + port + " 无法监听，可能已被其他程序占用。", ex); }
                 listeners.Add(listener);
                 AcceptLoop(listener, config, token, port, stop.Token);
             }
@@ -210,6 +212,42 @@ public sealed class RelayManager
     }
 }
 
+public static class NetworkHelper
+{
+    public static string GetLanIPv4()
+    {
+        string best = "";
+        int bestScore = -1;
+        try {
+            foreach (NetworkInterface adapter in NetworkInterface.GetAllNetworkInterfaces()) {
+                if (adapter.OperationalStatus != OperationalStatus.Up || adapter.NetworkInterfaceType == NetworkInterfaceType.Loopback || adapter.NetworkInterfaceType == NetworkInterfaceType.Tunnel) continue;
+                string identity = (adapter.Name + " " + adapter.Description).ToLowerInvariant();
+                if (identity.Contains("tailscale") || identity.Contains("vmware") || identity.Contains("virtual") || identity.Contains("hyper-v") || identity.Contains("clash") || identity.Contains("tap") || identity.Contains("vpn")) continue;
+                IPInterfaceProperties properties = adapter.GetIPProperties();
+                bool hasGateway = false;
+                foreach (GatewayIPAddressInformation gateway in properties.GatewayAddresses) {
+                    if (gateway.Address.AddressFamily == AddressFamily.InterNetwork && !gateway.Address.Equals(IPAddress.Any)) { hasGateway = true; break; }
+                }
+                if (!hasGateway) continue;
+                foreach (UnicastIPAddressInformation address in properties.UnicastAddresses) {
+                    if (address.Address.AddressFamily != AddressFamily.InterNetwork || !IsPrivate(address.Address)) continue;
+                    int score = 100;
+                    if (adapter.NetworkInterfaceType == NetworkInterfaceType.Wireless80211) score += 20;
+                    if (adapter.NetworkInterfaceType == NetworkInterfaceType.Ethernet || adapter.NetworkInterfaceType == NetworkInterfaceType.GigabitEthernet) score += 15;
+                    if (score > bestScore) { best = address.Address.ToString(); bestScore = score; }
+                }
+            }
+        } catch { }
+        return best;
+    }
+
+    private static bool IsPrivate(IPAddress address)
+    {
+        byte[] value = address.GetAddressBytes();
+        return value.Length == 4 && (value[0] == 10 || (value[0] == 172 && value[1] >= 16 && value[1] <= 31) || (value[0] == 192 && value[1] == 168));
+    }
+}
+
 public sealed class MainForm : Form
 {
     private readonly TextBox server = new TextBox();
@@ -221,23 +259,31 @@ public sealed class MainForm : Form
     private readonly TextBox ports = new TextBox();
     private readonly CheckBox autoStart = new CheckBox();
     private readonly CheckBox closeToTray = new CheckBox();
+    private readonly TextBox currentIp = new TextBox();
+    private readonly ComboBox minerAddress = new ComboBox();
     private readonly Button start = new Button();
     private readonly Button stop = new Button();
     private readonly TextBox logs = new TextBox();
     private readonly NotifyIcon tray = new NotifyIcon();
     private readonly RelayManager manager;
+    private readonly System.Windows.Forms.Timer ipTimer = new System.Windows.Forms.Timer();
     private bool exiting;
 
     public MainForm()
     {
         Text = "木林森中转";
         Font = new Font("Microsoft YaHei UI", 9F);
-        ClientSize = new Size(760, 610);
-        MinimumSize = new Size(700, 560);
+        ClientSize = new Size(760, 740);
+        MinimumSize = new Size(700, 680);
         StartPosition = FormStartPosition.CenterScreen;
         manager = new RelayManager(Log);
         BuildUi();
         LoadConfig();
+        ports.TextChanged += delegate { RefreshMinerAddresses(false); };
+        RefreshMinerAddresses(false);
+        ipTimer.Interval = 30000;
+        ipTimer.Tick += delegate { RefreshMinerAddresses(false); };
+        ipTimer.Start();
         tray.Text = "木林森中转";
         Icon appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         if (appIcon != null) { Icon = appIcon; tray.Icon = appIcon; }
@@ -255,11 +301,11 @@ public sealed class MainForm : Form
     private void BuildUi()
     {
         TableLayoutPanel grid = new TableLayoutPanel();
-        grid.Dock = DockStyle.Top; grid.Height = 354; grid.Padding = new Padding(18, 14, 18, 4);
-        grid.ColumnCount = 2; grid.RowCount = 9;
+        grid.Dock = DockStyle.Top; grid.Height = 426; grid.Padding = new Padding(18, 14, 18, 4);
+        grid.ColumnCount = 2; grid.RowCount = 11;
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 165));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (int i=0; i<9; i++) grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        for (int i=0; i<11; i++) grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         AddRow(grid, 0, "VPS 地址", server, "例如 203.0.113.10");
         tlsPort.Minimum = 1; tlsPort.Maximum = 65535; tlsPort.Value = 443;
         AddRow(grid, 1, "TLS 端口", tlsPort, "默认 443");
@@ -275,6 +321,13 @@ public sealed class MainForm : Form
         closeToTray.Text = "点击关闭最小化";
         closeToTray.AutoSize = true;
         grid.Controls.Add(closeToTray, 1, 8);
+        currentIp.ReadOnly = true;
+        currentIp.BackColor = Color.White;
+        Button refreshIp = new Button(); refreshIp.Text = "刷新"; refreshIp.AutoSize = true; refreshIp.Click += delegate { RefreshMinerAddresses(true); };
+        AddRow(grid, 9, "当前局域网 IP", InlineControls(currentIp, refreshIp), "自动识别矿机应连接的值守电脑局域网 IP");
+        minerAddress.DropDownStyle = ComboBoxStyle.DropDownList;
+        Button copyAddress = new Button(); copyAddress.Text = "复制地址"; copyAddress.AutoSize = true; copyAddress.Click += delegate { CopyMinerAddress(); };
+        AddRow(grid, 10, "矿机填写地址", InlineControls(minerAddress, copyAddress), "选择端口后复制完整的 stratum+tcp 地址");
         Controls.Add(grid);
 
         FlowLayoutPanel buttons = new FlowLayoutPanel();
@@ -300,6 +353,47 @@ public sealed class MainForm : Form
         ToolTip tip = new ToolTip(); tip.SetToolTip(control, hint);
         control.Dock = DockStyle.Fill; control.Margin = new Padding(3, 4, 3, 4);
         grid.Controls.Add(label, 0, row); grid.Controls.Add(control, 1, row);
+    }
+
+    private static Control InlineControls(Control main, Control button)
+    {
+        TableLayoutPanel panel = new TableLayoutPanel();
+        panel.ColumnCount = 2; panel.RowCount = 1; panel.Dock = DockStyle.Fill; panel.Margin = new Padding(0);
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        main.Dock = DockStyle.Fill; main.Margin = new Padding(3, 4, 6, 4);
+        button.Margin = new Padding(0, 3, 3, 3);
+        panel.Controls.Add(main, 0, 0); panel.Controls.Add(button, 1, 0);
+        return panel;
+    }
+
+    private void RefreshMinerAddresses(bool writeLog)
+    {
+        string detected = NetworkHelper.GetLanIPv4();
+        currentIp.Text = String.IsNullOrWhiteSpace(detected) ? "未找到局域网 IP" : detected;
+        string selected = minerAddress.SelectedItem == null ? "" : minerAddress.SelectedItem.ToString();
+        minerAddress.Items.Clear();
+        if (!String.IsNullOrWhiteSpace(detected)) {
+            HashSet<int> unique = new HashSet<int>();
+            foreach (string item in ports.Text.Split(',')) {
+                int value;
+                if (Int32.TryParse(item.Trim(), out value) && value >= 1 && value <= 65535 && unique.Add(value))
+                    minerAddress.Items.Add("stratum+tcp://" + detected + ":" + value);
+            }
+        }
+        if (minerAddress.Items.Count > 0) {
+            int previous = minerAddress.Items.IndexOf(selected);
+            minerAddress.SelectedIndex = previous >= 0 ? previous : 0;
+        }
+        if (writeLog) Log(String.IsNullOrWhiteSpace(detected) ? "没有找到可用的局域网 IP，请检查网线或 Wi-Fi。" : "已刷新局域网 IP：" + detected);
+    }
+
+    private void CopyMinerAddress()
+    {
+        if (minerAddress.SelectedItem == null) { MessageBox.Show(this, "当前没有可复制的矿机地址。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+        string value = minerAddress.SelectedItem.ToString();
+        Clipboard.SetText(value);
+        Log("已复制矿机填写地址：" + value);
     }
 
     private void LoadConfig()
@@ -367,7 +461,9 @@ public sealed class MainForm : Form
             "证书 SHA-256：没有正规域名证书时，填写 VPS 安装脚本给出的指纹，用来确认连到的是自己的服务器。\r\n\r\n" +
             "共享密钥：相当于电脑和 VPS 之间的密码。\r\n\r\n" +
             "本地监听地址：保持 0.0.0.0，局域网矿机才能连接。\r\n\r\n" +
-            "本地端口：矿机连接值守电脑时使用的端口，应与 V3 中转端口一致。";
+            "本地端口：矿机连接值守电脑时使用的端口，应与 V3 中转端口一致。\r\n\r\n" +
+            "当前局域网 IP：值守电脑在矿机局域网里的地址。\r\n\r\n" +
+            "矿机填写地址：已经补全的挖矿地址，选择后可以直接复制到矿机后台。";
         MessageBox.Show(this, message, "各项设置说明", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
@@ -380,7 +476,7 @@ public sealed class MainForm : Form
     private void OnClosing(object sender, FormClosingEventArgs e)
     {
         if (!exiting && closeToTray.Checked && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); tray.ShowBalloonTip(1500, "木林森中转", "程序仍在后台运行。", ToolTipIcon.Info); return; }
-        manager.Stop(); tray.Visible = false;
+        ipTimer.Stop(); manager.Stop(); tray.Visible = false;
     }
 }
 
