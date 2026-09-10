@@ -25,8 +25,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Stratum V3 TLS client for mine-site LAN relaying")]
 [assembly: AssemblyCompany("Stratum V3 Relay")]
 [assembly: AssemblyProduct("木林森中转")]
-[assembly: AssemblyVersion("2.1.1.0")]
-[assembly: AssemblyFileVersion("2.1.1.0")]
+[assembly: AssemblyVersion("2.1.2.0")]
+[assembly: AssemblyFileVersion("2.1.2.0")]
 
 [DataContract]
 public sealed class ServerProfile
@@ -367,6 +367,14 @@ public sealed class RelayManager
     public List<MinerSnapshot> MinerSnapshots()
     {
         lock(stateLock){List<MinerSnapshot> result=new List<MinerSnapshot>();foreach(MinerState state in miners.Values)result.Add(state.Snapshot(DateTime.Now));result.Sort(delegate(MinerSnapshot a,MinerSnapshot b){return String.Compare(a.Ip,b.Ip,StringComparison.OrdinalIgnoreCase);});return result;}
+    }
+    public bool RemoveMiner(string ip)
+    {
+        lock(stateLock){MinerState state;if(!miners.TryGetValue(ip,out state))return true;if(state.Connections>0)return false;miners.Remove(ip);MinerHistoryStore.Save(miners.Values);return true;}
+    }
+    public int RemoveExpiredMiners(TimeSpan offlineFor)
+    {
+        lock(stateLock){DateTime cutoff=DateTime.Now-offlineFor;List<string>remove=new List<string>();foreach(KeyValuePair<string,MinerState> item in miners)if(item.Value.Connections==0&&item.Value.LastActivity<cutoff)remove.Add(item.Key);foreach(string ip in remove)miners.Remove(ip);if(remove.Count>0)MinerHistoryStore.Save(miners.Values);return remove.Count;}
     }
     public void SaveMinerHistory()
     {
@@ -797,11 +805,13 @@ public sealed class MinerStatusForm : Form
     {
         manager=relay;Text="木林森中转 - 矿机状态";Font=new Font("Microsoft YaHei UI",9F);ClientSize=new Size(1450,620);MinimumSize=new Size(980,500);StartPosition=FormStartPosition.CenterParent;
         summary.Dock=DockStyle.Top;summary.Height=42;summary.Padding=new Padding(12,11,0,0);summary.BackColor=Color.FromArgb(236,244,252);Controls.Add(summary);
+        FlowLayoutPanel actions=new FlowLayoutPanel();actions.Dock=DockStyle.Top;actions.Height=43;actions.Padding=new Padding(10,6,0,0);Button remove=new Button();remove.Text="删除选中记录";remove.AutoSize=true;remove.Click+=delegate{RemoveSelected();};Button prune=new Button();prune.Text="清理离线超过24小时";prune.AutoSize=true;prune.Click+=delegate{int count=manager.RemoveExpiredMiners(TimeSpan.FromHours(24));RefreshRows();MessageBox.Show(this,"已清理 "+count+" 条记录。","清理完成",MessageBoxButtons.OK,MessageBoxIcon.Information);};actions.Controls.Add(remove);actions.Controls.Add(prune);Controls.Add(actions);actions.BringToFront();
         grid.Dock=DockStyle.Fill;grid.ReadOnly=true;grid.AllowUserToAddRows=false;grid.AllowUserToDeleteRows=false;grid.AutoSizeRowsMode=DataGridViewAutoSizeRowsMode.AllCells;grid.SelectionMode=DataGridViewSelectionMode.FullRowSelect;grid.RowHeadersVisible=false;grid.BackgroundColor=Color.White;grid.AutoGenerateColumns=false;
         Add("IP","矿机 IP",110);Add("Health","健康度",80);Add("Connections","连接",55);Add("Worker","矿工名",165);Add("Agent","矿机软件/型号",145);Add("Endpoint","线路",75);Add("Ports","本地端口",90);Add("LastActivity","最近活动",125);Add("Shares","提交/接受/拒绝",115);Add("Reject","拒绝率",65);Add("Latency","响应",65);Add("Hash10","10分钟估算算力",115);Add("Hash1","1小时估算算力",115);Add("Hash24","24小时估算算力",115);Add("Traffic","流量 上/下",110);Add("Disconnects","断线/失败",75);
         grid.CellDoubleClick+=delegate(object sender,DataGridViewCellEventArgs e){if(e.RowIndex>=0&&grid.Rows[e.RowIndex].Tag is MinerSnapshot)ShowDetail((MinerSnapshot)grid.Rows[e.RowIndex].Tag);};
         Controls.Add(grid);grid.BringToFront();timer.Interval=2000;timer.Tick+=delegate{RefreshRows();};timer.Start();FormClosed+=delegate{timer.Stop();timer.Dispose();};RefreshRows();
     }
+    private void RemoveSelected(){if(grid.SelectedRows.Count==0){MessageBox.Show(this,"请先选择一台矿机。","提示",MessageBoxButtons.OK,MessageBoxIcon.Information);return;}MinerSnapshot m=grid.SelectedRows[0].Tag as MinerSnapshot;if(m==null)return;if(m.Connections>0){MessageBox.Show(this,"这台矿机仍在连接，不能删除。请先确认旧 IP 已经离线。","无法删除",MessageBoxButtons.OK,MessageBoxIcon.Warning);return;}if(MessageBox.Show(this,"确定删除矿机 "+m.Ip+" 的历史记录吗？","删除记录",MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return;if(!manager.RemoveMiner(m.Ip)){MessageBox.Show(this,"矿机刚刚重新连接，记录没有删除。","无法删除",MessageBoxButtons.OK,MessageBoxIcon.Warning);return;}RefreshRows();}
     private void Add(string name,string title,int width){grid.Columns.Add(new DataGridViewTextBoxColumn{Name=name,HeaderText=title,Width=width,SortMode=DataGridViewColumnSortMode.Automatic});}
     private void RefreshRows()
     {
