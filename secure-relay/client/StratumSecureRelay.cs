@@ -26,8 +26,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Stratum V3 TLS client for mine-site LAN relaying")]
 [assembly: AssemblyCompany("Stratum V3 Relay")]
 [assembly: AssemblyProduct("木林森中转")]
-[assembly: AssemblyVersion("2.1.3.0")]
-[assembly: AssemblyFileVersion("2.1.3.0")]
+[assembly: AssemblyVersion("2.1.4.0")]
+[assembly: AssemblyFileVersion("2.1.4.0")]
 
 [DataContract]
 public sealed class ServerProfile
@@ -849,7 +849,7 @@ public sealed class ServerEditor : Panel
     private readonly CheckBox enabled=new CheckBox(); private readonly TextBox address=new TextBox(); private readonly NumericUpDown port=new NumericUpDown(); private readonly TextBox serverName=new TextBox(); private readonly TextBox pin=new TextBox(); private readonly TextBox key=new TextBox(); private readonly string profileName;
     public ServerEditor(ServerProfile p)
     {
-        profileName=p.Name; Dock=DockStyle.Fill; TableLayoutPanel grid=new TableLayoutPanel(); grid.Dock=DockStyle.Top; grid.Padding=new Padding(18); grid.ColumnCount=2; grid.RowCount=6; grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,150)); grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
+        profileName=p.Name; Dock=DockStyle.Fill; AutoScroll=true; TableLayoutPanel grid=new TableLayoutPanel(); grid.Dock=DockStyle.Top; grid.AutoSize=true; grid.AutoSizeMode=AutoSizeMode.GrowAndShrink; grid.Padding=new Padding(18); grid.ColumnCount=2; grid.RowCount=6; grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,150)); grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
         enabled.Text="启用这条备用线路"; enabled.Checked=p.Enabled; enabled.AutoSize=true; Add(grid,0,"状态",enabled);
         address.Text=p.Address; Add(grid,1,"VPS 地址",address); port.Minimum=1;port.Maximum=65535;port.Value=Math.Max(1,Math.Min(65535,p.Port));Add(grid,2,"TLS 端口",port);
         serverName.Text=p.ServerName;Add(grid,3,"证书名称（可选）",serverName);pin.Text=p.CertificateSha256;Add(grid,4,"证书 SHA-256（可选）",pin);key.Text=p.SharedKey;key.UseSystemPasswordChar=true;Add(grid,5,"独立共享密钥",key); Controls.Add(grid);

@@ -11,6 +11,21 @@ for file in stratum_secure_server.py stratum_secure_monitor.py secure_relay_clie
   test -f "$file" || { echo "Missing $file" >&2; exit 1; }
 done
 test -f /etc/stratum-v3.json || { echo "Deploy Stratum V3 first: /etc/stratum-v3.json is missing." >&2; exit 1; }
+test -f /etc/stratum-inspector.json || { echo "Deploy Stratum V3 first: /etc/stratum-inspector.json is missing." >&2; exit 1; }
+
+python3 - <<'PY'
+import json
+import sys
+
+path = "/etc/stratum-inspector.json"
+try:
+    relays = json.load(open(path, encoding="utf-8")).get("relays", [])
+except (OSError, ValueError) as exc:
+    raise SystemExit(f"Cannot read {path}: {exc}")
+if not relays or any(not relay.get("proxy_protocol") for relay in relays):
+    raise SystemExit("Stratum V3 source-IP forwarding is not enabled. Re-run monitor-panel/install-v3.sh before installing the secure relay.")
+print("Stratum V3 source-IP forwarding: enabled (PROXY protocol).")
+PY
 
 listen_port=""
 cert_file=""
