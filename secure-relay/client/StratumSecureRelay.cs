@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -17,14 +18,15 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Web.Script.Serialization;
 using Microsoft.Win32;
 
 [assembly: AssemblyTitle("木林森中转")]
 [assembly: AssemblyDescription("Stratum V3 TLS client for mine-site LAN relaying")]
 [assembly: AssemblyCompany("Stratum V3 Relay")]
 [assembly: AssemblyProduct("木林森中转")]
-[assembly: AssemblyVersion("2.0.1.0")]
-[assembly: AssemblyFileVersion("2.0.1.0")]
+[assembly: AssemblyVersion("2.1.1.0")]
+[assembly: AssemblyFileVersion("2.1.1.0")]
 
 [DataContract]
 public sealed class ServerProfile
@@ -162,9 +164,10 @@ public sealed class RelayManager
     private DateTime startedAt;
     private readonly object stateLock = new object();
     private readonly Dictionary<string, EndpointState> endpointStates = new Dictionary<string, EndpointState>();
+    private readonly Dictionary<string, MinerState> miners = new Dictionary<string, MinerState>();
     public bool IsRunning { get { return stop != null; } }
 
-    public RelayManager(Action<string> logger) { log = logger; }
+    public RelayManager(Action<string> logger) { log = logger; LoadMinerHistory(); }
 
     public void Start(AppConfig config, IList<PortRoute> routes)
     {
@@ -217,13 +220,14 @@ public sealed class RelayManager
         Interlocked.Increment(ref totalConnections);
         IPEndPoint endpoint = miner.Client.RemoteEndPoint as IPEndPoint;
         string source = endpoint == null ? "未知矿机" : endpoint.Address + ":" + endpoint.Port;
+        string minerIp = endpoint == null ? "0.0.0.0" : endpoint.Address.ToString();
+        MinerConnection minerState = OpenMiner(minerIp, route);
         TcpClient remote = null;
         SslStream tls = null;
         try {
             miner.NoDelay = true;
             ServerProfile selected = null;
             Exception last = null;
-            string minerIp = endpoint == null ? "0.0.0.0" : endpoint.Address.ToString();
             int minerPort = endpoint == null ? 1 : endpoint.Port;
             foreach (ServerProfile profile in EnabledProfiles(config)) {
                 try {
@@ -236,7 +240,7 @@ public sealed class RelayManager
                     await tls.WriteAsync(requestBytes, 0, requestBytes.Length, cancellation); await tls.FlushAsync(cancellation);
                     string response = await ReadHeader(tls, cancellation);
                     if (!response.StartsWith("HTTP/1.1 200 ", StringComparison.Ordinal)) throw new IOException("VPS 拒绝认证或没有这个转发端口。");
-                    selected = profile; MarkSuccess(profile, 0); break;
+                    selected = profile; MarkSuccess(profile, 0); SetMinerEndpoint(minerState,profile.Name); break;
                 } catch (Exception ex) {
                     last = ex; MarkFailure(profile, FriendlyError(ex));
                     try { if(tls!=null)tls.Dispose(); } catch{} try { if(remote!=null)remote.Close(); } catch{}
@@ -245,20 +249,22 @@ public sealed class RelayManager
             }
             if (selected == null) throw new IOException("主、备用 VPS 都无法连接。" + (last == null ? "" : " " + FriendlyError(last)));
             log(source + " 已通过" + selected.Name + "加密连接，本地 " + route.LocalPort + " → VPS " + route.RemotePort + "；当前连接 " + number);
-            Task up = CopyAndCount(miner.GetStream(), tls, true, cancellation);
-            Task down = CopyAndCount(tls, miner.GetStream(), false, cancellation);
+            Task up = CopyAndCount(miner.GetStream(), tls, true, minerState, cancellation);
+            Task down = CopyAndCount(tls, miner.GetStream(), false, minerState, cancellation);
             await Task.WhenAny(up, down);
             try { miner.Client.Shutdown(SocketShutdown.Both); } catch { }
             try { remote.Client.Shutdown(SocketShutdown.Both); } catch { }
             try { await Task.WhenAll(up, down); } catch { }
         } catch (Exception ex) {
             Interlocked.Increment(ref failedConnections);
+            MinerFailed(minerState,FriendlyError(ex));
             if (!cancellation.IsCancellationRequested) log(source + " 连接失败：" + FriendlyError(ex));
         } finally {
             try { if (tls != null) tls.Dispose(); } catch { }
             try { miner.Close(); } catch { }
             try { if (remote != null) remote.Close(); } catch { }
             int remaining = Interlocked.Decrement(ref active);
+            CloseMiner(minerState);
             log(source + " 已断开；当前连接 " + remaining);
         }
     }
@@ -317,7 +323,7 @@ public sealed class RelayManager
         return result;
     }
 
-    private async Task CopyAndCount(Stream input, Stream output, bool upload, CancellationToken cancellation)
+    private async Task CopyAndCount(Stream input, Stream output, bool upload, MinerConnection connection, CancellationToken cancellation)
     {
         byte[] buffer = new byte[65536];
         while (!cancellation.IsCancellationRequested) {
@@ -325,6 +331,7 @@ public sealed class RelayManager
             if (count <= 0) break;
             await output.WriteAsync(buffer, 0, count, cancellation);
             if (upload) Interlocked.Add(ref uploadedBytes, count); else Interlocked.Add(ref downloadedBytes, count);
+            ObserveMiner(connection,buffer,count,upload);
         }
     }
 
@@ -338,6 +345,44 @@ public sealed class RelayManager
         lock(stateLock) foreach (EndpointState s in endpointStates.Values) value.Endpoints.Add(s.Copy());
         return value;
     }
+
+    private MinerConnection OpenMiner(string ip,PortRoute route)
+    {
+        lock(stateLock) {
+            MinerState state; if(!miners.TryGetValue(ip,out state)){state=new MinerState{Ip=ip,FirstSeen=DateTime.Now,LastActivity=DateTime.Now};miners[ip]=state;}
+            state.Connections++;state.LastActivity=DateTime.Now;state.LocalPorts.Add(route.LocalPort);state.RemotePorts.Add(route.RemotePort);
+            return new MinerConnection{State=state};
+        }
+    }
+    private void SetMinerEndpoint(MinerConnection c,string endpoint){lock(stateLock){c.State.Endpoint=endpoint;c.State.LastActivity=DateTime.Now;}}
+    private void MinerFailed(MinerConnection c,string error){lock(stateLock){c.State.Failures++;c.State.LastError=error;c.State.LastActivity=DateTime.Now;}}
+    private void CloseMiner(MinerConnection c){lock(stateLock){c.State.Connections=Math.Max(0,c.State.Connections-1);c.State.Disconnects++;c.State.LastActivity=DateTime.Now;}}
+    private void ObserveMiner(MinerConnection c,byte[] bytes,int count,bool fromMiner)
+    {
+        lock(stateLock) {
+            c.State.LastActivity=DateTime.Now;if(fromMiner)c.State.Uploaded+=count;else c.State.Downloaded+=count;
+            c.Observe(bytes,count,fromMiner);
+        }
+    }
+    public List<MinerSnapshot> MinerSnapshots()
+    {
+        lock(stateLock){List<MinerSnapshot> result=new List<MinerSnapshot>();foreach(MinerState state in miners.Values)result.Add(state.Snapshot(DateTime.Now));result.Sort(delegate(MinerSnapshot a,MinerSnapshot b){return String.Compare(a.Ip,b.Ip,StringComparison.OrdinalIgnoreCase);});return result;}
+    }
+    public void SaveMinerHistory()
+    {
+        lock(stateLock){try{MinerHistoryStore.Save(miners.Values);}catch(Exception ex){log("矿机历史保存失败："+ex.Message);}}
+    }
+    private void LoadMinerHistory()
+    {
+        try{
+            foreach(MinerHistoryItem item in MinerHistoryStore.Load()){
+                DateTime lastActivity=FromTicks(item.LastActivityTicks);if(lastActivity<DateTime.Now.AddHours(-24))continue;
+                MinerState state=new MinerState{Ip=item.Ip,Connections=0,FirstSeen=FromTicks(item.FirstSeenTicks),LastActivity=lastActivity,LastAccepted=FromTicks(item.LastAcceptedTicks),Disconnects=item.Disconnects,Failures=item.Failures,Submitted=item.Submitted,Accepted=item.Accepted,Rejected=item.Rejected,Uploaded=item.Uploaded,Downloaded=item.Downloaded,LatencyTotal=item.LatencyTotal,LatencySamples=item.LatencySamples,Endpoint=item.Endpoint??"",LastError=item.LastError??""};
+                foreach(string value in item.Workers??new List<string>())state.Workers.Add(value);foreach(string value in item.Agents??new List<string>())state.Agents.Add(value);foreach(int value in item.LocalPorts??new List<int>())state.LocalPorts.Add(value);foreach(ShareHistoryItem share in item.Shares??new List<ShareHistoryItem>())if(share.Time>=DateTime.Now.AddHours(-24))state.Shares.Add(new ShareEvent{Time=share.Time,Difficulty=share.Difficulty});miners[state.Ip]=state;
+            }
+        }catch{}
+    }
+    private static DateTime FromTicks(long ticks){return ticks<=0?DateTime.MinValue:new DateTime(ticks,DateTimeKind.Local);}
 
     private static async Task ConnectWithTimeout(TcpClient client, string host, int port, int timeoutMs)
     {
@@ -374,6 +419,72 @@ public sealed class RelayManager
 [DataContract] public sealed class RelaySnapshot { [DataMember]public bool Running; [DataMember]public int Active; [DataMember]public long Total,Failures,Uploaded,Downloaded; [DataMember]public DateTime StartedAt; [DataMember]public List<EndpointState> Endpoints=new List<EndpointState>(); }
 
 public sealed class TlsConnection { public SslStream Stream; public TcpClient Client; }
+
+public sealed class ShareEvent { public DateTime Time; public double Difficulty; }
+public sealed class PendingShare { public DateTime Time; public double Difficulty; }
+public sealed class MinerState
+{
+    public string Ip="",Endpoint="",LastError=""; public int Connections,Disconnects,Failures,Submitted,Accepted,Rejected; public long Uploaded,Downloaded; public double LatencyTotal; public int LatencySamples; public DateTime FirstSeen,LastActivity,LastAccepted;
+    public readonly HashSet<int> LocalPorts=new HashSet<int>(); public readonly HashSet<int> RemotePorts=new HashSet<int>(); public readonly HashSet<string> Workers=new HashSet<string>(); public readonly HashSet<string> Agents=new HashSet<string>(); public readonly List<ShareEvent> Shares=new List<ShareEvent>();
+    public MinerSnapshot Snapshot(DateTime now)
+    {
+        Shares.RemoveAll(delegate(ShareEvent e){return e.Time<now.AddHours(-24);});
+        double reject=Submitted==0?0:(double)Rejected*100/Submitted; double idle=Math.Max(0,(now-LastActivity).TotalSeconds); int health=100;
+        if(Connections==0)health=0;else{if(idle>120)health-=50;else if(idle>45)health-=15;if(reject>5)health-=30;else if(reject>1)health-=10;if(Failures>0)health-=Math.Min(15,Failures*3);if(LastAccepted!=DateTime.MinValue&&(now-LastAccepted).TotalMinutes>30)health-=15;}
+        health=Math.Max(0,Math.Min(100,health));string text=Connections==0?"离线":health>=85?"健康":health>=60?"注意":"异常";
+        return new MinerSnapshot{Ip=Ip,Health=health,HealthText=text,Connections=Connections,Worker=Join(Workers),Agent=Join(Agents),Endpoint=Endpoint,Ports=JoinPorts(LocalPorts),FirstSeen=FirstSeen,LastActivity=LastActivity,Uploaded=Uploaded,Downloaded=Downloaded,Disconnects=Disconnects,Failures=Failures,Submitted=Submitted,Accepted=Accepted,Rejected=Rejected,RejectPercent=reject,LatencyMs=LatencySamples==0?0:(int)(LatencyTotal/LatencySamples),LastAccepted=LastAccepted,Hashrate10m=Estimate(now,TimeSpan.FromMinutes(10)),Hashrate1h=Estimate(now,TimeSpan.FromHours(1)),Hashrate24h=Estimate(now,TimeSpan.FromHours(24)),LastError=LastError};
+    }
+    private double Estimate(DateTime now,TimeSpan window){DateTime cutoff=now-window;double sum=0;foreach(ShareEvent e in Shares)if(e.Time>=cutoff)sum+=e.Difficulty;double observed=Math.Min(window.TotalSeconds,Math.Max(60,(now-FirstSeen).TotalSeconds));return sum*4294967296.0/observed;}
+    private static string Join(HashSet<string> values){string[] a=new string[values.Count];values.CopyTo(a);return String.Join("，",a);}
+    private static string JoinPorts(HashSet<int> values){List<int>a=new List<int>(values);a.Sort();List<string>s=new List<string>();foreach(int v in a)s.Add(v.ToString());return String.Join(",",s.ToArray());}
+}
+public sealed class MinerSnapshot
+{
+    public string Ip="",HealthText="",Worker="",Agent="",Endpoint="",Ports="",LastError="";public int Health,Connections,Disconnects,Failures,Submitted,Accepted,Rejected,LatencyMs;public long Uploaded,Downloaded;public double RejectPercent,Hashrate10m,Hashrate1h,Hashrate24h;public DateTime FirstSeen,LastActivity,LastAccepted;
+}
+public sealed class MinerConnection
+{
+    public MinerState State; private readonly JavaScriptSerializer json=new JavaScriptSerializer(); private string upBuffer="",downBuffer=""; private double difficulty; private readonly Dictionary<string,PendingShare> pending=new Dictionary<string,PendingShare>();
+    public void Observe(byte[] bytes,int count,bool fromMiner)
+    {
+        string buffer=(fromMiner?upBuffer:downBuffer)+Encoding.UTF8.GetString(bytes,0,count);int lineEnd;
+        while((lineEnd=buffer.IndexOf('\n'))>=0){string line=buffer.Substring(0,lineEnd).Trim();buffer=buffer.Substring(lineEnd+1);if(line.Length>0&&line.Length<1048576)Parse(line,fromMiner);}
+        if(buffer.Length>1048576)buffer="";if(fromMiner)upBuffer=buffer;else downBuffer=buffer;
+    }
+    private void Parse(string line,bool fromMiner)
+    {
+        Dictionary<string,object> message;try{message=json.DeserializeObject(line) as Dictionary<string,object>;}catch{return;}if(message==null)return;
+        object methodValue;string method=message.TryGetValue("method",out methodValue)&&methodValue!=null?methodValue.ToString():"";IList parameters=Parameters(message);
+        if(fromMiner){
+            if(method=="mining.subscribe"&&parameters.Count>0&&parameters[0]!=null)State.Agents.Add(parameters[0].ToString());
+            else if(method=="mining.authorize"&&parameters.Count>0&&parameters[0]!=null)State.Workers.Add(parameters[0].ToString());
+            else if(method=="mining.submit"&&parameters.Count>0){State.Submitted++;if(parameters[0]!=null)State.Workers.Add(parameters[0].ToString());object id;if(message.TryGetValue("id",out id))pending[json.Serialize(id)]=new PendingShare{Time=DateTime.UtcNow,Difficulty=difficulty};}
+            return;
+        }
+        if(method=="mining.set_difficulty"&&parameters.Count>0){double value;if(Double.TryParse(Convert.ToString(parameters[0],System.Globalization.CultureInfo.InvariantCulture),System.Globalization.NumberStyles.Float,System.Globalization.CultureInfo.InvariantCulture,out value))difficulty=value;return;}
+        object responseId;if(!message.TryGetValue("id",out responseId))return;PendingShare share;if(!pending.TryGetValue(json.Serialize(responseId),out share))return;pending.Remove(json.Serialize(responseId));
+        object result,error;bool accepted=message.TryGetValue("result",out result)&&result is bool&&(bool)result&&(!message.TryGetValue("error",out error)||error==null);double latency=(DateTime.UtcNow-share.Time).TotalMilliseconds;State.LatencyTotal+=latency;State.LatencySamples++;
+        if(accepted){State.Accepted++;State.LastAccepted=DateTime.Now;State.Shares.Add(new ShareEvent{Time=DateTime.Now,Difficulty=share.Difficulty});State.LastError="";}else{State.Rejected++;State.LastError="Share 被矿池拒绝";}
+    }
+    private static IList Parameters(Dictionary<string,object> message){object value;if(message.TryGetValue("params",out value)&&value is IList)return (IList)value;return new object[0];}
+}
+
+[DataContract] public sealed class MinerHistoryFile { [DataMember]public List<MinerHistoryItem> Miners=new List<MinerHistoryItem>(); }
+[DataContract] public sealed class ShareHistoryItem { [DataMember]public DateTime Time;[DataMember]public double Difficulty; }
+[DataContract] public sealed class MinerHistoryItem
+{
+    [DataMember]public string Ip="",Endpoint="",LastError="";[DataMember]public int Disconnects,Failures,Submitted,Accepted,Rejected,LatencySamples;[DataMember]public long Uploaded,Downloaded,FirstSeenTicks,LastActivityTicks,LastAcceptedTicks;[DataMember]public double LatencyTotal;[DataMember]public List<int> LocalPorts=new List<int>();[DataMember]public List<string> Workers=new List<string>(),Agents=new List<string>();[DataMember]public List<ShareHistoryItem> Shares=new List<ShareHistoryItem>();
+}
+public static class MinerHistoryStore
+{
+    public static readonly string FilePath=Path.Combine(ConfigStore.Folder,"miner-history.json");
+    public static void Save(IEnumerable<MinerState> states)
+    {
+        DateTime cutoff=DateTime.Now.AddHours(-24);MinerHistoryFile file=new MinerHistoryFile();foreach(MinerState s in states){if(s.LastActivity<cutoff)continue;MinerHistoryItem item=new MinerHistoryItem{Ip=s.Ip,Endpoint=s.Endpoint,LastError=s.LastError,Disconnects=s.Disconnects,Failures=s.Failures,Submitted=s.Submitted,Accepted=s.Accepted,Rejected=s.Rejected,LatencySamples=s.LatencySamples,Uploaded=s.Uploaded,Downloaded=s.Downloaded,LatencyTotal=s.LatencyTotal,FirstSeenTicks=s.FirstSeen.Ticks,LastActivityTicks=s.LastActivity.Ticks,LastAcceptedTicks=s.LastAccepted.Ticks,LocalPorts=new List<int>(s.LocalPorts),Workers=new List<string>(s.Workers),Agents=new List<string>(s.Agents)};foreach(ShareEvent e in s.Shares)if(e.Time>=cutoff)item.Shares.Add(new ShareHistoryItem{Time=e.Time,Difficulty=e.Difficulty});file.Miners.Add(item);}
+        Directory.CreateDirectory(ConfigStore.Folder);string temporary=FilePath+".tmp";using(FileStream stream=File.Create(temporary))new DataContractJsonSerializer(typeof(MinerHistoryFile)).WriteObject(stream,file);if(File.Exists(FilePath))File.Replace(temporary,FilePath,null);else File.Move(temporary,FilePath);
+    }
+    public static List<MinerHistoryItem> Load(){try{using(FileStream stream=File.OpenRead(FilePath)){MinerHistoryFile file=(MinerHistoryFile)new DataContractJsonSerializer(typeof(MinerHistoryFile)).ReadObject(stream);return file.Miners??new List<MinerHistoryItem>();}}catch{return new List<MinerHistoryItem>();}}
+}
 
 public static class NetworkHelper
 {
@@ -434,6 +545,7 @@ public sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer statusTimer = new System.Windows.Forms.Timer();
     private readonly Label status = new Label();
     private List<ServerProfile> backupProfiles = new List<ServerProfile>();
+    private int statusTicks;
     private bool exiting;
 
     public MainForm()
@@ -505,10 +617,11 @@ public sealed class MainForm : Form
         buttons.Dock = DockStyle.Top; buttons.Height = 52; buttons.Padding = new Padding(180, 6, 0, 0);
         Button save = new Button(); save.Text = "保存设置"; save.AutoSize = true; save.Click += delegate { SaveConfig(true); };
         Button backups = new Button(); backups.Text = "备用 VPS 设置"; backups.AutoSize = true; backups.Click += delegate { EditBackups(); };
+        Button miners = new Button(); miners.Text="矿机状态"; miners.AutoSize=true; miners.Click+=delegate{new MinerStatusForm(manager).Show(this);};
         Button help = new Button(); help.Text = "各项说明"; help.AutoSize = true; help.Click += delegate { ShowHelp(); };
         start.Text = "启动中转"; start.AutoSize = true; start.Click += delegate { StartRelay(); };
         stop.Text = "停止"; stop.AutoSize = true; stop.Enabled = false; stop.Click += delegate { manager.Stop(); SetRunning(false); };
-        buttons.Controls.Add(save); buttons.Controls.Add(backups); buttons.Controls.Add(start); buttons.Controls.Add(stop); buttons.Controls.Add(help);
+        buttons.Controls.Add(save); buttons.Controls.Add(backups); buttons.Controls.Add(miners); buttons.Controls.Add(start); buttons.Controls.Add(stop); buttons.Controls.Add(help);
         Controls.Add(buttons); buttons.BringToFront();
 
         status.Text = "状态：未启动"; status.Dock = DockStyle.Top; status.Height = 62; status.Padding = new Padding(18, 7, 18, 4);
@@ -642,6 +755,7 @@ public sealed class MainForm : Form
             "备用 VPS：主 VPS 不通时按顺序自动使用。主 VPS 恢复后，后续新连接自动优先使用主 VPS。\r\n\r\n" +
             "当前局域网 IP：值守电脑在矿机局域网里的地址。\r\n\r\n" +
             "矿机填写地址：已经补全的挖矿地址，选择后可以直接复制到矿机后台。";
+        message += "\r\n\r\n矿机状态：按局域网 IP 合并显示连接、Worker、Share、响应时间和估算算力。双击矿机可查看检修详情。";
         MessageBox.Show(this, message, "各项设置说明", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
@@ -652,6 +766,7 @@ public sealed class MainForm : Form
 
     private void RefreshStatus()
     {
+        if(++statusTicks>=30){statusTicks=0;manager.SaveMinerHistory();}
         RelaySnapshot s=manager.Snapshot();
         string line=s.Running ? "运行中" : "未启动";
         string uptime=s.Running ? FormatDuration(DateTime.Now-s.StartedAt) : "--";
@@ -671,8 +786,31 @@ public sealed class MainForm : Form
     private void OnClosing(object sender, FormClosingEventArgs e)
     {
         if (!exiting && closeToTray.Checked && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); tray.ShowBalloonTip(1500, "木林森中转", "程序仍在后台运行。", ToolTipIcon.Info); return; }
-        ipTimer.Stop(); statusTimer.Stop(); manager.Stop(); tray.Visible = false;
+        ipTimer.Stop(); statusTimer.Stop(); manager.SaveMinerHistory(); manager.Stop(); tray.Visible = false;
     }
+}
+
+public sealed class MinerStatusForm : Form
+{
+    private readonly RelayManager manager; private readonly DataGridView grid=new DataGridView(); private readonly Label summary=new Label(); private readonly System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer();
+    public MinerStatusForm(RelayManager relay)
+    {
+        manager=relay;Text="木林森中转 - 矿机状态";Font=new Font("Microsoft YaHei UI",9F);ClientSize=new Size(1450,620);MinimumSize=new Size(980,500);StartPosition=FormStartPosition.CenterParent;
+        summary.Dock=DockStyle.Top;summary.Height=42;summary.Padding=new Padding(12,11,0,0);summary.BackColor=Color.FromArgb(236,244,252);Controls.Add(summary);
+        grid.Dock=DockStyle.Fill;grid.ReadOnly=true;grid.AllowUserToAddRows=false;grid.AllowUserToDeleteRows=false;grid.AutoSizeRowsMode=DataGridViewAutoSizeRowsMode.AllCells;grid.SelectionMode=DataGridViewSelectionMode.FullRowSelect;grid.RowHeadersVisible=false;grid.BackgroundColor=Color.White;grid.AutoGenerateColumns=false;
+        Add("IP","矿机 IP",110);Add("Health","健康度",80);Add("Connections","连接",55);Add("Worker","矿工名",165);Add("Agent","矿机软件/型号",145);Add("Endpoint","线路",75);Add("Ports","本地端口",90);Add("LastActivity","最近活动",125);Add("Shares","提交/接受/拒绝",115);Add("Reject","拒绝率",65);Add("Latency","响应",65);Add("Hash10","10分钟估算算力",115);Add("Hash1","1小时估算算力",115);Add("Hash24","24小时估算算力",115);Add("Traffic","流量 上/下",110);Add("Disconnects","断线/失败",75);
+        grid.CellDoubleClick+=delegate(object sender,DataGridViewCellEventArgs e){if(e.RowIndex>=0&&grid.Rows[e.RowIndex].Tag is MinerSnapshot)ShowDetail((MinerSnapshot)grid.Rows[e.RowIndex].Tag);};
+        Controls.Add(grid);grid.BringToFront();timer.Interval=2000;timer.Tick+=delegate{RefreshRows();};timer.Start();FormClosed+=delegate{timer.Stop();timer.Dispose();};RefreshRows();
+    }
+    private void Add(string name,string title,int width){grid.Columns.Add(new DataGridViewTextBoxColumn{Name=name,HeaderText=title,Width=width,SortMode=DataGridViewColumnSortMode.Automatic});}
+    private void RefreshRows()
+    {
+        List<MinerSnapshot> items=manager.MinerSnapshots();int online=0,warn=0;grid.Rows.Clear();foreach(MinerSnapshot m in items){if(m.Connections>0)online++;if(m.Health>0&&m.Health<85)warn++;int index=grid.Rows.Add(m.Ip,m.HealthText+" "+m.Health,m.Connections,m.Worker,m.Agent,m.Endpoint,m.Ports,m.LastActivity.ToString("MM-dd HH:mm:ss"),m.Submitted+" / "+m.Accepted+" / "+m.Rejected,m.RejectPercent.ToString("0.00")+"%",m.LatencyMs+" ms",FormatHashrate(m.Hashrate10m),FormatHashrate(m.Hashrate1h),FormatHashrate(m.Hashrate24h),FormatBytes(m.Uploaded)+" / "+FormatBytes(m.Downloaded),m.Disconnects+" / "+m.Failures);DataGridViewRow row=grid.Rows[index];row.Tag=m;if(m.Connections==0)row.DefaultCellStyle.ForeColor=Color.Gray;else if(m.Health<60)row.DefaultCellStyle.BackColor=Color.MistyRose;else if(m.Health<85)row.DefaultCellStyle.BackColor=Color.LemonChiffon;}
+        summary.Text="识别矿机："+items.Count+"    当前在线："+online+"    需要注意："+warn+"    相同 IP 已合并；算力为 Share 滚动估算。双击矿机可查看检修详情。";
+    }
+    private void ShowDetail(MinerSnapshot m){string accepted=m.LastAccepted==DateTime.MinValue?"尚未接受 Share":m.LastAccepted.ToString("yyyy-MM-dd HH:mm:ss");string message="矿机 IP："+m.Ip+"\r\n健康度："+m.HealthText+" "+m.Health+"\r\n当前连接："+m.Connections+"\r\n矿工名："+(m.Worker.Length==0?"尚未识别":m.Worker)+"\r\n矿机软件/型号："+(m.Agent.Length==0?"尚未识别":m.Agent)+"\r\n线路与端口："+m.Endpoint+" / "+m.Ports+"\r\n首次连接："+m.FirstSeen.ToString("yyyy-MM-dd HH:mm:ss")+"\r\n最近活动："+m.LastActivity.ToString("yyyy-MM-dd HH:mm:ss")+"\r\n最近接受："+accepted+"\r\n断线 / 失败："+m.Disconnects+" / "+m.Failures+"\r\n最近错误："+(m.LastError.Length==0?"无":m.LastError);MessageBox.Show(this,message,"矿机检修详情",MessageBoxButtons.OK,MessageBoxIcon.Information);}
+    private static string FormatBytes(long value){string[]u={"B","KB","MB","GB","TB"};double n=value;int i=0;while(n>=1024&&i<u.Length-1){n/=1024;i++;}return n.ToString(i==0?"0":"0.0")+u[i];}
+    private static string FormatHashrate(double value){string[]u={"H/s","KH/s","MH/s","GH/s","TH/s","PH/s","EH/s"};int i=0;while(value>=1000&&i<u.Length-1){value/=1000;i++;}return value<=0?"--":value.ToString(value>=100?"0":value>=10?"0.0":"0.00")+" "+u[i];}
 }
 
 public sealed class BackupForm : Form
