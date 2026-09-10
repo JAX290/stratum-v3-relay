@@ -75,6 +75,14 @@ class SecureServerTests(unittest.TestCase):
             self.assertEqual(state.sites["mine-a"]["active"], 0)
             self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["sites"]["mine-a"]["active"], 0)
 
+    def test_site_state_write_failure_does_not_break_relay_updates(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = secure.SiteState(Path(folder) / "sites.json")
+            with patch.object(secure.tempfile, "mkstemp", side_effect=PermissionError("read-only filesystem")):
+                self.assertFalse(state.write())
+                state.update({"id": "mine-a", "name": "矿场A"}, ("198.51.100.4", 50000), force=True)
+            self.assertEqual(state.sites["mine-a"]["last_ip"], "198.51.100.4")
+
 
 class RelayFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_authenticated_bidirectional_tunnel(self):

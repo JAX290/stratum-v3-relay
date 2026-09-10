@@ -120,6 +120,7 @@ class SiteState:
         self.path = Path(path)
         self.sites = {}
         self.last_write = 0.0
+        self.last_write_error_log = 0.0
         try:
             self.sites = json.loads(self.path.read_text(encoding="utf-8")).get("sites", {})
         except (OSError, ValueError):
@@ -142,18 +143,31 @@ class SiteState:
             self.write()
 
     def write(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(prefix=self.path.name + ".", dir=str(self.path.parent))
+        temporary = None
         try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(prefix=self.path.name + ".", dir=str(self.path.parent))
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump({"updated_at": int(time.time()), "sites": self.sites}, handle, ensure_ascii=False, indent=2)
                 handle.write("\n")
             os.chmod(temporary, 0o640)
             os.replace(temporary, self.path)
             self.last_write = time.time()
+            return True
+        except OSError as exc:
+            # Status persistence is auxiliary. A missing systemd write permission
+            # must never take the mining relay itself offline during an upgrade.
+            now = time.time()
+            if now - self.last_write_error_log >= 60:
+                logging.error("cannot persist relay site state path=%s reason=%s", self.path, exc)
+                self.last_write_error_log = now
+            return False
         finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+            if temporary and os.path.exists(temporary):
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
 
 
 def proxy_header(headers, peer, internal_port):

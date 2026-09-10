@@ -14,7 +14,7 @@ chmod +x install-secure-relay.sh
 ./install-secure-relay.sh --port 452
 ```
 
-`452` 要换成这台 VPS 当前实际使用的 TLS 端口。脚本会保留已有证书、端口路线和客户端密钥。检查结果：
+也可以省略 `--port 452`，脚本会自动读取并保留当前 TLS 端口。脚本会同时更新服务端程序、systemd 权限和状态目录，并保留已有证书、端口路线和客户端密钥。不要只复制单个 Python 文件，否则新程序与旧服务权限可能不匹配。检查结果：
 
 ```bash
 systemctl is-active stratum-secure-relay stratum-secure-monitor

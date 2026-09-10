@@ -12,7 +12,7 @@ for file in stratum_secure_server.py stratum_secure_monitor.py secure_relay_clie
 done
 test -f /etc/stratum-v3.json || { echo "Deploy Stratum V3 first: /etc/stratum-v3.json is missing." >&2; exit 1; }
 
-listen_port=443
+listen_port=""
 cert_file=""
 key_file=""
 while [[ $# -gt 0 ]]; do
@@ -24,6 +24,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -z "$listen_port" ]]; then
+  if [[ -f /etc/stratum-secure-relay.json ]]; then
+    listen_port=$(python3 -c 'import json; print(json.load(open("/etc/stratum-secure-relay.json")).get("listen_port", 443))')
+  else
+    listen_port=443
+  fi
+fi
 [[ "$listen_port" =~ ^[0-9]+$ ]] && ((listen_port >= 1 && listen_port <= 65535)) || { echo "Invalid TLS port." >&2; exit 2; }
 if [[ -z "$cert_file" && -z "$key_file" && -f /etc/stratum-secure-relay.json ]]; then
   mapfile -t existing_tls < <(python3 - <<'PY'
