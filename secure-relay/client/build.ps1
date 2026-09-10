@@ -1,7 +1,7 @@
 param([switch]$TestBuild)
 $ErrorActionPreference = 'Stop'
 $source = Join-Path $PSScriptRoot 'StratumSecureRelay.cs'
-$output = Join-Path $PSScriptRoot $(if ($TestBuild) { '木林森中转2.1.2测试版.exe' } else { '木林森中转.exe' })
+$output = Join-Path $PSScriptRoot $(if ($TestBuild) { '木林森中转2.1.3测试版.exe' } else { '木林森中转.exe' })
 $icon = Join-Path $PSScriptRoot '木林森.ico'
 $compiler = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path -LiteralPath $compiler)) { throw "C# compiler not found: $compiler" }
