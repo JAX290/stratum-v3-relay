@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Security;
@@ -18,15 +17,14 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using System.ServiceProcess;
 using Microsoft.Win32;
 
 [assembly: AssemblyTitle("木林森中转")]
 [assembly: AssemblyDescription("Stratum V3 TLS client for mine-site LAN relaying")]
 [assembly: AssemblyCompany("Stratum V3 Relay")]
 [assembly: AssemblyProduct("木林森中转")]
-[assembly: AssemblyVersion("2.0.0.0")]
-[assembly: AssemblyFileVersion("2.0.0.0")]
+[assembly: AssemblyVersion("2.0.1.0")]
+[assembly: AssemblyFileVersion("2.0.1.0")]
 
 [DataContract]
 public sealed class ServerProfile
@@ -152,80 +150,6 @@ public static class ConfigStore
         try { return Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(value), null, DataProtectionScope.CurrentUser)); }
         catch { return ""; }
     }
-}
-
-public static class ServiceConfigStore
-{
-    public const string ServiceName = "MulinSenSecureRelay";
-    public static readonly string Folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "MulinSenRelay");
-    public static readonly string FilePath = Path.Combine(Folder, "service-config.json");
-    public static readonly string ServiceExe = Path.Combine(Folder, "木林森中转服务.exe");
-    public static AppConfig Load()
-    {
-        using(FileStream stream=File.OpenRead(FilePath)) {
-            AppConfig c=(AppConfig)new DataContractJsonSerializer(typeof(AppConfig)).ReadObject(stream);
-            if(c.Servers==null)c.Servers=new List<ServerProfile>();
-            foreach(ServerProfile p in c.Servers) p.SharedKey=Unprotect(p.ProtectedToken);
-            if(String.IsNullOrWhiteSpace(c.SiteName))c.SiteName=Environment.MachineName;
-            return c;
-        }
-    }
-    public static void Save(AppConfig c)
-    {
-        Directory.CreateDirectory(Folder);
-        foreach(ServerProfile p in c.Servers) p.ProtectedToken=Protect(p.SharedKey??"");
-        string temporary=FilePath+".tmp"; using(FileStream stream=File.Create(temporary))new DataContractJsonSerializer(typeof(AppConfig)).WriteObject(stream,c);
-        if(File.Exists(FilePath))File.Replace(temporary,FilePath,null);else File.Move(temporary,FilePath);
-    }
-    private static string Protect(string value){return Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(value),null,DataProtectionScope.LocalMachine));}
-    private static string Unprotect(string value){try{return Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(value??""),null,DataProtectionScope.LocalMachine));}catch{return "";}}
-    public static bool IsInstalled(){try{using(ServiceController c=new ServiceController(ServiceName)){string x=c.Status.ToString();return true;}}catch{return false;}}
-    public static string Status(){try{using(ServiceController c=new ServiceController(ServiceName))return c.Status==ServiceControllerStatus.Running?"后台服务运行中":"后台服务已安装（"+c.Status+"）";}catch{return "后台服务未安装";}}
-    public static void RunElevated(string argument)
-    {
-        ProcessStartInfo info=new ProcessStartInfo(Application.ExecutablePath,argument);info.UseShellExecute=true;info.Verb="runas";
-        using(Process p=Process.Start(info)){p.WaitForExit();if(p.ExitCode!=0)throw new InvalidOperationException("后台服务操作没有完成，返回代码 "+p.ExitCode+"。");}
-    }
-    public static int InstallOrUpdate()
-    {
-        AppConfig c=ConfigStore.Load(); Save(c); Directory.CreateDirectory(Folder);
-        bool installed=IsInstalled();
-        if(installed) { try { using(ServiceController controller=new ServiceController(ServiceName)){if(controller.Status!=ServiceControllerStatus.Stopped){controller.Stop();controller.WaitForStatus(ServiceControllerStatus.Stopped,TimeSpan.FromSeconds(20));}} } catch{} }
-        File.Copy(Application.ExecutablePath,ServiceExe,true);
-        string definition=" binPath= \"\\\""+ServiceExe+"\\\" --service\" start= auto DisplayName= \"木林森中转后台服务\"";
-        int result=RunSc((installed?"config ":"create ")+ServiceName+definition);
-        if(result!=0)return result;
-        RunSc("description "+ServiceName+" \"矿场 Stratum 加密中转后台服务\"");
-        RunSc("failure "+ServiceName+" reset= 86400 actions= restart/5000/restart/15000/restart/60000");
-        return RunSc("start "+ServiceName);
-    }
-    public static int Remove(){RunSc("stop "+ServiceName);return RunSc("delete "+ServiceName);}
-    private static int RunSc(string args){using(Process p=Process.Start(new ProcessStartInfo(Path.Combine(Environment.SystemDirectory,"sc.exe"),args){UseShellExecute=false,CreateNoWindow=true})){p.WaitForExit();return p.ExitCode;}}
-}
-
-public sealed class RelayWindowsService : ServiceBase
-{
-    private RelayManager manager;
-    private System.Threading.Timer statusTimer;
-    public RelayWindowsService(){ServiceName=ServiceConfigStore.ServiceName;CanStop=true;AutoLog=false;}
-    protected override void OnStart(string[] args)
-    {
-        Directory.CreateDirectory(ServiceConfigStore.Folder);
-        manager=new RelayManager(WriteLog);
-        AppConfig config=ServiceConfigStore.Load();
-        manager.Start(config,PortRoute.Parse(config.Ports));
-        statusTimer=new System.Threading.Timer(delegate{try{ServiceStatusStore.Save(manager.Snapshot());}catch{}},null,0,1000);
-        WriteLog("后台服务已启动。");
-    }
-    protected override void OnStop(){if(statusTimer!=null)statusTimer.Dispose();if(manager!=null)manager.Stop();WriteLog("后台服务已停止。");}
-    private static void WriteLog(string message){try{File.AppendAllText(Path.Combine(ServiceConfigStore.Folder,"service.log"),DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")+"  "+message+Environment.NewLine,Encoding.UTF8);}catch{}}
-}
-
-public static class ServiceStatusStore
-{
-    public static readonly string FilePath=Path.Combine(ServiceConfigStore.Folder,"status.json");
-    public static void Save(RelaySnapshot value){string temporary=FilePath+".tmp";using(FileStream stream=File.Create(temporary))new DataContractJsonSerializer(typeof(RelaySnapshot)).WriteObject(stream,value);if(File.Exists(FilePath))File.Replace(temporary,FilePath,null);else File.Move(temporary,FilePath);}
-    public static RelaySnapshot Load(){try{using(FileStream stream=File.OpenRead(FilePath))return (RelaySnapshot)new DataContractJsonSerializer(typeof(RelaySnapshot)).ReadObject(stream);}catch{return null;}}
 }
 
 public sealed class RelayManager
@@ -503,7 +427,6 @@ public sealed class MainForm : Form
     private readonly ComboBox minerAddress = new ComboBox();
     private readonly Button start = new Button();
     private readonly Button stop = new Button();
-    private readonly Button serviceButton = new Button();
     private readonly TextBox logs = new TextBox();
     private readonly NotifyIcon tray = new NotifyIcon();
     private readonly RelayManager manager;
@@ -542,7 +465,7 @@ public sealed class MainForm : Form
         menu.MenuItems.Add("退出", delegate { exiting = true; Close(); });
         tray.ContextMenu = menu;
         FormClosing += OnClosing;
-        Shown += delegate { if (autoStart.Checked && !ServiceConfigStore.IsInstalled()) StartRelay(); };
+        Shown += delegate { if (autoStart.Checked) StartRelay(); };
     }
 
     private void BuildUi()
@@ -583,10 +506,9 @@ public sealed class MainForm : Form
         Button save = new Button(); save.Text = "保存设置"; save.AutoSize = true; save.Click += delegate { SaveConfig(true); };
         Button backups = new Button(); backups.Text = "备用 VPS 设置"; backups.AutoSize = true; backups.Click += delegate { EditBackups(); };
         Button help = new Button(); help.Text = "各项说明"; help.AutoSize = true; help.Click += delegate { ShowHelp(); };
-        serviceButton.Text="安装后台服务"; serviceButton.AutoSize=true; serviceButton.Click+=delegate { ConfigureService(); };
         start.Text = "启动中转"; start.AutoSize = true; start.Click += delegate { StartRelay(); };
         stop.Text = "停止"; stop.AutoSize = true; stop.Enabled = false; stop.Click += delegate { manager.Stop(); SetRunning(false); };
-        buttons.Controls.Add(save); buttons.Controls.Add(backups); buttons.Controls.Add(start); buttons.Controls.Add(stop); buttons.Controls.Add(serviceButton); buttons.Controls.Add(help);
+        buttons.Controls.Add(save); buttons.Controls.Add(backups); buttons.Controls.Add(start); buttons.Controls.Add(stop); buttons.Controls.Add(help);
         Controls.Add(buttons); buttons.BringToFront();
 
         status.Text = "状态：未启动"; status.Dock = DockStyle.Top; status.Height = 62; status.Padding = new Padding(18, 7, 18, 4);
@@ -688,7 +610,7 @@ public sealed class MainForm : Form
 
     private void StartRelay()
     {
-        try { if(ServiceConfigStore.IsInstalled())throw new InvalidOperationException("后台服务已经接管中转。如需修改，请保存设置后点击“更新后台服务”。"); List<PortRoute> routePorts = ValidateSettings(); SaveConfig(false); manager.Start(CurrentConfig(), routePorts); SetRunning(true); }
+        try { List<PortRoute> routePorts = ValidateSettings(); SaveConfig(false); manager.Start(CurrentConfig(), routePorts); SetRunning(true); }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "无法启动", MessageBoxButtons.OK, MessageBoxIcon.Warning); Log("启动失败：" + ex.Message); }
     }
 
@@ -731,25 +653,14 @@ public sealed class MainForm : Form
     private void RefreshStatus()
     {
         RelaySnapshot s=manager.Snapshot();
-        if(!s.Running && ServiceConfigStore.IsInstalled()) { RelaySnapshot serviceSnapshot=ServiceStatusStore.Load(); if(serviceSnapshot!=null)s=serviceSnapshot; }
         string line=s.Running ? "运行中" : "未启动";
         string uptime=s.Running ? FormatDuration(DateTime.Now-s.StartedAt) : "--";
         List<string> endpoints=new List<string>(); foreach(EndpointState e in s.Endpoints) endpoints.Add(e.Name+":"+(e.Online ? "正常 "+e.LatencyMs+"ms" : "异常"));
-        bool serviceInstalled=ServiceConfigStore.IsInstalled(); string serviceState=ServiceConfigStore.Status(); serviceButton.Text=serviceInstalled?"更新后台服务":"安装后台服务"; start.Enabled=!serviceInstalled&&!manager.IsRunning;
-        status.Text="状态："+line+"    "+serviceState+"    当前矿机："+s.Active+"    累计连接："+s.Total+"    失败："+s.Failures+"    运行："+uptime+"\r\n流量：上传 "+FormatBytes(s.Uploaded)+" / 下载 "+FormatBytes(s.Downloaded)+(endpoints.Count==0 ? "" : "    线路："+String.Join("，",endpoints.ToArray()));
+        start.Enabled=!manager.IsRunning;
+        status.Text="状态："+line+"    当前矿机："+s.Active+"    累计连接："+s.Total+"    失败："+s.Failures+"    运行："+uptime+"\r\n流量：上传 "+FormatBytes(s.Uploaded)+" / 下载 "+FormatBytes(s.Downloaded)+(endpoints.Count==0 ? "" : "    线路："+String.Join("，",endpoints.ToArray()));
     }
     private static string FormatDuration(TimeSpan t){ return ((int)t.TotalDays>0 ? ((int)t.TotalDays)+"天 " : "")+t.Hours.ToString("00")+":"+t.Minutes.ToString("00")+":"+t.Seconds.ToString("00"); }
     private static string FormatBytes(long value){ string[] u={"B","KB","MB","GB","TB"}; double n=value; int i=0; while(n>=1024&&i<u.Length-1){n/=1024;i++;} return n.ToString(i==0?"0":"0.0")+" "+u[i]; }
-
-    private void ConfigureService()
-    {
-        try {
-            ValidateSettings(); SaveConfig(false);
-            if(manager.IsRunning){manager.Stop();SetRunning(false);}
-            ServiceConfigStore.RunElevated("--install-service");
-            Log("后台服务已安装或更新。Windows 会在开机时自动运行，并在异常退出后自动重启。"); RefreshStatus();
-        } catch(Exception ex){MessageBox.Show(this,ex.Message,"后台服务",MessageBoxButtons.OK,MessageBoxIcon.Warning);Log("后台服务操作失败："+ex.Message);}
-    }
 
     private void Log(string message)
     {
@@ -800,10 +711,6 @@ public static class Program
     [STAThread]
     public static void Main()
     {
-        string[] args=Environment.GetCommandLineArgs();
-        if(args.Length>1 && args[1]=="--service") { ServiceBase.Run(new RelayWindowsService()); return; }
-        if(args.Length>1 && args[1]=="--install-service") { try{Environment.ExitCode=ServiceConfigStore.InstallOrUpdate();}catch{Environment.ExitCode=1;} return; }
-        if(args.Length>1 && args[1]=="--remove-service") { try{Environment.ExitCode=ServiceConfigStore.Remove();}catch{Environment.ExitCode=1;} return; }
         bool created;
         using (Mutex single = new Mutex(true, "Local\\MulinSenSecureRelayV2", out created)) {
             if (!created) { MessageBox.Show("木林森中转已经在运行，请查看任务栏右下角托盘。", "木林森中转", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
