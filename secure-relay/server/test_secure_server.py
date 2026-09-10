@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import stratum_secure_server as secure
+import stratum_secure_monitor as monitor
+import secure_relay_clients as credentials
 
 
 class SecureServerTests(unittest.TestCase):
@@ -20,6 +22,22 @@ class SecureServerTests(unittest.TestCase):
         self.assertEqual(port, 9999)
         self.assertEqual(token, "abcdef")
         self.assertEqual(headers["x-miner-ip"], "192.168.1.20")
+
+    def test_health_request(self):
+        port, token, headers = secure.parse_request(
+            b"CONNECT /relay/v2/health HTTP/1.1\r\nAuthorization: Bearer abcdef\r\n\r\n"
+        )
+        self.assertIsNone(port)
+        self.assertEqual(token, "abcdef")
+
+    def test_multiple_client_authentication(self):
+        config = {"clients": [
+            {"id": "mine-a", "name": "矿场A", "token": "a" * 64, "enabled": True},
+            {"id": "mine-b", "name": "矿场B", "token": "b" * 64, "enabled": False},
+        ]}
+        self.assertEqual(secure.authenticate(config, "a" * 64)["id"], "mine-a")
+        with self.assertRaises(PermissionError):
+            secure.authenticate(config, "b" * 64)
 
     def test_route_map_matches_v3_ports_to_internal_endpoint(self):
         config = {
@@ -49,6 +67,14 @@ class SecureServerTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             secure.parse_request(b"CONNECT /relay/v1/9999 HTTP/1.1\r\nHost: relay\r\n\r\n")
 
+    def test_site_state_resets_stale_active_connections(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "sites.json"
+            path.write_text(json.dumps({"sites": {"mine-a": {"id": "mine-a", "active": 9}}}), encoding="utf-8")
+            state = secure.SiteState(path)
+            self.assertEqual(state.sites["mine-a"]["active"], 0)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["sites"]["mine-a"]["active"], 0)
+
 
 class RelayFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_authenticated_bidirectional_tunnel(self):
@@ -63,7 +89,8 @@ class RelayFlowTests(unittest.IsolatedAsyncioTestCase):
 
         upstream = await asyncio.start_server(echo_after_proxy, "127.0.0.1", 0)
         upstream_port = upstream.sockets[0].getsockname()[1]
-        relay = secure.SecureRelay({"token": "a" * 64, "max_connections": 10})
+        relay = secure.SecureRelay({"clients": [{"id": "test", "name": "测试", "token": "a" * 64}], "max_connections": 10,
+                                    "state_file": str(Path(tempfile.gettempdir()) / "stratum-secure-test-state.json")})
         with patch.object(secure, "route_map", return_value={9999: upstream_port}):
             ingress = await asyncio.start_server(relay.handle, "127.0.0.1", 0)
             ingress_port = ingress.sockets[0].getsockname()[1]
@@ -85,6 +112,41 @@ class RelayFlowTests(unittest.IsolatedAsyncioTestCase):
             upstream.close()
             await ingress.wait_closed()
             await upstream.wait_closed()
+
+
+class MonitorTests(unittest.TestCase):
+    def test_offline_and_recovery_transitions(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = root / "config.json"
+            state = root / "sites.json"
+            monitor_state = root / "monitor.json"
+            config.write_text(json.dumps({"offline_after_seconds": 60, "clients": [
+                {"id": "mine-a", "name": "矿场A", "enabled": True, "alert_enabled": True}
+            ]}), encoding="utf-8")
+            state.write_text(json.dumps({"sites": {"mine-a": {"last_seen": 100}}}), encoding="utf-8")
+            monitor_state.write_text(json.dumps({"started_at": 0, "clients": {"mine-a": "online"}}), encoding="utf-8")
+            with patch.object(monitor, "CONFIG_FILE", config), patch.object(monitor, "STATE_FILE", state), patch.object(monitor, "MONITOR_FILE", monitor_state):
+                events = monitor.check_once(now=200)
+                self.assertEqual(len(events), 1)
+                self.assertIn("离线", events[0])
+                state.write_text(json.dumps({"sites": {"mine-a": {"last_seen": 205}}}), encoding="utf-8")
+                events = monitor.check_once(now=210)
+                self.assertEqual(len(events), 1)
+                self.assertIn("恢复", events[0])
+
+
+class CredentialTests(unittest.TestCase):
+    def test_legacy_token_migrates_without_changing_secret(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "config.json"
+            path.write_text(json.dumps({"token": "a" * 64}), encoding="utf-8")
+            with patch.object(credentials, "CONFIG_FILE", path):
+                data = credentials.load()
+                self.assertNotIn("token", data)
+                self.assertEqual(data["clients"][0]["token"], "a" * 64)
+                credentials.save(data)
+                self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["clients"][0]["id"], "default")
 
 
 if __name__ == "__main__":

@@ -14,6 +14,8 @@ import logging
 import os
 import signal
 import ssl
+import tempfile
+import time
 from pathlib import Path
 
 
@@ -21,16 +23,21 @@ CONFIG_FILE = Path(os.getenv("SECURE_RELAY_CONFIG", "/etc/stratum-secure-relay.j
 V3_CONFIG_FILE = Path(os.getenv("V3_CONFIG_FILE", "/etc/stratum-v3.json"))
 MAX_HEADER = 8192
 INTERNAL_START = 20000
+DEFAULT_STATE_FILE = Path("/var/lib/stratum-secure-relay/sites.json")
 
 
 def load_config():
     data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    required = ("listen_host", "listen_port", "certificate", "private_key", "token")
+    required = ("listen_host", "listen_port", "certificate", "private_key")
     missing = [name for name in required if not data.get(name)]
     if missing:
         raise ValueError("missing secure relay settings: " + ", ".join(missing))
-    if len(str(data["token"])) < 32:
-        raise ValueError("secure relay token must contain at least 32 characters")
+    clients = data.get("clients") or []
+    if not clients and data.get("token"):
+        clients = [{"id": "default", "name": "默认矿场", "token": data["token"], "enabled": True}]
+    if not clients or any(len(str(item.get("token", ""))) < 32 for item in clients):
+        raise ValueError("at least one secure relay client token is required")
+    data["clients"] = clients
     return data
 
 
@@ -89,13 +96,64 @@ def parse_request(raw):
             raise ValueError("invalid header")
         headers[name.strip().lower()] = value.strip()
     prefix = "/relay/v1/"
-    if not request[1].startswith(prefix):
+    if request[1] == "/relay/v2/health":
+        port = None
+    elif request[1].startswith(prefix):
+        port = int(request[1][len(prefix):])
+    else:
         raise ValueError("invalid path")
-    port = int(request[1][len(prefix):])
     authorization = headers.get("authorization", "")
     if not authorization.startswith("Bearer "):
         raise PermissionError("missing token")
     return port, authorization[7:], headers
+
+
+def authenticate(config, supplied_token):
+    for client in config.get("clients", []):
+        if client.get("enabled", True) and hmac.compare_digest(str(client.get("token", "")), supplied_token):
+            return {"id": str(client.get("id", "default")), "name": str(client.get("name", client.get("id", "默认矿场")))}
+    raise PermissionError("invalid token")
+
+
+class SiteState:
+    def __init__(self, path):
+        self.path = Path(path)
+        self.sites = {}
+        self.last_write = 0.0
+        try:
+            self.sites = json.loads(self.path.read_text(encoding="utf-8")).get("sites", {})
+        except (OSError, ValueError):
+            pass
+        # A previous process may have been killed before decrementing its counters.
+        # Every connection in a new process starts from zero.
+        for site in self.sites.values():
+            site["active"] = 0
+        if self.sites:
+            self.write()
+
+    def update(self, client, peer, active_delta=0, force=False):
+        now = time.time()
+        site = self.sites.setdefault(client["id"], {"id": client["id"], "name": client["name"], "active": 0})
+        site["name"] = client["name"]
+        site["last_seen"] = int(now)
+        site["last_ip"] = str(peer[0])
+        site["active"] = max(0, int(site.get("active", 0)) + active_delta)
+        if force or now - self.last_write >= 5:
+            self.write()
+
+    def write(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=self.path.name + ".", dir=str(self.path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump({"updated_at": int(time.time()), "sites": self.sites}, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+            os.chmod(temporary, 0o640)
+            os.replace(temporary, self.path)
+            self.last_write = time.time()
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
 
 def proxy_header(headers, peer, internal_port):
@@ -120,20 +178,32 @@ def proxy_header(headers, peer, internal_port):
 class SecureRelay:
     def __init__(self, config):
         self.config = config
-        self.token = str(config["token"])
         self.semaphore = asyncio.Semaphore(int(config.get("max_connections", 1000)))
+        self.state = SiteState(config.get("state_file", str(DEFAULT_STATE_FILE)))
+
+    def current_config(self):
+        try:
+            return load_config()
+        except (OSError, ValueError):
+            return self.config
 
     async def handle(self, reader, writer):
         peer = writer.get_extra_info("peername") or ("0.0.0.0", 1)
         upstream_writer = None
+        client = None
+        active_counted = False
         async with self.semaphore:
             try:
                 raw = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=10)
                 if len(raw) > MAX_HEADER:
                     raise ValueError("header too large")
                 port, supplied_token, headers = parse_request(raw)
-                if not hmac.compare_digest(supplied_token, self.token):
-                    raise PermissionError("invalid token")
+                client = authenticate(self.current_config(), supplied_token)
+                self.state.update(client, peer)
+                if port is None:
+                    writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                    await writer.drain()
+                    return
                 internal_port = route_map().get(port)
                 if not internal_port:
                     raise ValueError("route is not enabled")
@@ -144,7 +214,9 @@ class SecureRelay:
                 await upstream_writer.drain()
                 writer.write(b"HTTP/1.1 200 Connection Established\r\nContent-Length: 0\r\n\r\n")
                 await writer.drain()
-                logging.info("relay connected source=%s miner=%s port=%s", peer[0], headers.get("x-miner-ip", "?"), port)
+                self.state.update(client, peer, active_delta=1, force=True)
+                active_counted = True
+                logging.info("relay connected client=%s source=%s miner=%s port=%s", client["id"], peer[0], headers.get("x-miner-ip", "?"), port)
                 tasks = (asyncio.create_task(pipe(reader, upstream_writer)),
                          asyncio.create_task(pipe(upstream_reader, writer)))
                 done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -158,6 +230,8 @@ class SecureRelay:
             except (ValueError, OSError, ssl.SSLError, asyncio.TimeoutError, asyncio.IncompleteReadError) as exc:
                 logging.info("connection closed source=%s reason=%s", peer[0], exc)
             finally:
+                if active_counted and client:
+                    self.state.update(client, peer, active_delta=-1, force=True)
                 await close_writer(upstream_writer)
                 await close_writer(writer)
 
