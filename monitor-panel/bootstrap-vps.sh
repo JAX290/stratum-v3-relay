@@ -8,7 +8,7 @@ fi
 
 cd "$(dirname "$0")"
 
-for file in install-v3.sh v3-config.json v3_manager.py endpoint_monitor.py security_monitor.py stratum_inspector.py stratum_admin_v3.py templates/v3_dashboard.html static/v3.css; do
+for file in install-v3.sh v3-config.json v3_manager.py endpoint_monitor.py security_monitor.py stratum_inspector.py stratum_admin_v3.py reset-panel-password.sh templates/v3_dashboard.html static/v3.css; do
   test -f "./$file" || { echo "Missing $file" >&2; exit 1; }
 done
 
@@ -17,19 +17,26 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy python3-flask python3-
 
 if [[ ! -f /etc/stratum-admin.env ]]; then
   while true; do
-    read -r -s -p "Set admin panel password, at least 12 characters: " PANEL_PASSWORD
+    read -r -s -p "Set emergency panel password (at least 12 characters), or leave empty for Tailscale-only access: " PANEL_PASSWORD
     echo
+    if [[ -z "$PANEL_PASSWORD" ]]; then
+      break
+    fi
     if [[ ${#PANEL_PASSWORD} -ge 12 ]]; then
       break
     fi
     echo "Password is too short." >&2
   done
-  PASSWORD_HASH=$(PANEL_PASSWORD="$PANEL_PASSWORD" python3 - <<'PY'
+  if [[ -n "$PANEL_PASSWORD" ]]; then
+    PASSWORD_HASH=$(PANEL_PASSWORD="$PANEL_PASSWORD" python3 - <<'PY'
 import os
 from werkzeug.security import generate_password_hash
 print(generate_password_hash(os.environ["PANEL_PASSWORD"]))
 PY
 )
+  else
+    PASSWORD_HASH=""
+  fi
   SECRET_KEY=$(python3 - <<'PY'
 import secrets
 print(secrets.token_hex(32))
@@ -39,8 +46,13 @@ PY
   cat >/etc/stratum-admin.env <<EOF
 PANEL_SECRET_KEY=$SECRET_KEY
 PANEL_PASSWORD_HASH=$PASSWORD_HASH
+TAILSCALE_AUTO_LOGIN=1
 EOF
   chmod 600 /etc/stratum-admin.env
+fi
+
+if ! grep -q '^TAILSCALE_AUTO_LOGIN=' /etc/stratum-admin.env; then
+  echo 'TAILSCALE_AUTO_LOGIN=1' >>/etc/stratum-admin.env
 fi
 
 if [[ ! -f /etc/stratum-v3.env ]]; then

@@ -48,6 +48,30 @@ app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict"
 store = ConfigStore(CONFIG_FILE, HISTORY_DIR, AUDIT_FILE)
 
 
+def tailscale_identity():
+    """Trust identity headers only from the local Tailscale Serve reverse proxy."""
+    if os.getenv("TAILSCALE_AUTO_LOGIN", "1").lower() not in {"1", "true", "yes", "on"}:
+        return ""
+    if request.remote_addr not in {"127.0.0.1", "::1"}:
+        return ""
+    login_name = request.headers.get("Tailscale-User-Login", "").strip().lower()
+    if not login_name:
+        return ""
+    allowed = {value.strip().lower() for value in os.getenv("TAILSCALE_ALLOWED_USERS", "").split(",") if value.strip()}
+    if allowed and login_name not in allowed:
+        return ""
+    return login_name
+
+
+@app.before_request
+def tailscale_auto_login():
+    identity = tailscale_identity()
+    if identity:
+        session["authenticated"] = True
+        session["tailscale_identity"] = identity
+        session.setdefault("csrf", secrets.token_urlsafe(24))
+
+
 def load_json(path, fallback):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -297,7 +321,7 @@ def csrf_ok():
 
 
 def actor():
-    return request.remote_addr or "panel"
+    return session.get("tailscale_identity") or request.remote_addr or "panel"
 
 
 def service_state(name):
@@ -644,6 +668,8 @@ pre{margin:8px 0 0;background:#101a20;color:#dce8ee;border-radius:6px;padding:13
 @app.route("/login", methods=["GET", "POST"])
 def login():
     error = None
+    if request.method == "GET" and session.get("tailscale_identity"):
+        return redirect(url_for("index"))
     if request.method == "POST":
         expected = os.environ.get("PANEL_PASSWORD_HASH", "")
         if expected and check_password_hash(expected, request.form.get("password", "")):

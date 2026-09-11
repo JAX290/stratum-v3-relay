@@ -38,7 +38,7 @@ chmod +x bootstrap-vps.sh
 
 部署时脚本会要求设置：
 
-- 管理面板密码；
+- 应急管理密码，可留空；
 - 企业微信机器人 Webhook，可跳过；
 - V3 服务、HAProxy、报警服务和管理面板自启动。
 
@@ -65,6 +65,7 @@ tailscale serve status
 ```
 
 手机登录同一个 Tailscale 账号后，打开 `tailscale serve status` 显示的 `https://...ts.net/` 地址。
+通过 Tailscale Serve 访问会自动验证 Tailscale 身份，无需再次输入面板密码。忘记应急密码时执行 `/opt/stratum-admin/reset-panel-password.sh`。
 
 ## 不要提交的内容
 

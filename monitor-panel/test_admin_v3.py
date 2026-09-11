@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -179,6 +180,24 @@ class AdminV3Test(unittest.TestCase):
         for page in ("overview", "miners", "routes", "alerts", "settings", "logs"):
             response = self.client.get("/" + page)
             self.assertEqual(response.status_code, 200, page)
+
+    def test_tailscale_identity_can_log_in_without_panel_password(self):
+        with self.client.session_transaction() as session:
+            session.clear()
+        with patch.dict(os.environ, {"TAILSCALE_AUTO_LOGIN": "1", "TAILSCALE_ALLOWED_USERS": "owner@example.com"}):
+            response = self.client.get("/overview", headers={"Tailscale-User-Login": "owner@example.com"})
+            self.assertEqual(response.status_code, 200)
+            with self.client.session_transaction() as session:
+                self.assertEqual(session["tailscale_identity"], "owner@example.com")
+
+    def test_tailscale_header_is_rejected_from_nonlocal_connection(self):
+        with self.client.session_transaction() as session:
+            session.clear()
+        with patch.dict(os.environ, {"TAILSCALE_AUTO_LOGIN": "1"}):
+            response = self.client.get("/overview", headers={"Tailscale-User-Login": "owner@example.com"},
+                environ_base={"REMOTE_ADDR": "192.0.2.10"})
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/login", response.headers["Location"])
 
     def test_same_worker_from_multiple_routes_is_merged(self):
         config = admin.store.load()

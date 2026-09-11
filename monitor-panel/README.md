@@ -167,6 +167,26 @@ https://xxxxx.ts.net/
 
 手机安装 Tailscale 并登录同一个账号后，打开这个地址即可进入面板。
 
+通过 Tailscale Serve 进入时，面板会使用 Tailscale 已验证的用户身份自动登录，不再询问面板密码。SSH 隧道访问仍可使用应急密码。如果只允许指定的 Tailscale 账号免密码登录，可在 `/etc/stratum-admin.env` 增加：
+
+```text
+TAILSCALE_ALLOWED_USERS=你的Tailscale登录邮箱
+```
+
+多个账号用英文逗号分隔，修改后执行 `systemctl restart stratum-admin`。
+
+忘记应急密码时，在 VPS 中执行：
+
+```bash
+/opt/stratum-admin/reset-panel-password.sh
+```
+
+根据提示输入两次新密码即可。若确认以后只通过 Tailscale 管理，也可以关闭密码登录：
+
+```bash
+/opt/stratum-admin/reset-panel-password.sh --disable-password
+```
+
 ## GitHub 仓库维护建议
 
 建议只提交 `README.md` 和 `monitor-panel/` 目录，不要提交外层目录里的压缩包、备份、迁移包、本地测试页面等文件。

@@ -31,6 +31,7 @@ DEFAULT_PATHS = [
     "/opt/stratum-admin/security_monitor.py",
     "/opt/stratum-admin/stratum_admin_v3.py",
     "/opt/stratum-admin/route_switch_monitor.py",
+    "/opt/stratum-admin/reset-panel-password.sh",
     "/opt/stratum-admin/templates/v3_dashboard.html",
     "/opt/stratum-admin/static/v3.css",
 ]
