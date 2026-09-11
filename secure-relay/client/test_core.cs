@@ -16,6 +16,8 @@ public static class ClientCoreTests
         AppConfig legacy=new AppConfig{ServerAddress="192.0.2.1",ServerPort=452,SiteName="测试矿场"};legacy.Normalize();
         Check(legacy.Servers.Count>=3&&legacy.Servers[0].Address=="192.0.2.1"&&legacy.Servers[0].Port==452,"legacy config migration");
         Check(!legacy.Servers[1].Enabled&&!legacy.Servers[2].Enabled,"backup defaults disabled");
+        Check(legacy.HealthCheckMinutes==5,"health check interval defaults to five minutes");
+        legacy.HealthCheckMinutes=0;legacy.Normalize();Check(legacy.HealthCheckMinutes==5,"invalid health interval is repaired");
         AppConfig live=new AppConfig();live.Servers.Add(new ServerProfile{Name="主VPS",SharedKey="abcdef0123456789abcdef0123456789"});live.Normalize();
         Check(live.Servers[0].SharedKey=="abcdef0123456789abcdef0123456789","in-memory key preserved before save");
         MinerState miner=new MinerState{Ip="192.168.1.20",Connections=1,FirstSeen=DateTime.Now.AddMinutes(-10),LastActivity=DateTime.Now};

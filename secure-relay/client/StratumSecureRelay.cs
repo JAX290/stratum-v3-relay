@@ -26,8 +26,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Stratum V3 TLS client for mine-site LAN relaying")]
 [assembly: AssemblyCompany("Stratum V3 Relay")]
 [assembly: AssemblyProduct("木林森中转")]
-[assembly: AssemblyVersion("2.1.4.0")]
-[assembly: AssemblyFileVersion("2.1.4.0")]
+[assembly: AssemblyVersion("2.1.5.0")]
+[assembly: AssemblyFileVersion("2.1.5.0")]
 
 [DataContract]
 public sealed class ServerProfile
@@ -87,15 +87,17 @@ public sealed class AppConfig
     [DataMember] public string Ports = "9999,10001,10002,10010,10011,10012,10020,10021,10022,10030,10031,10032,11001,11002,11003,11101,11102,11103,11201,11202,11203,11301,11302,11303";
     [DataMember] public bool AutoStart = false;
     [DataMember] public bool CloseToTray = true;
+    [DataMember] public int HealthCheckMinutes = 5;
     [DataMember] public string SiteName = "";
     [DataMember] public List<ServerProfile> Servers = new List<ServerProfile>();
 
     [OnDeserializing]
-    private void BeforeDeserialize(StreamingContext context) { CloseToTray = true; }
+    private void BeforeDeserialize(StreamingContext context) { CloseToTray = true; HealthCheckMinutes = 5; }
 
     public void Normalize()
     {
         if (String.IsNullOrWhiteSpace(SiteName)) SiteName = Environment.MachineName;
+        if (HealthCheckMinutes < 1 || HealthCheckMinutes > 1440) HealthCheckMinutes = 5;
         if (Servers == null) Servers = new List<ServerProfile>();
         if (Servers.Count == 0) {
             Servers.Add(new ServerProfile { Name="主VPS", Enabled=true, Address=ServerAddress, Port=ServerPort,
@@ -300,20 +302,31 @@ public sealed class RelayManager
     {
         while (!cancellation.IsCancellationRequested) {
             foreach (ServerProfile profile in EnabledProfiles(config)) {
-                DateTime begin = DateTime.UtcNow;
                 try {
-                    TlsConnection connection = await OpenTls(profile, 5000);
-                    using (connection.Client) using (SslStream tls = connection.Stream) {
-                        string host = String.IsNullOrWhiteSpace(profile.ServerName) ? profile.Address : profile.ServerName.Trim();
-                        byte[] bytes = Encoding.ASCII.GetBytes("CONNECT /relay/v2/health HTTP/1.1\r\nHost: " + host + "\r\nAuthorization: Bearer " + profile.SharedKey + "\r\nX-Site-Name: " + SafeHeader(config.SiteName) + "\r\n\r\n");
-                        await tls.WriteAsync(bytes, 0, bytes.Length, cancellation); await tls.FlushAsync(cancellation);
-                        string response = await ReadHeader(tls, cancellation);
-                        if (!response.StartsWith("HTTP/1.1 200 ", StringComparison.Ordinal)) throw new IOException("认证失败");
-                    }
-                    MarkSuccess(profile, (int)(DateTime.UtcNow - begin).TotalMilliseconds);
-                } catch (Exception ex) { if (!cancellation.IsCancellationRequested) MarkFailure(profile, FriendlyError(ex)); }
+                    await TestProfileAsync(profile, config.SiteName, cancellation);
+                } catch { }
             }
-            try { await Task.Delay(30000, cancellation); } catch { break; }
+            try { await Task.Delay(TimeSpan.FromMinutes(config.HealthCheckMinutes), cancellation); } catch { break; }
+        }
+    }
+
+    public async Task<EndpointState> TestProfileAsync(ServerProfile profile, string siteName, CancellationToken cancellation)
+    {
+        DateTime begin = DateTime.UtcNow;
+        try {
+            TlsConnection connection = await OpenTls(profile, 8000);
+            using (connection.Client) using (SslStream tls = connection.Stream) {
+                string host = String.IsNullOrWhiteSpace(profile.ServerName) ? profile.Address : profile.ServerName.Trim();
+                byte[] bytes = Encoding.ASCII.GetBytes("CONNECT /relay/v2/health HTTP/1.1\r\nHost: " + host + "\r\nAuthorization: Bearer " + profile.SharedKey + "\r\nX-Site-Name: " + SafeHeader(siteName) + "\r\n\r\n");
+                await tls.WriteAsync(bytes, 0, bytes.Length, cancellation); await tls.FlushAsync(cancellation);
+                string response = await ReadHeader(tls, cancellation);
+                if (!response.StartsWith("HTTP/1.1 200 ", StringComparison.Ordinal)) throw new IOException("VPS拒绝认证，请检查共享密钥和服务版本。");
+            }
+            MarkSuccess(profile, (int)(DateTime.UtcNow - begin).TotalMilliseconds);
+            return GetStateCopy(profile);
+        } catch (Exception ex) {
+            string message = FriendlyError(ex); MarkFailure(profile, message);
+            throw new IOException(message, ex);
         }
     }
 
@@ -339,6 +352,7 @@ public sealed class RelayManager
     private void MarkSuccess(ServerProfile p, int latency) { lock(stateLock) { EndpointState s=GetState(p); s.Online=true; s.LatencyMs=latency; s.LastError=""; s.LastCheck=DateTime.Now; } }
     private void MarkFailure(ServerProfile p, string error) { lock(stateLock) { EndpointState s=GetState(p); s.Online=false; s.Failures++; s.LastError=error; s.LastCheck=DateTime.Now; } }
     private EndpointState GetState(ServerProfile p) { EndpointState s; if (!endpointStates.TryGetValue(p.Name, out s)) { s=new EndpointState{Name=p.Name}; endpointStates[p.Name]=s; } return s; }
+    private EndpointState GetStateCopy(ServerProfile p) { lock(stateLock) { return GetState(p).Copy(); } }
 
     public RelaySnapshot Snapshot()
     {
@@ -536,6 +550,7 @@ public sealed class MainForm : Form
     private readonly TextBox siteName = new TextBox();
     private readonly TextBox server = new TextBox();
     private readonly NumericUpDown tlsPort = new NumericUpDown();
+    private readonly NumericUpDown healthCheckMinutes = new NumericUpDown();
     private readonly TextBox serverName = new TextBox();
     private readonly TextBox pin = new TextBox();
     private readonly TextBox token = new TextBox();
@@ -547,6 +562,7 @@ public sealed class MainForm : Form
     private readonly ComboBox minerAddress = new ComboBox();
     private readonly Button start = new Button();
     private readonly Button stop = new Button();
+    private readonly Button testPrimary = new Button();
     private readonly TextBox logs = new TextBox();
     private readonly NotifyIcon tray = new NotifyIcon();
     private readonly RelayManager manager;
@@ -561,7 +577,7 @@ public sealed class MainForm : Form
     {
         Text = "木林森中转";
         Font = new Font("Microsoft YaHei UI", 9F);
-        ClientSize = new Size(820, 820);
+        ClientSize = new Size(820, 856);
         MinimumSize = new Size(760, 720);
         StartPosition = FormStartPosition.CenterScreen;
         manager = new RelayManager(Log);
@@ -592,13 +608,14 @@ public sealed class MainForm : Form
     private void BuildUi()
     {
         TableLayoutPanel grid = new TableLayoutPanel();
-        grid.Dock = DockStyle.Top; grid.Height = 462; grid.Padding = new Padding(18, 14, 18, 4);
-        grid.ColumnCount = 2; grid.RowCount = 12;
+        grid.Dock = DockStyle.Top; grid.Height = 498; grid.Padding = new Padding(18, 14, 18, 4);
+        grid.ColumnCount = 2; grid.RowCount = 13;
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 165));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (int i=0; i<12; i++) grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        for (int i=0; i<13; i++) grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         AddRow(grid, 0, "矿场名称", siteName, "例如 一号矿场；用于心跳和离线告警识别");
-        AddRow(grid, 1, "主 VPS 地址", server, "例如 203.0.113.10");
+        testPrimary.Text = "测试主VPS"; testPrimary.AutoSize = true; testPrimary.Click += delegate { TestPrimary(); };
+        AddRow(grid, 1, "主 VPS 地址", InlineControls(server, testPrimary), "填写后可测试完整的TCP、TLS证书和共享密钥认证");
         tlsPort.Minimum = 1; tlsPort.Maximum = 65535; tlsPort.Value = 443;
         AddRow(grid, 2, "TLS 端口", tlsPort, "默认 443");
         AddRow(grid, 3, "证书名称（可选）", serverName, "使用正规域名证书时填写域名");
@@ -607,19 +624,21 @@ public sealed class MainForm : Form
         AddRow(grid, 5, "共享密钥", token, "VPS 为这台值守电脑生成的独立密钥");
         AddRow(grid, 6, "本地监听地址", listen, "0.0.0.0 表示接受局域网矿机连接");
         AddRow(grid, 7, "端口或端口映射", ports, "9999 表示同端口；10041=10001 表示本地 10041 转到 VPS 10001");
+        healthCheckMinutes.Minimum=1;healthCheckMinutes.Maximum=1440;healthCheckMinutes.Value=5;
+        AddRow(grid,8,"VPS自动探测间隔（分钟）",healthCheckMinutes,"每隔多少分钟测试一次所有已启用的主、备用VPS");
         autoStart.Text = "开机自动启动";
         autoStart.AutoSize = true;
-        grid.Controls.Add(autoStart, 1, 8);
+        grid.Controls.Add(autoStart, 1, 9);
         closeToTray.Text = "点击关闭最小化";
         closeToTray.AutoSize = true;
-        grid.Controls.Add(closeToTray, 1, 9);
+        grid.Controls.Add(closeToTray, 1, 10);
         currentIp.ReadOnly = true;
         currentIp.BackColor = Color.White;
         Button refreshIp = new Button(); refreshIp.Text = "刷新"; refreshIp.AutoSize = true; refreshIp.Click += delegate { RefreshMinerAddresses(true); };
-        AddRow(grid, 10, "当前局域网 IP", InlineControls(currentIp, refreshIp), "自动识别矿机应连接的值守电脑局域网 IP");
+        AddRow(grid, 11, "当前局域网 IP", InlineControls(currentIp, refreshIp), "自动识别矿机应连接的值守电脑局域网 IP");
         minerAddress.DropDownStyle = ComboBoxStyle.DropDownList;
         Button copyAddress = new Button(); copyAddress.Text = "复制地址"; copyAddress.AutoSize = true; copyAddress.Click += delegate { CopyMinerAddress(); };
-        AddRow(grid, 11, "矿机填写地址", InlineControls(minerAddress, copyAddress), "选择端口后复制完整的 stratum+tcp 地址");
+        AddRow(grid, 12, "矿机填写地址", InlineControls(minerAddress, copyAddress), "选择端口后复制完整的 stratum+tcp 地址");
         Controls.Add(grid);
 
         FlowLayoutPanel buttons = new FlowLayoutPanel();
@@ -633,7 +652,7 @@ public sealed class MainForm : Form
         buttons.Controls.Add(save); buttons.Controls.Add(backups); buttons.Controls.Add(miners); buttons.Controls.Add(start); buttons.Controls.Add(stop); buttons.Controls.Add(help);
         Controls.Add(buttons); buttons.BringToFront();
 
-        status.Text = "状态：未启动"; status.Dock = DockStyle.Top; status.Height = 62; status.Padding = new Padding(18, 7, 18, 4);
+        status.Text = "状态：未启动"; status.Dock = DockStyle.Top; status.Height = 86; status.Padding = new Padding(18, 7, 18, 4);
         status.BackColor = Color.FromArgb(236, 244, 252); status.AutoEllipsis = true;
         Controls.Add(status); status.BringToFront();
 
@@ -694,14 +713,14 @@ public sealed class MainForm : Form
         AppConfig c = ConfigStore.Load();
         ServerProfile primary = c.Servers[0];
         siteName.Text=c.SiteName; server.Text = primary.Address; tlsPort.Value = Math.Max(1, Math.Min(65535, primary.Port)); serverName.Text = primary.ServerName;
-        pin.Text = primary.CertificateSha256; token.Text = primary.SharedKey; listen.Text = c.ListenAddress; ports.Text = c.Ports; autoStart.Checked = c.AutoStart; closeToTray.Checked = c.CloseToTray;
+        pin.Text = primary.CertificateSha256; token.Text = primary.SharedKey; listen.Text = c.ListenAddress; ports.Text = c.Ports; healthCheckMinutes.Value=c.HealthCheckMinutes; autoStart.Checked = c.AutoStart; closeToTray.Checked = c.CloseToTray;
         backupProfiles.Clear(); backupProfiles.Add(c.Servers[1].Copy()); backupProfiles.Add(c.Servers[2].Copy());
         Log("请填写 VPS 安装脚本输出的设置，然后启动中转。");
     }
 
     private AppConfig CurrentConfig()
     {
-        AppConfig c = new AppConfig { SiteName=siteName.Text.Trim(), ListenAddress=listen.Text.Trim(), Ports=ports.Text.Trim(), AutoStart=autoStart.Checked, CloseToTray=closeToTray.Checked };
+        AppConfig c = new AppConfig { SiteName=siteName.Text.Trim(), ListenAddress=listen.Text.Trim(), Ports=ports.Text.Trim(), HealthCheckMinutes=(int)healthCheckMinutes.Value, AutoStart=autoStart.Checked, CloseToTray=closeToTray.Checked };
         c.Servers.Add(new ServerProfile { Name="主VPS", Enabled=true, Address=server.Text.Trim(), Port=(int)tlsPort.Value, ServerName=serverName.Text.Trim(), CertificateSha256=pin.Text.Trim(), SharedKey=token.Text.Trim() });
         foreach (ServerProfile p in backupProfiles) c.Servers.Add(p.Copy());
         return c;
@@ -736,10 +755,22 @@ public sealed class MainForm : Form
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "无法启动", MessageBoxButtons.OK, MessageBoxIcon.Warning); Log("启动失败：" + ex.Message); }
     }
 
+    private async void TestPrimary()
+    {
+        ServerProfile profile=CurrentConfig().Servers[0];
+        try {
+            ValidateProfile(profile); testPrimary.Enabled=false; testPrimary.Text="测试中…";
+            EndpointState result=await manager.TestProfileAsync(profile,siteName.Text.Trim(),CancellationToken.None);
+            Log("主VPS测试成功：TCP、TLS证书和共享密钥均正常，延迟 "+result.LatencyMs+" ms。");
+            MessageBox.Show(this,"主VPS连接正常。\r\n\r\nTLS证书验证：通过\r\n共享密钥认证：通过\r\n响应时间："+result.LatencyMs+" ms","测试成功",MessageBoxButtons.OK,MessageBoxIcon.Information);
+        } catch(Exception ex) { Log("主VPS测试失败："+ex.Message); MessageBox.Show(this,"主VPS连接失败。\r\n\r\n"+ex.Message,"测试失败",MessageBoxButtons.OK,MessageBoxIcon.Warning); }
+        finally { testPrimary.Enabled=true; testPrimary.Text="测试主VPS"; RefreshStatus(); }
+    }
+
     private void SetRunning(bool running)
     {
         start.Enabled = !running; stop.Enabled = running;
-        siteName.Enabled = server.Enabled = tlsPort.Enabled = serverName.Enabled = pin.Enabled = token.Enabled = listen.Enabled = ports.Enabled = !running;
+        siteName.Enabled = server.Enabled = tlsPort.Enabled = serverName.Enabled = pin.Enabled = token.Enabled = listen.Enabled = ports.Enabled = healthCheckMinutes.Enabled = !running;
     }
 
     private void SetAutoStart(bool enabled)
@@ -762,6 +793,7 @@ public sealed class MainForm : Form
             "本地监听地址：保持 0.0.0.0，局域网矿机才能连接。\r\n\r\n" +
             "端口或端口映射：只填 9999 时两端都用 9999；填 10041=10001 时，矿机连接本机 10041，VPS 按 10001 路线转发。\r\n\r\n" +
             "备用 VPS：主 VPS 不通时按顺序自动使用。主 VPS 恢复后，后续新连接自动优先使用主 VPS。\r\n\r\n" +
+            "VPS自动探测间隔：中转运行时，按这个分钟数逐一验证主、备用VPS的TCP、TLS证书和共享密钥。\r\n\r\n" +
             "当前局域网 IP：值守电脑在矿机局域网里的地址。\r\n\r\n" +
             "矿机填写地址：已经补全的挖矿地址，选择后可以直接复制到矿机后台。";
         message += "\r\n\r\n矿机状态：按局域网 IP 合并显示连接、Worker、Share、响应时间和估算算力。双击矿机可查看检修详情。";
@@ -770,7 +802,7 @@ public sealed class MainForm : Form
 
     private void EditBackups()
     {
-        using (BackupForm form = new BackupForm(backupProfiles)) if (form.ShowDialog(this) == DialogResult.OK) backupProfiles = form.Profiles;
+        using (BackupForm form = new BackupForm(backupProfiles,manager,siteName.Text.Trim())) if (form.ShowDialog(this) == DialogResult.OK) backupProfiles = form.Profiles;
     }
 
     private void RefreshStatus()
@@ -779,9 +811,9 @@ public sealed class MainForm : Form
         RelaySnapshot s=manager.Snapshot();
         string line=s.Running ? "运行中" : "未启动";
         string uptime=s.Running ? FormatDuration(DateTime.Now-s.StartedAt) : "--";
-        List<string> endpoints=new List<string>(); foreach(EndpointState e in s.Endpoints) endpoints.Add(e.Name+":"+(e.Online ? "正常 "+e.LatencyMs+"ms" : "异常"));
+        List<string> endpoints=new List<string>(); foreach(EndpointState e in s.Endpoints) endpoints.Add(e.Name+":"+(e.Online ? "正常 "+e.LatencyMs+"ms" : "异常 "+e.LastError)+"（"+(e.LastCheck==DateTime.MinValue?"未检测":e.LastCheck.ToString("HH:mm:ss"))+"）");
         start.Enabled=!manager.IsRunning;
-        status.Text="状态："+line+"    当前矿机："+s.ActiveMiners+"    当前连接："+s.Active+"    累计连接："+s.Total+"    失败："+s.Failures+"    运行："+uptime+"\r\n流量：上传 "+FormatBytes(s.Uploaded)+" / 下载 "+FormatBytes(s.Downloaded)+(endpoints.Count==0 ? "" : "    线路："+String.Join("，",endpoints.ToArray()));
+        status.Text="状态："+line+"    当前矿机："+s.ActiveMiners+"    当前连接："+s.Active+"    累计连接："+s.Total+"    失败："+s.Failures+"    运行："+uptime+"\r\n流量：上传 "+FormatBytes(s.Uploaded)+" / 下载 "+FormatBytes(s.Downloaded)+"\r\n线路检测："+(endpoints.Count==0 ? "启动中转后自动检测，也可点击测试按钮" : String.Join("，",endpoints.ToArray()));
     }
     private static string FormatDuration(TimeSpan t){ return ((int)t.TotalDays>0 ? ((int)t.TotalDays)+"天 " : "")+t.Hours.ToString("00")+":"+t.Minutes.ToString("00")+":"+t.Seconds.ToString("00"); }
     private static string FormatBytes(long value){ string[] u={"B","KB","MB","GB","TB"}; double n=value; int i=0; while(n>=1024&&i<u.Length-1){n/=1024;i++;} return n.ToString(i==0?"0":"0.0")+" "+u[i]; }
@@ -831,11 +863,11 @@ public sealed class BackupForm : Form
 {
     private readonly List<ServerEditor> editors = new List<ServerEditor>();
     public List<ServerProfile> Profiles = new List<ServerProfile>();
-    public BackupForm(List<ServerProfile> profiles)
+    public BackupForm(List<ServerProfile> profiles,RelayManager manager,string siteName)
     {
-        Text="备用 VPS 设置"; Font=new Font("Microsoft YaHei UI",9F); ClientSize=new Size(690,430); StartPosition=FormStartPosition.CenterParent;
+        Text="备用 VPS 设置"; Font=new Font("Microsoft YaHei UI",9F); ClientSize=new Size(690,500); StartPosition=FormStartPosition.CenterParent;
         TabControl tabs=new TabControl(); tabs.Dock=DockStyle.Fill;
-        for(int i=0;i<2;i++) { ServerProfile p=i<profiles.Count?profiles[i].Copy():new ServerProfile{Name="备用VPS "+(i+1),Enabled=false,Port=443}; ServerEditor editor=new ServerEditor(p); editors.Add(editor); TabPage page=new TabPage("备用 VPS "+(i+1)); page.Controls.Add(editor); tabs.TabPages.Add(page); }
+        for(int i=0;i<2;i++) { ServerProfile p=i<profiles.Count?profiles[i].Copy():new ServerProfile{Name="备用VPS "+(i+1),Enabled=false,Port=443}; ServerEditor editor=new ServerEditor(p,manager,siteName); editors.Add(editor); TabPage page=new TabPage("备用 VPS "+(i+1)); page.Controls.Add(editor); tabs.TabPages.Add(page); }
         FlowLayoutPanel buttons=new FlowLayoutPanel(); buttons.Dock=DockStyle.Bottom; buttons.Height=48; buttons.FlowDirection=FlowDirection.RightToLeft; buttons.Padding=new Padding(0,8,12,0);
         Button ok=new Button(); ok.Text="保存"; ok.AutoSize=true; ok.Click+=delegate { try { Profiles.Clear(); foreach(ServerEditor e in editors){ServerProfile p=e.Value(); if(p.Enabled) MainFormValidate(p); Profiles.Add(p);} DialogResult=DialogResult.OK; Close(); } catch(Exception ex){MessageBox.Show(this,ex.Message,"设置有误",MessageBoxButtons.OK,MessageBoxIcon.Warning);} };
         Button cancel=new Button(); cancel.Text="取消"; cancel.AutoSize=true; cancel.DialogResult=DialogResult.Cancel; buttons.Controls.Add(ok); buttons.Controls.Add(cancel);
@@ -846,16 +878,18 @@ public sealed class BackupForm : Form
 
 public sealed class ServerEditor : Panel
 {
-    private readonly CheckBox enabled=new CheckBox(); private readonly TextBox address=new TextBox(); private readonly NumericUpDown port=new NumericUpDown(); private readonly TextBox serverName=new TextBox(); private readonly TextBox pin=new TextBox(); private readonly TextBox key=new TextBox(); private readonly string profileName;
-    public ServerEditor(ServerProfile p)
+    private readonly CheckBox enabled=new CheckBox(); private readonly TextBox address=new TextBox(); private readonly NumericUpDown port=new NumericUpDown(); private readonly TextBox serverName=new TextBox(); private readonly TextBox pin=new TextBox(); private readonly TextBox key=new TextBox(); private readonly Button test=new Button(); private readonly Label testResult=new Label(); private readonly string profileName; private readonly RelayManager manager; private readonly string siteName;
+    public ServerEditor(ServerProfile p,RelayManager relay,string mineSiteName)
     {
-        profileName=p.Name; Dock=DockStyle.Fill; AutoScroll=true; TableLayoutPanel grid=new TableLayoutPanel(); grid.Dock=DockStyle.Top; grid.AutoSize=true; grid.AutoSizeMode=AutoSizeMode.GrowAndShrink; grid.Padding=new Padding(18); grid.ColumnCount=2; grid.RowCount=6; grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,150)); grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
+        profileName=p.Name;manager=relay;siteName=mineSiteName; Dock=DockStyle.Fill; AutoScroll=true; TableLayoutPanel grid=new TableLayoutPanel(); grid.Dock=DockStyle.Top; grid.AutoSize=true; grid.AutoSizeMode=AutoSizeMode.GrowAndShrink; grid.Padding=new Padding(18); grid.ColumnCount=2; grid.RowCount=7; grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,150)); grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
         enabled.Text="启用这条备用线路"; enabled.Checked=p.Enabled; enabled.AutoSize=true; Add(grid,0,"状态",enabled);
         address.Text=p.Address; Add(grid,1,"VPS 地址",address); port.Minimum=1;port.Maximum=65535;port.Value=Math.Max(1,Math.Min(65535,p.Port));Add(grid,2,"TLS 端口",port);
-        serverName.Text=p.ServerName;Add(grid,3,"证书名称（可选）",serverName);pin.Text=p.CertificateSha256;Add(grid,4,"证书 SHA-256（可选）",pin);key.Text=p.SharedKey;key.UseSystemPasswordChar=true;Add(grid,5,"独立共享密钥",key); Controls.Add(grid);
+        serverName.Text=p.ServerName;Add(grid,3,"证书名称（可选）",serverName);pin.Text=p.CertificateSha256;Add(grid,4,"证书 SHA-256（可选）",pin);key.Text=p.SharedKey;key.UseSystemPasswordChar=true;Add(grid,5,"独立共享密钥",key);
+        FlowLayoutPanel action=new FlowLayoutPanel();action.Dock=DockStyle.Fill;action.WrapContents=false;test.Text="测试这台VPS";test.AutoSize=true;test.Click+=delegate{TestConnection();};testResult.AutoSize=true;testResult.Margin=new Padding(12,9,0,0);testResult.Text="尚未检测";action.Controls.Add(test);action.Controls.Add(testResult);Add(grid,6,"连接检测",action);Controls.Add(grid);
     }
     private static void Add(TableLayoutPanel g,int row,string text,Control c){g.RowStyles.Add(new RowStyle(SizeType.Absolute,48));Label l=new Label();l.Text=text;l.Dock=DockStyle.Fill;l.TextAlign=ContentAlignment.MiddleLeft;c.Dock=DockStyle.Fill;c.Margin=new Padding(3,8,3,8);g.Controls.Add(l,0,row);g.Controls.Add(c,1,row);}
     public ServerProfile Value(){return new ServerProfile{Name=profileName,Enabled=enabled.Checked,Address=address.Text.Trim(),Port=(int)port.Value,ServerName=serverName.Text.Trim(),CertificateSha256=pin.Text.Trim(),SharedKey=key.Text.Trim()};}
+    private async void TestConnection(){ServerProfile p=Value();try{if(String.IsNullOrWhiteSpace(p.Address))throw new InvalidOperationException("请填写VPS地址。");if((p.SharedKey??"").Length<32)throw new InvalidOperationException("共享密钥格式不正确。");if(String.IsNullOrWhiteSpace(p.CertificateSha256)&&String.IsNullOrWhiteSpace(p.ServerName))throw new InvalidOperationException("请填写证书名称或证书指纹。");test.Enabled=false;test.Text="测试中…";testResult.ForeColor=Color.DimGray;testResult.Text="正在验证TCP、TLS和密钥";EndpointState result=await manager.TestProfileAsync(p,siteName,CancellationToken.None);testResult.ForeColor=Color.ForestGreen;testResult.Text="正常 · "+result.LatencyMs+" ms · "+result.LastCheck.ToString("HH:mm:ss");}catch(Exception ex){testResult.ForeColor=Color.Firebrick;testResult.Text="失败 · "+ex.Message;}finally{test.Enabled=true;test.Text="测试这台VPS";}}
 }
 
 public static class Program
