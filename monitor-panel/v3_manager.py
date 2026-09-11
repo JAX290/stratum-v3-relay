@@ -17,6 +17,7 @@ from pathlib import Path
 HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$")
 RESERVED_PORTS = {10000, 10003}
 SENSITIVE_PORTS = {21, 22, 23, 25, 53, 110, 135, 139, 445, 1433, 2375, 3306, 3389, 5432, 6379, 9200, 11211, 27017}
+ALGORITHMS = {"scrypt", "sha256d", "other", "unknown"}
 
 
 class ConfigError(ValueError):
@@ -48,6 +49,8 @@ def validate_config(config, resolve=False):
             raise ConfigError(f"上游端口不允许：{host}:{port}")
         if endpoint.get("transport", "tcp") not in {"tcp"}:
             raise ConfigError(f"暂不支持的协议：{endpoint.get('transport')}")
+        if str(endpoint.get("algorithm", "unknown")).lower() not in ALGORITHMS:
+            raise ConfigError(f"算法标识不支持：{endpoint.get('algorithm')}")
         if host == "ltc.viabtc.com":
             raise ConfigError("ViaBTC 禁止使用错误的 .com 地址")
         if resolve:
@@ -77,6 +80,27 @@ def validate_config(config, resolve=False):
     missing = set(references) - set(endpoint_map)
     if missing:
         raise ConfigError("引用了不存在的地址：" + ", ".join(sorted(missing)))
+    for canary in config.get("canary_routes", []):
+        try:
+            source = ip_address(str(canary.get("source_ip", "")))
+            port = int(canary.get("port", 0))
+        except ValueError:
+            raise ConfigError("单机试切的矿机 IP 或端口不合法")
+        if source.version != 4 or source.is_global:
+            raise ConfigError("单机试切只能使用矿场局域网 IPv4")
+        if port not in ports:
+            raise ConfigError(f"单机试切引用了不存在的端口：{port}")
+        if canary.get("endpoint_id") not in endpoint_map:
+            raise ConfigError("单机试切引用了不存在的矿池地址")
+    for change in config.get("last_route_changes", []):
+        try:
+            port = int(change.get("port", 0))
+        except (TypeError, ValueError):
+            raise ConfigError("线路恢复记录的端口不合法")
+        if port not in ports:
+            raise ConfigError(f"线路恢复记录引用了不存在的端口：{port}")
+        if change.get("endpoint_id") not in endpoint_map or change.get("previous_endpoint_id") not in endpoint_map:
+            raise ConfigError("线路恢复记录引用了不存在的矿池地址")
     template_ids = set()
     for template in config.get("templates", []):
         if template.get("id") in template_ids:

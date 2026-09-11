@@ -24,6 +24,7 @@ V3_CONFIG_FILE = Path(os.getenv("V3_CONFIG_FILE", "/etc/stratum-v3.json"))
 MAX_HEADER = 8192
 INTERNAL_START = 20000
 DEFAULT_STATE_FILE = Path("/var/lib/stratum-secure-relay/sites.json")
+CONTROL_FILE = Path(os.getenv("SECURE_RELAY_CONTROL", "/var/lib/stratum-secure-relay/control.json"))
 
 
 def load_config():
@@ -41,7 +42,7 @@ def load_config():
     return data
 
 
-def route_map():
+def route_map(miner_ip=None):
     config = json.loads(V3_CONFIG_FILE.read_text(encoding="utf-8"))
     internal = {}
     for offset, endpoint in enumerate(config.get("endpoints", [])):
@@ -56,6 +57,10 @@ def route_map():
         endpoint_id = route.get("endpoint_id")
         if endpoint_id in internal:
             routes[int(route["port"])] = internal[endpoint_id]
+    for canary in config.get("canary_routes", []):
+        endpoint_id = canary.get("endpoint_id")
+        if miner_ip and canary.get("source_ip") == miner_ip and endpoint_id in internal:
+            routes[int(canary["port"])] = internal[endpoint_id]
     return routes
 
 
@@ -170,7 +175,7 @@ class SiteState:
                     pass
 
 
-def proxy_header(headers, peer, internal_port):
+def source_address(headers, peer):
     candidate = headers.get("x-miner-ip", "")
     try:
         address = ipaddress.ip_address(candidate)
@@ -180,13 +185,18 @@ def proxy_header(headers, peer, internal_port):
     except ValueError:
         source_ip = str(peer[0])
         ipaddress.ip_address(source_ip)
+    return source_ip
+
+
+def proxy_header(headers, peer, destination_port):
+    source_ip = source_address(headers, peer)
     try:
         source_port = int(headers.get("x-miner-port", peer[1]))
     except (TypeError, ValueError):
         source_port = int(peer[1])
     if not 1 <= source_port <= 65535:
         source_port = 1
-    return f"PROXY TCP4 {source_ip} 127.0.0.1 {source_port} {internal_port}\r\n".encode("ascii")
+    return f"PROXY TCP4 {source_ip} 127.0.0.1 {source_port} {destination_port}\r\n".encode("ascii")
 
 
 class SecureRelay:
@@ -194,12 +204,34 @@ class SecureRelay:
         self.config = config
         self.semaphore = asyncio.Semaphore(int(config.get("max_connections", 1000)))
         self.state = SiteState(config.get("state_file", str(DEFAULT_STATE_FILE)))
+        self.connections = {}
+        self.last_control_id = str(load_control().get("id", ""))
 
     def current_config(self):
         try:
             return load_config()
         except (OSError, ValueError):
             return self.config
+
+    def disconnect_matching(self, port, miner_ip=""):
+        matched = 0
+        for connection in list(self.connections.values()):
+            if int(connection["port"]) == int(port) and (not miner_ip or connection["miner_ip"] == miner_ip):
+                connection["writer"].close()
+                matched += 1
+        return matched
+
+    async def control_loop(self):
+        while True:
+            await asyncio.sleep(1)
+            command = load_control()
+            command_id = str(command.get("id", ""))
+            if not command_id or command_id == self.last_control_id:
+                continue
+            self.last_control_id = command_id
+            if command.get("action") == "reconnect":
+                matched = self.disconnect_matching(command.get("port", 0), str(command.get("source_ip", "")))
+                logging.info("relay reconnect requested port=%s miner=%s matched=%s", command.get("port"), command.get("source_ip") or "all", matched)
 
     async def handle(self, reader, writer):
         peer = writer.get_extra_info("peername") or ("0.0.0.0", 1)
@@ -218,18 +250,21 @@ class SecureRelay:
                     writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                     await writer.drain()
                     return
-                internal_port = route_map().get(port)
+                miner_ip = source_address(headers, peer)
+                internal_port = route_map(miner_ip).get(port)
                 if not internal_port:
                     raise ValueError("route is not enabled")
                 upstream_reader, upstream_writer = await asyncio.wait_for(
                     asyncio.open_connection("127.0.0.1", internal_port), timeout=10
                 )
-                upstream_writer.write(proxy_header(headers, peer, internal_port))
+                upstream_writer.write(proxy_header(headers, peer, port))
                 await upstream_writer.drain()
                 writer.write(b"HTTP/1.1 200 Connection Established\r\nContent-Length: 0\r\n\r\n")
                 await writer.drain()
                 self.state.update(client, peer, active_delta=1, force=True)
                 active_counted = True
+                connection_key = id(writer)
+                self.connections[connection_key] = {"writer": writer, "port": port, "miner_ip": miner_ip}
                 logging.info("relay connected client=%s source=%s miner=%s port=%s", client["id"], peer[0], headers.get("x-miner-ip", "?"), port)
                 tasks = (asyncio.create_task(pipe(reader, upstream_writer)),
                          asyncio.create_task(pipe(upstream_reader, writer)))
@@ -244,10 +279,18 @@ class SecureRelay:
             except (ValueError, OSError, ssl.SSLError, asyncio.TimeoutError, asyncio.IncompleteReadError) as exc:
                 logging.info("connection closed source=%s reason=%s", peer[0], exc)
             finally:
+                self.connections.pop(id(writer), None)
                 if active_counted and client:
                     self.state.update(client, peer, active_delta=-1, force=True)
                 await close_writer(upstream_writer)
                 await close_writer(writer)
+
+
+def load_control():
+    try:
+        return json.loads(CONTROL_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
 
 
 async def main():
@@ -259,6 +302,7 @@ async def main():
     server = await asyncio.start_server(relay.handle, config["listen_host"], int(config["listen_port"]), ssl=context)
     addresses = ", ".join(str(sock.getsockname()) for sock in server.sockets)
     logging.info("secure relay listening on %s", addresses)
+    control_task = asyncio.create_task(relay.control_loop())
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for name in ("SIGINT", "SIGTERM"):
@@ -266,6 +310,8 @@ async def main():
             loop.add_signal_handler(getattr(signal, name), stop.set)
     async with server:
         await stop.wait()
+    control_task.cancel()
+    await asyncio.gather(control_task, return_exceptions=True)
 
 
 if __name__ == "__main__":

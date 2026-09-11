@@ -35,6 +35,14 @@ class V3ManagerTest(unittest.TestCase):
         with self.assertRaises(ConfigError):
             validate_config(config)
 
+    def test_validates_single_miner_canary(self):
+        config = json.loads(json.dumps(self.config))
+        config["canary_routes"] = [{"port": 11301, "source_ip": "192.168.1.20", "endpoint_id": "f2pool-global"}]
+        self.assertTrue(validate_config(config))
+        config["canary_routes"][0]["source_ip"] = "8.8.8.8"
+        with self.assertRaises(ConfigError):
+            validate_config(config)
+
     def test_history_and_rollback(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

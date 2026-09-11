@@ -80,7 +80,27 @@ def resolve_public(host):
     return addresses
 
 
-def probe_stratum(endpoint, timeout=3.0):
+def _receive_response(connection, request_id, timeout):
+    buffer = b""
+    deadline = time.monotonic() + timeout
+    while len(buffer) < 1024 * 1024 and time.monotonic() < deadline:
+        connection.settimeout(max(0.1, deadline - time.monotonic()))
+        chunk = connection.recv(65536)
+        if not chunk:
+            break
+        buffer += chunk
+        while b"\n" in buffer:
+            raw, buffer = buffer.split(b"\n", 1)
+            try:
+                message = json.loads(raw.strip())
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if isinstance(message, dict) and message.get("id") == request_id and ("result" in message or "error" in message):
+                return message
+    return None
+
+
+def probe_stratum(endpoint, timeout=3.0, username="", password="x"):
     started = time.perf_counter()
     addresses = resolve_public(endpoint["host"])
     tcp_started = time.perf_counter()
@@ -92,35 +112,36 @@ def probe_stratum(endpoint, timeout=3.0):
         connection.settimeout(timeout)
         request = {"id": 73001, "method": "mining.subscribe", "params": ["stratum-v3-health/1.0"]}
         connection.sendall((json.dumps(request, separators=(",", ":")) + "\n").encode())
-        buffer = b""
-        valid = False
         try:
-            while len(buffer) < 1024 * 1024:
-                chunk = connection.recv(65536)
-                if not chunk:
-                    break
-                buffer += chunk
-                while b"\n" in buffer:
-                    raw, buffer = buffer.split(b"\n", 1)
-                    try:
-                        message = json.loads(raw.strip())
-                    except (ValueError, UnicodeDecodeError):
-                        continue
-                    if isinstance(message, dict) and message.get("id") == 73001 and (
-                        "result" in message or "error" in message
-                    ):
-                        valid = True
-                        break
-                if valid:
-                    break
+            subscribe = _receive_response(connection, 73001, timeout)
         except socket.timeout:
             return {"ok": False, "tcp_ok": True, "checked_at": int(time.time()), "resolved_ips": addresses,
                 "tcp_ms": round(tcp_ms, 2), "stratum_ms": None, "error_code": "stratum_timeout",
                 "error": "TCP连接成功，但等待 mining.subscribe 响应超时"}
-        if not valid:
+        if not subscribe:
             return {"ok": False, "tcp_ok": True, "checked_at": int(time.time()), "resolved_ips": addresses,
                 "tcp_ms": round(tcp_ms, 2), "stratum_ms": None, "error_code": "stratum_no_response",
                 "error": "TCP连接成功，但未收到有效的 mining.subscribe 响应"}
+        if subscribe.get("error") or subscribe.get("result") is None:
+            return {"ok": False, "tcp_ok": True, "checked_at": int(time.time()), "resolved_ips": addresses,
+                "tcp_ms": round(tcp_ms, 2), "stratum_ms": None, "error_code": "stratum_rejected",
+                "error": f"矿池拒绝 mining.subscribe：{str(subscribe.get('error') or '未返回订阅结果')[:200]}"}
+        authorized = None
+        authorization_error = ""
+        if username:
+            request = {"id": 73002, "method": "mining.authorize", "params": [str(username)[:200], str(password)[:200]]}
+            connection.sendall((json.dumps(request, separators=(",", ":")) + "\n").encode())
+            try:
+                response = _receive_response(connection, 73002, timeout)
+            except socket.timeout:
+                response = None
+            if response is None:
+                authorized = False
+                authorization_error = "矿池账号认证等待超时"
+            else:
+                authorized = response.get("result") is True and not response.get("error")
+                if not authorized:
+                    authorization_error = str(response.get("error") or "矿池拒绝该账号")[:200]
     return {
         "ok": True,
         "tcp_ok": True,
@@ -128,6 +149,9 @@ def probe_stratum(endpoint, timeout=3.0):
         "resolved_ips": addresses,
         "tcp_ms": round(tcp_ms, 2),
         "stratum_ms": round((time.perf_counter() - started) * 1000, 2),
+        "protocol": "Stratum V1",
+        "authorized": authorized,
+        "authorization_error": authorization_error,
         "error": "",
     }
 
@@ -163,6 +187,8 @@ class EndpointMonitor:
         active = {item["endpoint_id"] for item in self.config.get("fixed_routes", [])}
         for group in self.config.get("port_groups", []):
             active.update(group.get("endpoint_ids", []))
+        active.update(item.get("endpoint_id") for item in self.config.get("canary_routes", []))
+        active.discard(None)
         return active
 
     def _entry(self, endpoint_id):

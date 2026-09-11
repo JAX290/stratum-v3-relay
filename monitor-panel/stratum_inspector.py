@@ -118,6 +118,7 @@ class Inspector:
             self.connection_counter += 1
             connection_id = str(self.connection_counter)
             peer = client_writer.get_extra_info("peername") or ("unknown", 0)
+            public_port = self.relay["listen_port"]
             if self.relay.get("proxy_protocol"):
                 try:
                     header = await asyncio.wait_for(client_reader.readline(), timeout=3)
@@ -127,6 +128,7 @@ class Inspector:
                         await client_writer.wait_closed()
                         return
                     peer = (fields[2], int(fields[4]))
+                    public_port = int(fields[5])
                 except (OSError, ValueError, UnicodeError, asyncio.TimeoutError):
                     client_writer.close()
                     await client_writer.wait_closed()
@@ -135,6 +137,7 @@ class Inspector:
                 "id": connection_id,
                 "source_ip": str(peer[0]),
                 "source_port": int(peer[1]),
+                "public_port": public_port,
                 "connected_at": time.time(),
                 "worker": "",
                 "agent": "未知",
@@ -380,6 +383,7 @@ class Inspector:
                     "id": connection["id"],
                     "source_ip": connection["source_ip"],
                     "source_port": connection["source_port"],
+                    "public_port": connection.get("public_port", self.relay["listen_port"]),
                     "agent": connection.get("agent", "未知"),
                     "status": detail_status,
                     "connected_at": now_text(connection["connected_at"]),
@@ -420,6 +424,7 @@ class Inspector:
         for connection in self.connections.values():
             connection_rows.append({
                 "source_ip": connection["source_ip"],
+                "public_port": connection.get("public_port", self.relay["listen_port"]),
                 "worker": connection["worker"] or "等待授权",
                 "agent": connection["agent"],
                 "connected_at": now_text(connection["connected_at"]),

@@ -37,6 +37,7 @@ CRON_FILE = Path(os.getenv("MONITOR_CRON_FILE", "/etc/cron.d/stratum-monitor"))
 ENDPOINT_EVENT_FILE = Path(os.getenv("ENDPOINT_EVENT_FILE", "/var/lib/stratum-monitor/endpoint-events.jsonl"))
 SECURITY_STATE_FILE = Path(os.getenv("INTEGRITY_STATE_FILE", "/var/lib/stratum-monitor/security-state.json"))
 PUBLIC_IP_ALERT_STATE_FILE = Path(os.getenv("PUBLIC_IP_ALERT_STATE_FILE", "/var/lib/stratum-monitor/public-ip-alert.json"))
+RELAY_CONTROL_FILE = Path(os.getenv("SECURE_RELAY_CONTROL", "/var/lib/stratum-secure-relay/control.json"))
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("PANEL_SECRET_KEY", secrets.token_hex(32))
@@ -159,6 +160,127 @@ def ensure_custom_endpoint(config, target, label):
     if not result.get("ok"):
         raise ConfigError(f"自定义地址 TCP 可达，但未通过 Stratum 验证：{result.get('error', '未收到有效响应')}")
     return endpoint_id
+
+
+def endpoint_algorithm(config, endpoint):
+    declared = str(endpoint.get("algorithm", "")).strip().lower()
+    if declared:
+        return declared
+    found = {
+        str(template.get("algorithm", "unknown")).lower()
+        for template in config.get("templates", [])
+        if endpoint.get("id") in template.get("endpoint_ids", [])
+    }
+    return found.pop() if len(found) == 1 else "unknown"
+
+
+def algorithm_text(value):
+    return {"scrypt": "Scrypt", "sha256d": "SHA-256", "other": "其他", "unknown": "尚未确认"}.get(value, value)
+
+
+def locate_route(config, port):
+    for group in config.get("port_groups", []):
+        if port in group.get("ports", []):
+            return "group", group, group["ports"].index(port)
+    for route in config.get("fixed_routes", []):
+        if int(route.get("port", 0)) == int(port):
+            return "fixed", route, None
+    raise ConfigError(f"端口 {port} 不在当前转发配置中")
+
+
+def route_endpoint_id(config, port):
+    kind, item, position = locate_route(config, port)
+    return item["endpoint_ids"][position] if kind == "group" else item["endpoint_id"]
+
+
+def set_route_endpoint(config, port, endpoint_id):
+    kind, item, position = locate_route(config, port)
+    previous = item["endpoint_ids"][position] if kind == "group" else item["endpoint_id"]
+    if kind == "group":
+        item["endpoint_ids"][position] = endpoint_id
+        item["template_id"] = ""
+    else:
+        item["endpoint_id"] = endpoint_id
+    return previous
+
+
+def request_reconnect(port, source_ip=""):
+    command = {"id": secrets.token_hex(12), "action": "reconnect", "port": int(port),
+        "source_ip": str(source_ip), "created_at": int(time.time())}
+    ConfigStore._atomic_write(RELAY_CONTROL_FILE, json.dumps(command, ensure_ascii=False) + "\n", mode=0o640)
+
+
+def endpoint_miner_totals(inspector, endpoint_id, source_ip, public_port):
+    total = {"submitted": 0, "accepted": 0, "rejected": 0, "active": 0}
+    for pool in inspector.get("pools", []):
+        if pool.get("id") != endpoint_id:
+            continue
+        for worker in pool.get("workers", []):
+            for detail in worker.get("details", []):
+                if detail.get("source_ip") != source_ip:
+                    continue
+                observed_port = detail.get("public_port")
+                if observed_port is not None and int(observed_port) != int(public_port):
+                    continue
+                for key in ("submitted", "accepted", "rejected"):
+                    total[key] += int(detail.get(key, 0) or 0)
+                if detail.get("status") == "在线":
+                    total["active"] += 1
+    return total
+
+
+def forwarding_rows(config, endpoint_state, inspector):
+    endpoint_map = {item["id"]: item for item in config.get("endpoints", [])}
+    canary_map = {int(item["port"]): item for item in config.get("canary_routes", [])}
+    change_map = {int(item["port"]): item for item in config.get("last_route_changes", [])}
+    rows = []
+    for public_port, endpoint_id, _, group_name in route_map(config):
+        endpoint = endpoint_map[endpoint_id]
+        health = endpoint_state.get("endpoints", {}).get(endpoint_id, {})
+        result = health.get("last_result", {})
+        connections = 0
+        miner_ips = set()
+        for pool in inspector.get("pools", []):
+            if pool.get("id") != endpoint_id:
+                continue
+            for connection in pool.get("connections", []):
+                observed_port = connection.get("public_port")
+                if observed_port is None or int(observed_port) == int(public_port):
+                    connections += 1
+                    if connection.get("source_ip"):
+                        miner_ips.add(str(connection["source_ip"]))
+        row = {"port": public_port, "group": group_name, "endpoint_id": endpoint_id, "endpoint": endpoint,
+            "algorithm": endpoint_algorithm(config, endpoint), "health_ok": bool(result.get("ok")),
+            "latency": result.get("stratum_ms"), "connections": connections,
+            "miner_ips": sorted(miner_ips, key=lambda value: tuple(int(part) for part in value.split("."))),
+            "canary": None, "last_change": None}
+        change = change_map.get(int(public_port))
+        if change and change.get("endpoint_id") == endpoint_id and change.get("previous_endpoint_id") in endpoint_map:
+            row["last_change"] = {**change, "previous_endpoint": endpoint_map[change["previous_endpoint_id"]]}
+        canary = canary_map.get(int(public_port))
+        if canary:
+            target = endpoint_map.get(canary.get("endpoint_id"), {})
+            current = endpoint_miner_totals(inspector, canary.get("endpoint_id"), canary.get("source_ip"), public_port)
+            baseline = canary.get("baseline", {})
+            delta = {key: max(0, int(current.get(key, 0)) - int(baseline.get(key, 0))) for key in ("submitted", "accepted", "rejected")}
+            row["canary"] = {**canary, "endpoint": target, "delta": delta,
+                "elapsed_minutes": max(0, int((time.time() - int(canary.get("started_at", time.time()))) / 60)),
+                "ready": delta["accepted"] > 0, "active": current["active"]}
+        rows.append(row)
+    return rows
+
+
+def online_miner_ips(inspector):
+    values = set()
+    for pool in inspector.get("pools", []):
+        for connection in pool.get("connections", []):
+            value = str(connection.get("source_ip", ""))
+            try:
+                if ip_address(value).version == 4:
+                    values.add(value)
+            except ValueError:
+                pass
+    return sorted(values, key=lambda value: tuple(int(part) for part in value.split(".")))
 
 
 def authorized():
@@ -559,10 +681,12 @@ def build_page_context(page):
     security = load_json(SECURITY_STATE_FILE, {"events": [], "active": {}})
     pools = stratum_pool_rows(config, inspector)
     relay_status = detect_relay_public_ip(config)
-    if not relay_status.get("ok"):
-        notify_public_ip_missing(relay_status)
     route_groups = route_page_groups(config, state, relay_status)
     overview_routes = [row for group in route_groups for row in group["rows"]]
+    active_forwarding = forwarding_rows(config, state, inspector)
+    visible_forwarding = [row for row in active_forwarding if row["connections"] or row.get("canary")]
+    if not visible_forwarding:
+        visible_forwarding = active_forwarding
     return dict(page=page, config=config, endpoint_map=endpoint_map, endpoint_rows=rows,
         online=sum(1 for row in rows if row["ok"]), alerting=sum(1 for value in state.get("endpoints", {}).values() if value.get("alerting")),
         services={"HAProxy": service_state("haproxy"), "协议检查器": service_state("stratum-inspector-v3"), "稳定性监控": service_state("stratum-endpoint-monitor"), "安全监控": service_state("stratum-security-monitor")},
@@ -570,6 +694,9 @@ def build_page_context(page):
         alert_settings=alert_settings, wechat_configured=read_env().get("WECHAT_WEBHOOK", "").startswith("https://"),
         legacy_enabled=monitor_enabled(), history=store.history(), audit=audit_rows(),
         route_groups=route_groups, overview_routes=overview_routes, relay_status=relay_status,
+        active_forwarding=active_forwarding, visible_forwarding=visible_forwarding, miner_ips=online_miner_ips(inspector),
+        endpoint_options=[{**endpoint, "algorithm_value": endpoint_algorithm(config, endpoint)} for endpoint in config["endpoints"]],
+        algorithms={"scrypt": "Scrypt", "sha256d": "SHA-256", "other": "其他/自定义", "unknown": "算法待确认"},
         security=security, csrf=session["csrf"])
 
 
@@ -628,10 +755,23 @@ def locate_dynamic_route(config, port):
 def endpoint_from_form(config, port):
     selected = request.form.get("endpoint_id", "")
     if selected == "__custom__":
-        return ensure_custom_endpoint(config, request.form.get("custom_target", ""), f"动态端口 :{port}")
+        selected = ensure_custom_endpoint(config, request.form.get("custom_target", ""), f"端口 :{port}")
+        endpoint = next(item for item in config["endpoints"] if item["id"] == selected)
+        endpoint["pool"] = request.form.get("custom_pool", "自定义矿池").strip()[:80] or "自定义矿池"
+        endpoint["region"] = request.form.get("custom_region", f"端口 :{port}").strip()[:80] or f"端口 :{port}"
+        endpoint["algorithm"] = request.form.get("algorithm", "unknown").strip().lower()
+        endpoint["coins"] = request.form.get("coins", "").strip()[:80]
+        return selected
     if selected not in {item["id"] for item in config["endpoints"]}:
         raise ConfigError("请选择有效的地址库节点")
     return selected
+
+
+def remember_route_change(config, port, previous_endpoint_id, endpoint_id):
+    changes = [item for item in config.get("last_route_changes", []) if int(item.get("port", 0)) != int(port)]
+    changes.append({"port": int(port), "previous_endpoint_id": previous_endpoint_id,
+        "endpoint_id": endpoint_id, "changed_at": int(time.time())})
+    config["last_route_changes"] = changes[-30:]
 
 
 @app.route("/route/<int:port>/test", methods=["POST"])
@@ -640,25 +780,29 @@ def test_route(port):
         return "Forbidden", 403
     config = store.load()
     try:
-        locate_dynamic_route(config, port)
+        locate_route(config, port)
         selected = request.form.get("endpoint_id", "")
         if selected == "__custom__":
             host, upstream_port = parse_custom_target(request.form.get("custom_target", ""))
             endpoint = {"id": "test", "pool": "自定义", "region": f":{port}", "host": host,
-                "port": upstream_port, "transport": "tcp", "source": "panel", "enabled": True}
+                "port": upstream_port, "algorithm": request.form.get("algorithm", "unknown"),
+                "transport": "tcp", "source": "panel", "enabled": True}
             candidate = json.loads(json.dumps(config))
             candidate["endpoints"].append(endpoint)
             validate_config(candidate, resolve=True)
         else:
             endpoint = next(item for item in config["endpoints"] if item["id"] == selected)
-        result = probe_stratum(endpoint)
+        result = probe_stratum(endpoint, username=request.form.get("test_username", "").strip(),
+            password=request.form.get("test_password", ""))
         if result.get("ok"):
-            flash(f"端口 {port} 候选上游测试成功：{endpoint['host']}:{endpoint['port']}，Stratum响应 {result['stratum_ms']} ms。")
+            auth = "；测试账号认证成功" if result.get("authorized") is True else (
+                f"；测试账号认证失败：{result.get('authorization_error')}" if result.get("authorized") is False else "；未填写测试账号")
+            flash(f"端口 {port} 候选上游测试成功：{endpoint['host']}:{endpoint['port']}，Stratum响应 {result['stratum_ms']} ms，算法资料为 {algorithm_text(endpoint_algorithm(config, endpoint))}{auth}。")
         else:
             flash(f"端口 {port} 候选上游测试未通过：{result.get('error', '未收到有效响应')}。配置未修改。")
     except (KeyError, StopIteration, ConfigError, OSError) as exc:
         flash(f"端口 {port} 测试失败：{exc}。配置未修改。")
-    return redirect(url_for("dashboard_page", page="routes"))
+    return redirect(url_for("dashboard_page", page=request.form.get("return_page", "routes")))
 
 
 @app.route("/route/<int:port>/apply", methods=["POST"])
@@ -668,11 +812,9 @@ def apply_route(port):
     config = store.load()
     original_config = json.loads(json.dumps(config))
     try:
-        group, position = locate_dynamic_route(config, port)
         endpoint_id = endpoint_from_form(config, port)
-        previous = group["endpoint_ids"][position]
-        group["endpoint_ids"][position] = endpoint_id
-        group["template_id"] = ""
+        previous = set_route_endpoint(config, port, endpoint_id)
+        remember_route_change(config, port, previous, endpoint_id)
         save_and_reload(config, f"update-port:{port}:{previous}->{endpoint_id}")
         actual = read_actual_route_ids().get(port)
         if actual != endpoint_id:
@@ -683,6 +825,111 @@ def apply_route(port):
     except (KeyError, StopIteration, ConfigError, OSError) as exc:
         flash(f"端口 {port} 应用失败：{exc}")
     return redirect(url_for("dashboard_page", page="routes"))
+
+
+@app.route("/route/<int:port>/canary/start", methods=["POST"])
+def start_canary(port):
+    if not authorized() or not csrf_ok():
+        return "Forbidden", 403
+    config = store.load()
+    try:
+        current_id = route_endpoint_id(config, port)
+        target_id = endpoint_from_form(config, port)
+        if target_id == current_id:
+            raise ConfigError("目标矿池与当前线路相同，不需要试切")
+        source_ip = str(ip_address(request.form.get("source_ip", "").strip()))
+        if ip_address(source_ip).version != 4 or ip_address(source_ip).is_global:
+            raise ConfigError("请选择矿场局域网 IPv4")
+        inspector = load_json(INSPECTOR_STATE_FILE, {"pools": []})
+        eligible = next(row["miner_ips"] for row in forwarding_rows(config, {}, inspector) if row["port"] == port)
+        if source_ip not in eligible:
+            raise ConfigError(f"矿机 {source_ip} 当前没有连接端口 {port}，请刷新页面后重新选择")
+        endpoint_map = {item["id"]: item for item in config["endpoints"]}
+        current_algorithm = endpoint_algorithm(config, endpoint_map[current_id])
+        target_algorithm = endpoint_algorithm(config, endpoint_map[target_id])
+        if current_algorithm in {"unknown", "other"} or target_algorithm in {"unknown", "other"}:
+            raise ConfigError("当前线路或目标矿池的算法尚未确认，不能开始安全试切")
+        if current_algorithm != target_algorithm:
+            raise ConfigError(f"算法不匹配：当前为 {algorithm_text(current_algorithm)}，目标为 {algorithm_text(target_algorithm)}")
+        username = request.form.get("test_username", "").strip()
+        result = probe_stratum(endpoint_map[target_id], username=username, password=request.form.get("test_password", ""))
+        if not result.get("ok"):
+            raise ConfigError(f"目标矿池未通过 Stratum 检测：{result.get('error', '未知错误')}")
+        if username and result.get("authorized") is not True:
+            raise ConfigError(f"测试账号认证失败：{result.get('authorization_error', '矿池拒绝登录')}")
+        baseline = endpoint_miner_totals(inspector, target_id, source_ip, port)
+        duration = clamp_int(request.form.get("duration_minutes", "10"), 5, 120)
+        canary = {"port": port, "source_ip": source_ip, "endpoint_id": target_id,
+            "original_endpoint_id": current_id, "algorithm": target_algorithm, "started_at": int(time.time()),
+            "review_after": int(time.time()) + duration * 60, "duration_minutes": duration, "baseline": baseline}
+        config["canary_routes"] = [item for item in config.get("canary_routes", []) if int(item.get("port", 0)) != port]
+        config["canary_routes"].append(canary)
+        save_and_reload(config, f"start-canary:{port}:{source_ip}:{current_id}->{target_id}")
+        request_reconnect(port, source_ip)
+        flash(f"已让矿机 {source_ip} 在端口 {port} 试运行 {endpoint_map[target_id]['pool']}；只重连这台矿机，其他矿机不受影响。")
+    except (KeyError, StopIteration, ValueError, ConfigError, OSError) as exc:
+        flash(f"无法开始单机试切：{exc}")
+    return redirect(url_for("dashboard_page", page="overview"))
+
+
+@app.route("/route/<int:port>/canary/stop", methods=["POST"])
+def stop_canary(port):
+    if not authorized() or not csrf_ok():
+        return "Forbidden", 403
+    config = store.load()
+    canary = next((item for item in config.get("canary_routes", []) if int(item.get("port", 0)) == port), None)
+    if canary:
+        config["canary_routes"] = [item for item in config.get("canary_routes", []) if item is not canary]
+        save_and_reload(config, f"stop-canary:{port}:{canary.get('source_ip')}")
+        request_reconnect(port, canary.get("source_ip", ""))
+        flash(f"端口 {port} 的单机试切已停止，测试矿机正在返回原线路。")
+    return redirect(url_for("dashboard_page", page="overview"))
+
+
+@app.route("/route/<int:port>/canary/promote", methods=["POST"])
+def promote_canary(port):
+    if not authorized() or not csrf_ok():
+        return "Forbidden", 403
+    config = store.load()
+    try:
+        canary = next(item for item in config.get("canary_routes", []) if int(item.get("port", 0)) == port)
+        current = endpoint_miner_totals(load_json(INSPECTOR_STATE_FILE, {"pools": []}),
+            canary["endpoint_id"], canary["source_ip"], port)
+        accepted = max(0, current["accepted"] - int(canary.get("baseline", {}).get("accepted", 0)))
+        if accepted < 1:
+            raise ConfigError("测试矿机还没有收到已接受的 Share，暂不能全量切换")
+        previous = set_route_endpoint(config, port, canary["endpoint_id"])
+        remember_route_change(config, port, previous, canary["endpoint_id"])
+        config["canary_routes"] = [item for item in config.get("canary_routes", []) if int(item.get("port", 0)) != port]
+        save_and_reload(config, f"promote-canary:{port}:{previous}->{canary['endpoint_id']}")
+        request_reconnect(port)
+        endpoint = next(item for item in config["endpoints"] if item["id"] == canary["endpoint_id"])
+        flash(f"端口 {port} 已全量切换到 {endpoint['pool']}；该端口现有矿机正在自动重连，其他端口不受影响。")
+    except (KeyError, StopIteration, ValueError, ConfigError, OSError) as exc:
+        flash(f"暂不能全量切换：{exc}")
+    return redirect(url_for("dashboard_page", page="overview"))
+
+
+@app.route("/route/<int:port>/restore", methods=["POST"])
+def restore_route(port):
+    if not authorized() or not csrf_ok():
+        return "Forbidden", 403
+    config = store.load()
+    try:
+        change = next(item for item in config.get("last_route_changes", []) if int(item.get("port", 0)) == port)
+        if route_endpoint_id(config, port) != change.get("endpoint_id"):
+            raise ConfigError("线路已再次修改，不能使用这条旧恢复记录")
+        previous_id = change["previous_endpoint_id"]
+        endpoint = next(item for item in config["endpoints"] if item["id"] == previous_id)
+        set_route_endpoint(config, port, previous_id)
+        config["last_route_changes"] = [item for item in config.get("last_route_changes", []) if item is not change]
+        config["canary_routes"] = [item for item in config.get("canary_routes", []) if int(item.get("port", 0)) != port]
+        save_and_reload(config, f"restore-port:{port}:{change['endpoint_id']}->{previous_id}")
+        request_reconnect(port)
+        flash(f"端口 {port} 已恢复到 {endpoint['pool']}；该端口矿机正在自动重连。")
+    except (KeyError, StopIteration, ValueError, ConfigError, OSError) as exc:
+        flash(f"恢复失败：{exc}")
+    return redirect(url_for("dashboard_page", page="overview"))
 
 
 @app.route("/template/create", methods=["POST"])

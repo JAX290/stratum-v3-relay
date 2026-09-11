@@ -1,8 +1,9 @@
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from endpoint_monitor import EndpointMonitor, Notifier
+from endpoint_monitor import EndpointMonitor, Notifier, probe_stratum
 
 
 class EndpointMonitorTest(unittest.TestCase):
@@ -124,6 +125,30 @@ class EndpointMonitorTest(unittest.TestCase):
             self.assertTrue(set(template["endpoint_ids"]) <= endpoint_ids)
         for route in config["fixed_routes"]:
             self.assertIn(route["endpoint_id"], endpoint_ids)
+
+    def test_manual_probe_can_verify_pool_authorization(self):
+        class Connection:
+            def __init__(self):
+                self.responses = [
+                    b'{"id":73001,"result":[[],"session",4],"error":null}\n',
+                    b'{"id":73002,"result":true,"error":null}\n',
+                ]
+                self.sent = []
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def settimeout(self, value): pass
+            def sendall(self, value): self.sent.append(json.loads(value))
+            def recv(self, size): return self.responses.pop(0)
+
+        connection = Connection()
+        endpoint = {"host": "pool.example", "port": 3333, "transport": "tcp"}
+        with patch("endpoint_monitor.resolve_public", return_value=["203.0.113.10"]), \
+                patch("endpoint_monitor.socket.create_connection", return_value=connection):
+            result = probe_stratum(endpoint, username="wallet.worker", password="secret")
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["authorized"])
+        self.assertEqual(connection.sent[1]["method"], "mining.authorize")
+        self.assertEqual(connection.sent[1]["params"], ["wallet.worker", "secret"])
 
 
 if __name__ == "__main__":

@@ -48,20 +48,35 @@ class SecureServerTests(unittest.TestCase):
             ],
             "port_groups": [{"ports": [9999, 10001], "endpoint_ids": ["active", "backup"]}],
             "fixed_routes": [{"port": 11001, "endpoint_id": "backup"}],
+            "canary_routes": [{"port": 11001, "source_ip": "192.168.1.20", "endpoint_id": "active"}],
         }
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "v3.json"
             path.write_text(json.dumps(config), encoding="utf-8")
             with patch.object(secure, "V3_CONFIG_FILE", path):
                 self.assertEqual(secure.route_map(), {9999: 20001, 10001: 20002, 11001: 20002})
+                self.assertEqual(secure.route_map("192.168.1.20")[11001], 20001)
 
     def test_proxy_header_preserves_miner_lan_address(self):
         value = secure.proxy_header(
             {"x-miner-ip": "192.168.10.25", "x-miner-port": "45678"},
             ("198.51.100.4", 50000),
-            20002,
+            9999,
         )
-        self.assertEqual(value, b"PROXY TCP4 192.168.10.25 127.0.0.1 45678 20002\r\n")
+        self.assertEqual(value, b"PROXY TCP4 192.168.10.25 127.0.0.1 45678 9999\r\n")
+
+    def test_targeted_reconnect_only_closes_matching_miner(self):
+        class Writer:
+            def __init__(self): self.closed = False
+            def close(self): self.closed = True
+        with tempfile.TemporaryDirectory() as folder, patch.object(secure, "CONTROL_FILE", Path(folder) / "control.json"):
+            relay = secure.SecureRelay({"clients": [], "state_file": str(Path(folder) / "sites.json")})
+            first, second = Writer(), Writer()
+            relay.connections = {1: {"writer": first, "port": 11301, "miner_ip": "192.168.1.20"},
+                2: {"writer": second, "port": 11301, "miner_ip": "192.168.1.21"}}
+            self.assertEqual(relay.disconnect_matching(11301, "192.168.1.20"), 1)
+            self.assertTrue(first.closed)
+            self.assertFalse(second.closed)
 
     def test_missing_token_is_rejected(self):
         with self.assertRaises(PermissionError):

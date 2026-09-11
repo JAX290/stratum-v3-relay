@@ -30,6 +30,7 @@ class AdminV3Test(unittest.TestCase):
         admin.ENDPOINT_EVENT_FILE = root / "events.jsonl"
         admin.INSPECTOR_STATE_FILE = root / "inspector-state.json"
         admin.PUBLIC_IP_ALERT_STATE_FILE = root / "public-ip-alert.json"
+        admin.RELAY_CONTROL_FILE = root / "relay-control.json"
         admin.store = ConfigStore(config_path, root / "history", root / "audit.jsonl")
         admin.app.config.update(TESTING=True, SECRET_KEY="test")
         self.client = admin.app.test_client()
@@ -47,8 +48,8 @@ class AdminV3Test(unittest.TestCase):
         for label in ("总览", "矿机", "线路与端口", "报警", "设置", "日志"):
             self.assertIn(label.encode(), response.data)
         self.assertIn("关键看板".encode(), response.data)
-        self.assertIn(b"stratum+tcp://93.184.216.34:9999", response.data)
-        self.assertIn("复制".encode(), response.data)
+        self.assertIn("当前活跃转发线路".encode(), response.data)
+        self.assertIn("矿机仍填写值守电脑地址".encode(), response.data)
         response = self.client.post("/group/backup-1", data={
             "csrf": "token", "template_id": "viabtc-default", "mode": "template",
             "endpoint_0": "hashhut-ru", "endpoint_1": "hashhut-eu", "endpoint_2": "hashhut-by",
@@ -83,7 +84,56 @@ class AdminV3Test(unittest.TestCase):
         self.assertEqual(after["endpoint_ids"][1:], siblings)
         self.assertEqual(admin.read_actual_route_ids()[9999], "viabtc-io")
 
-    def test_relay_copy_address_uses_detected_vps_public_ip(self):
+    def test_fixed_route_supports_single_miner_canary_and_promotion(self):
+        admin.INSPECTOR_STATE_FILE.write_text(json.dumps({"pools": [{"id": "longpool-asia-8080",
+            "connections": [{"source_ip": "192.168.1.20", "public_port": 11301}], "workers": []}]}), encoding="utf-8")
+        with patch.object(admin, "probe_stratum", return_value={"ok": True, "stratum_ms": 12, "authorized": None}), \
+                patch.object(admin, "request_reconnect") as reconnect:
+            response = self.client.post("/route/11301/canary/start", data={"csrf": "token",
+                "endpoint_id": "f2pool-global", "source_ip": "192.168.1.20", "duration_minutes": "10"})
+        self.assertEqual(response.status_code, 302)
+        config = admin.store.load()
+        self.assertEqual(config["canary_routes"][0]["source_ip"], "192.168.1.20")
+        self.assertEqual(config["canary_routes"][0]["endpoint_id"], "f2pool-global")
+        reconnect.assert_called_once_with(11301, "192.168.1.20")
+
+        admin.INSPECTOR_STATE_FILE.write_text(json.dumps({"pools": [{"id": "f2pool-global", "workers": [{
+            "details": [{"source_ip": "192.168.1.20", "public_port": 11301, "status": "在线",
+                "submitted": 1, "accepted": 1, "rejected": 0}]}]}]}), encoding="utf-8")
+        with patch.object(admin, "request_reconnect") as reconnect:
+            response = self.client.post("/route/11301/canary/promote", data={"csrf": "token"})
+        self.assertEqual(response.status_code, 302)
+        config = admin.store.load()
+        route = next(item for item in config["fixed_routes"] if item["port"] == 11301)
+        self.assertEqual(route["endpoint_id"], "f2pool-global")
+        self.assertEqual(config.get("canary_routes"), [])
+        self.assertEqual(config["last_route_changes"][0]["previous_endpoint_id"], "longpool-asia-8080")
+        reconnect.assert_called_once_with(11301)
+
+        with patch.object(admin, "request_reconnect") as reconnect:
+            response = self.client.post("/route/11301/restore", data={"csrf": "token"})
+        self.assertEqual(response.status_code, 302)
+        config = admin.store.load()
+        route = next(item for item in config["fixed_routes"] if item["port"] == 11301)
+        self.assertEqual(route["endpoint_id"], "longpool-asia-8080")
+        self.assertEqual(config.get("last_route_changes"), [])
+        reconnect.assert_called_once_with(11301)
+
+    def test_canary_blocks_mismatched_algorithm_before_reconnect(self):
+        config = admin.store.load()
+        next(item for item in config["endpoints"] if item["id"] == "f2pool-global")["algorithm"] = "sha256d"
+        admin.store.save(config, action="test-algorithm")
+        admin.INSPECTOR_STATE_FILE.write_text(json.dumps({"pools": [{"id": "longpool-asia-8080",
+            "connections": [{"source_ip": "192.168.1.20", "public_port": 11301}], "workers": []}]}), encoding="utf-8")
+        with patch.object(admin, "probe_stratum") as probe, patch.object(admin, "request_reconnect") as reconnect:
+            response = self.client.post("/route/11301/canary/start", data={"csrf": "token",
+                "endpoint_id": "f2pool-global", "source_ip": "192.168.1.20", "duration_minutes": "10"})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(admin.store.load().get("canary_routes", []), [])
+        self.assertFalse(probe.called)
+        self.assertFalse(reconnect.called)
+
+    def test_overview_does_not_tell_miners_to_bypass_encrypted_relay(self):
         def fake_run(command, **kwargs):
             class Result:
                 stdout = "1.1.1.1 via 93.184.216.1 dev ens17 src 93.184.216.34 uid 0\n"
@@ -93,23 +143,19 @@ class AdminV3Test(unittest.TestCase):
         with patch.object(admin.subprocess, "run", side_effect=fake_run):
             response = self.client.get("/overview")
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"stratum+tcp://93.184.216.34:9999", response.data)
-        self.assertNotIn(b"stratum+tcp://localhost:9999", response.data)
+        self.assertNotIn(b"stratum+tcp://93.184.216.34:9999", response.data)
+        self.assertIn("矿机仍填写值守电脑地址".encode(), response.data)
 
-    def test_missing_public_ip_disables_copy_and_sends_wechat_alert(self):
+    def test_missing_public_ip_does_not_create_misleading_mining_alarm(self):
         admin.ENV_FILE.write_text("WECHAT_WEBHOOK=https://qyapi.example/webhook\n", encoding="utf-8")
         status = {"ok": False, "host": "", "source": "", "message": "无法从默认出公网路由识别 VPS 公网 IPv4"}
         with patch.object(admin, "detect_relay_public_ip", return_value=status), \
                 patch.object(admin.urllib.request, "urlopen") as urlopen:
             response = self.client.get("/overview")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("当前 VPS 公网 IP 无法获取".encode(), response.data)
-        self.assertIn("当前IP无法获取".encode(), response.data)
-        self.assertIn("不可复制".encode(), response.data)
-        self.assertNotIn(b"stratum+tcp://", response.data)
-        self.assertTrue(urlopen.called)
-        events = admin.ENDPOINT_EVENT_FILE.read_text(encoding="utf-8")
-        self.assertIn("public_ip_missing", events)
+        self.assertNotIn(b"stratum+tcp://93.184.216.34", response.data)
+        self.assertFalse(urlopen.called)
+        self.assertFalse(admin.ENDPOINT_EVENT_FILE.exists())
 
     def test_all_dashboard_pages_render(self):
         for page in ("overview", "miners", "routes", "alerts", "settings", "logs"):
