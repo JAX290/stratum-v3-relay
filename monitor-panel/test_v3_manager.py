@@ -43,6 +43,13 @@ class V3ManagerTest(unittest.TestCase):
         with self.assertRaises(ConfigError):
             validate_config(config)
 
+    def test_legacy_route_history_does_not_block_upgrade(self):
+        config = json.loads(json.dumps(self.config))
+        config["last_route_changes"] = [{"port": 11301,
+            "previous_endpoint_id": "longpool-asia-8080", "endpoint_id": "f2pool-global"}
+            for _ in range(20)]
+        self.assertTrue(validate_config(config))
+
     def test_history_and_rollback(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

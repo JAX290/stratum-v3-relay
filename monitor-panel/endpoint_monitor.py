@@ -400,6 +400,17 @@ class Notifier:
             return (f"{titles[kind]}\n时间（北京时间）：{timestamp}\n端口：{event.get('port', '未知')}"
                 f"\n测试矿机：{event.get('source_ip') or '无'}\n矿池：{event.get('pool', '未知')}"
                 f"\n上游地址：{endpoint}{shares}\n结果：{event.get('message', '未提供')}")
+        if kind in {"canary_started", "canary_stopped", "route_restored", "route_sync_ok", "route_sync_failed", "route_sync_received"}:
+            titles = {"canary_started": "【测试】新矿池单机测试已开始",
+                "canary_stopped": "【停止】新矿池单机测试已提前停止",
+                "route_restored": "【恢复】历史线路已恢复",
+                "route_sync_ok": "【同步】对等 VPS 线路同步成功",
+                "route_sync_failed": "【待重试】对等 VPS 线路同步暂时失败",
+                "route_sync_received": "【同步】已接收对等 VPS 线路设置"}
+            peer = f"\n对端VPS：{event.get('peer')}" if event.get("peer") else ""
+            return (f"{titles[kind]}\n时间（北京时间）：{timestamp}\n端口：{event.get('port', '未知')}"
+                f"\n矿池：{event.get('pool', '未知')}\n上游地址：{endpoint}{peer}"
+                f"\n结果：{event.get('message', '未提供')}")
         if kind == "integrity_changed":
             return (f"【严重】中转服务器受保护文件发生变化\n时间（北京时间）：{timestamp}\n文件：{endpoint}"
                 f"\n变化说明：{event.get('message', '文件内容或存在状态变化')}\n原批准哈希：{event.get('expected', {}).get('sha256') or '文件原本不存在'}"

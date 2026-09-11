@@ -16,7 +16,7 @@ from ipaddress import ip_address
 from urllib.parse import urlsplit
 from pathlib import Path
 
-from flask import Flask, flash, redirect, render_template, render_template_string, request, session, url_for
+from flask import Flask, flash, jsonify, redirect, render_template, render_template_string, request, session, url_for
 from werkzeug.security import check_password_hash
 
 from endpoint_monitor import Notifier, beijing_time, probe_stratum
@@ -38,10 +38,13 @@ ENDPOINT_EVENT_FILE = Path(os.getenv("ENDPOINT_EVENT_FILE", "/var/lib/stratum-mo
 SECURITY_STATE_FILE = Path(os.getenv("INTEGRITY_STATE_FILE", "/var/lib/stratum-monitor/security-state.json"))
 PUBLIC_IP_ALERT_STATE_FILE = Path(os.getenv("PUBLIC_IP_ALERT_STATE_FILE", "/var/lib/stratum-monitor/public-ip-alert.json"))
 RELAY_CONTROL_FILE = Path(os.getenv("SECURE_RELAY_CONTROL", "/var/lib/stratum-secure-relay/control.json"))
+PEER_SYNC_FILE = Path(os.getenv("V3_PEER_SYNC_FILE", "/etc/stratum-v3-peer.json"))
+PEER_OUTBOX_FILE = Path(os.getenv("V3_PEER_OUTBOX_FILE", "/var/lib/stratum-monitor/peer-sync-outbox.json"))
+PEER_STATE_FILE = Path(os.getenv("V3_PEER_STATE_FILE", "/var/lib/stratum-monitor/peer-sync-state.json"))
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("PANEL_SECRET_KEY", secrets.token_hex(32))
-app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict")
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict", MAX_CONTENT_LENGTH=65536)
 store = ConfigStore(CONFIG_FILE, HISTORY_DIR, AUDIT_FILE)
 
 
@@ -232,7 +235,9 @@ def endpoint_miner_totals(inspector, endpoint_id, source_ip, public_port):
 def forwarding_rows(config, endpoint_state, inspector):
     endpoint_map = {item["id"]: item for item in config.get("endpoints", [])}
     canary_map = {int(item["port"]): item for item in config.get("canary_routes", [])}
-    change_map = {int(item["port"]): item for item in config.get("last_route_changes", [])}
+    change_map = {}
+    for item in route_change_history(config):
+        change_map.setdefault(int(item["port"]), item)
     rows = []
     for public_port, endpoint_id, _, group_name in route_map(config):
         endpoint = endpoint_map[endpoint_id]
@@ -687,6 +692,8 @@ def build_page_context(page):
     visible_forwarding = [row for row in active_forwarding if row["connections"] or row.get("canary")]
     if not visible_forwarding:
         visible_forwarding = active_forwarding
+    peer_settings = load_peer_settings()
+    peer_outbox = load_json(PEER_OUTBOX_FILE, {"items": []})
     return dict(page=page, config=config, endpoint_map=endpoint_map, endpoint_rows=rows,
         online=sum(1 for row in rows if row["ok"]), alerting=sum(1 for value in state.get("endpoints", {}).values() if value.get("alerting")),
         services={"HAProxy": service_state("haproxy"), "协议检查器": service_state("stratum-inspector-v3"),
@@ -700,6 +707,13 @@ def build_page_context(page):
         active_forwarding=active_forwarding, visible_forwarding=visible_forwarding, miner_ips=online_miner_ips(inspector),
         endpoint_options=[{**endpoint, "algorithm_value": endpoint_algorithm(config, endpoint)} for endpoint in config["endpoints"]],
         verified_endpoints=[{**endpoint, "algorithm_value": endpoint_algorithm(config, endpoint)} for endpoint in config["endpoints"] if endpoint.get("verified")],
+        route_history=route_history_rows(config), route_events=route_event_rows(),
+        peer_settings=peer_settings, peer_pending=len(peer_outbox.get("items", [])),
+        route_event_labels={"canary_started": "测试已开始", "canary_passed": "测试通过并切换",
+            "canary_failed": "测试失败并退回", "canary_stopped": "测试已提前停止",
+            "verified_route_applied": "已验证地址切换", "route_restored": "历史线路已恢复",
+            "route_sync_ok": "备用VPS同步成功", "route_sync_failed": "备用VPS同步失败",
+            "route_sync_received": "已接收VPS同步"},
         algorithms={"scrypt": "Scrypt", "sha256d": "SHA-256", "other": "其他/自定义", "unknown": "算法待确认"},
         security=security, csrf=session["csrf"])
 
@@ -725,6 +739,7 @@ def save_group(group_id):
     if not authorized() or not csrf_ok():
         return "Forbidden", 403
     config = store.load()
+    before_routes = {port: endpoint_id for port, endpoint_id, _, _ in route_map(config)}
     group = next((item for item in config["port_groups"] if item["id"] == group_id), None)
     if not group:
         return "Not found", 404
@@ -743,6 +758,9 @@ def save_group(group_id):
                 endpoint_ids.append(selected)
             group["endpoint_ids"] = endpoint_ids
         save_and_reload(config, f"update-group:{group_id}")
+        for changed_port, endpoint_id, _, _ in route_map(config):
+            if before_routes.get(changed_port) != endpoint_id:
+                queue_route_sync(config, changed_port, f"update-group:{group_id}")
         flash(f"{group['name']} 已保存；新连接使用新配置，已有连接继续保持。")
     except (KeyError, StopIteration, ConfigError, OSError) as exc:
         flash(f"保存失败：{exc}")
@@ -772,10 +790,146 @@ def endpoint_from_form(config, port):
 
 
 def remember_route_change(config, port, previous_endpoint_id, endpoint_id):
-    changes = [item for item in config.get("last_route_changes", []) if int(item.get("port", 0)) != int(port)]
-    changes.append({"port": int(port), "previous_endpoint_id": previous_endpoint_id,
-        "endpoint_id": endpoint_id, "changed_at": int(time.time())})
-    config["last_route_changes"] = changes[-30:]
+    changes = list(reversed(route_change_history(config)))
+    changes.append({"id": secrets.token_hex(8), "port": int(port),
+        "previous_endpoint_id": previous_endpoint_id, "endpoint_id": endpoint_id,
+        "changed_at": int(time.time())})
+    config["route_change_history"] = changes[-10:]
+    config.pop("last_route_changes", None)
+
+
+def route_change_history(config):
+    changes = config.get("route_change_history")
+    if changes is None:
+        changes = config.get("last_route_changes", [])
+    return list(reversed(changes))
+
+
+def route_history_rows(config):
+    endpoint_map = {item["id"]: item for item in config.get("endpoints", [])}
+    rows = []
+    for change in route_change_history(config)[:10]:
+        previous = endpoint_map.get(change.get("previous_endpoint_id"))
+        endpoint = endpoint_map.get(change.get("endpoint_id"))
+        if not previous or not endpoint:
+            continue
+        rows.append({**change, "id": change.get("id", ""), "previous_endpoint": previous,
+            "endpoint": endpoint, "display_time": beijing_time(change.get("changed_at", 0))})
+    return rows
+
+
+def route_event_rows(limit=10):
+    rows = []
+    try:
+        lines = ENDPOINT_EVENT_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return rows
+    kinds = {"canary_started", "canary_passed", "canary_failed", "canary_stopped",
+        "verified_route_applied", "route_restored", "route_sync_ok", "route_sync_failed", "route_sync_received"}
+    for line in reversed(lines):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if event.get("type") not in kinds:
+            continue
+        rows.append({**event, "display_time": beijing_time(event.get("time", 0))})
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def load_peer_settings():
+    value = load_json(PEER_SYNC_FILE, {})
+    return {"enabled": bool(value.get("enabled")), "peers": list(value.get("peers", []))[:4],
+        "token": str(value.get("token", ""))}
+
+
+def validate_peer_url(value):
+    parsed = urlsplit(str(value).strip().rstrip("/"))
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ConfigError("同步地址必须是Tailscale提供的HTTPS地址")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise ConfigError("同步地址只填写VPS首页地址，不要附加路径或参数")
+    try:
+        address = ip_address(parsed.hostname)
+    except ValueError:
+        if not parsed.hostname.lower().endswith(".ts.net"):
+            raise ConfigError("同步域名必须是Tailscale的 .ts.net 地址")
+    else:
+        if address.is_global:
+            raise ConfigError("同步地址只能使用Tailscale或内网地址")
+    return f"https://{parsed.netloc}"
+
+
+def queue_route_sync(config, port, action):
+    settings = load_peer_settings()
+    if not settings["enabled"] or len(settings["token"]) < 32 or not settings["peers"]:
+        return 0
+    endpoint_id = route_endpoint_id(config, port)
+    endpoint = next(item for item in config["endpoints"] if item["id"] == endpoint_id)
+    allowed = ("id", "pool", "region", "host", "port", "algorithm", "coins", "transport",
+        "source", "enabled", "verified", "verified_at", "verified_test")
+    payload = {"event_id": secrets.token_hex(16), "created_at": int(time.time()), "revision": time.time_ns(),
+        "source": socket.gethostname(), "port": int(port), "action": str(action)[:80],
+        "endpoint": {key: endpoint[key] for key in allowed if key in endpoint}}
+    outbox = load_json(PEER_OUTBOX_FILE, {"items": []})
+    items = list(outbox.get("items", []))
+    for peer in settings["peers"]:
+        items.append({"id": secrets.token_hex(12), "peer": validate_peer_url(peer),
+            "payload": payload, "attempts": 0, "next_attempt": 0})
+    ConfigStore._atomic_write(PEER_OUTBOX_FILE,
+        json.dumps({"items": items[-100:]}, ensure_ascii=False, indent=2) + "\n", mode=0o600)
+    return len(settings["peers"])
+
+
+def apply_peer_payload(payload):
+    if not isinstance(payload, dict) or not isinstance(payload.get("endpoint"), dict):
+        raise ConfigError("同步数据格式不正确")
+    event_id = str(payload.get("event_id", ""))
+    if not re.fullmatch(r"[a-f0-9]{32}", event_id):
+        raise ConfigError("同步事件编号不合法")
+    state = load_json(PEER_STATE_FILE, {"received": []})
+    if event_id in state.get("received", []):
+        return {"duplicate": True, "changed": False}
+    port = int(payload.get("port", 0))
+    source = str(payload.get("source", "vps"))[:80]
+    revision = int(payload.get("revision", payload.get("created_at", 0)))
+    latest_key = f"{source}:{port}"
+    if revision <= int(state.get("latest", {}).get(latest_key, -1)):
+        state["received"] = (list(state.get("received", [])) + [event_id])[-200:]
+        ConfigStore._atomic_write(PEER_STATE_FILE, json.dumps(state, ensure_ascii=False, indent=2) + "\n", mode=0o600)
+        return {"duplicate": False, "stale": True, "changed": False}
+    config = store.load()
+    locate_route(config, port)
+    supplied = payload["endpoint"]
+    allowed = ("id", "pool", "region", "host", "port", "algorithm", "coins", "transport",
+        "source", "enabled", "verified", "verified_at", "verified_test")
+    endpoint = {key: supplied[key] for key in allowed if key in supplied}
+    endpoint_id = str(endpoint.get("id", ""))
+    if not endpoint_id or len(endpoint_id) > 100:
+        raise ConfigError("同步矿池地址ID不合法")
+    existing = next((item for item in config["endpoints"] if item["id"] == endpoint_id), None)
+    if existing:
+        existing.update(endpoint)
+        endpoint = existing
+    else:
+        config["endpoints"].append(endpoint)
+    current_id = route_endpoint_id(config, port)
+    changed = current_id != endpoint_id
+    if changed:
+        set_route_endpoint(config, port, endpoint_id)
+        remember_route_change(config, port, current_id, endpoint_id)
+    config["canary_routes"] = [item for item in config.get("canary_routes", []) if int(item.get("port", 0)) != port]
+    save_and_reload(config, f"peer-sync:{port}:{current_id}->{endpoint_id}", actor_value=f"peer:{source}")
+    if changed:
+        request_reconnect(port)
+    state["received"] = (list(state.get("received", [])) + [event_id])[-200:]
+    state.setdefault("latest", {})[latest_key] = revision
+    ConfigStore._atomic_write(PEER_STATE_FILE, json.dumps(state, ensure_ascii=False, indent=2) + "\n", mode=0o600)
+    send_route_event("route_sync_received", port, endpoint,
+        f"已接收对端VPS的线路设置并{'完成切换' if changed else '确认一致'}。")
+    return {"duplicate": False, "changed": changed}
 
 
 def send_route_event(kind, port, endpoint, message, **extra):
@@ -833,6 +987,7 @@ def apply_route(port):
             save_and_reload(original_config, f"auto-rollback-port:{port}")
             raise ConfigError(f"保存后核验失败：配置目标为 {endpoint_id}，实际HAProxy目标为 {actual or '未找到'}")
         endpoint = next(item for item in config["endpoints"] if item["id"] == endpoint_id)
+        queue_route_sync(config, port, f"update-port:{port}")
         flash(f"端口 {port} 已应用到 {endpoint['host']}:{endpoint['port']}；现有连接保持原目标，新连接使用新目标。")
     except (KeyError, StopIteration, ConfigError, OSError) as exc:
         flash(f"端口 {port} 应用失败：{exc}")
@@ -879,6 +1034,8 @@ def start_canary(port):
         config["canary_routes"].append(canary)
         save_and_reload(config, f"start-canary:{port}:{source_ip}:{current_id}->{target_id}")
         request_reconnect(port, source_ip)
+        send_route_event("canary_started", port, endpoint_map[target_id],
+            f"矿机 {source_ip} 已开始10分钟自动测试。", source_ip=source_ip)
         flash(f"已让矿机 {source_ip} 在端口 {port} 试运行 {endpoint_map[target_id]['pool']}；10分钟后系统会自动判定、切换或退回，并发送企业微信通知。")
     except (KeyError, StopIteration, ValueError, ConfigError, OSError) as exc:
         flash(f"无法开始单机试切：{exc}")
@@ -895,6 +1052,10 @@ def stop_canary(port):
         config["canary_routes"] = [item for item in config.get("canary_routes", []) if item is not canary]
         save_and_reload(config, f"stop-canary:{port}:{canary.get('source_ip')}")
         request_reconnect(port, canary.get("source_ip", ""))
+        endpoint = next((item for item in config["endpoints"] if item["id"] == canary.get("endpoint_id")), {})
+        send_route_event("canary_stopped", port, endpoint,
+            f"矿机 {canary.get('source_ip', '')} 的测试已人工提前停止并返回原线路。",
+            source_ip=canary.get("source_ip", ""))
         flash(f"端口 {port} 的单机试切已停止，测试矿机正在返回原线路。")
     return redirect(url_for("dashboard_page", page="overview"))
 
@@ -917,6 +1078,7 @@ def promote_canary(port):
         save_and_reload(config, f"promote-canary:{port}:{previous}->{canary['endpoint_id']}")
         request_reconnect(port)
         endpoint = next(item for item in config["endpoints"] if item["id"] == canary["endpoint_id"])
+        queue_route_sync(config, port, f"promote-canary:{port}")
         flash(f"端口 {port} 已全量切换到 {endpoint['pool']}；该端口现有矿机正在自动重连，其他端口不受影响。")
     except (KeyError, StopIteration, ValueError, ConfigError, OSError) as exc:
         flash(f"暂不能全量切换：{exc}")
@@ -929,16 +1091,22 @@ def restore_route(port):
         return "Forbidden", 403
     config = store.load()
     try:
-        change = next(item for item in config.get("last_route_changes", []) if int(item.get("port", 0)) == port)
-        if route_endpoint_id(config, port) != change.get("endpoint_id"):
-            raise ConfigError("线路已再次修改，不能使用这条旧恢复记录")
+        change_id = request.form.get("change_id", "")
+        change = next(item for item in route_change_history(config)
+            if int(item.get("port", 0)) == port and (not change_id or item.get("id", "") == change_id))
         previous_id = change["previous_endpoint_id"]
         endpoint = next(item for item in config["endpoints"] if item["id"] == previous_id)
+        current_id = route_endpoint_id(config, port)
+        if current_id == previous_id:
+            raise ConfigError("该端口当前已经使用这条线路")
         set_route_endpoint(config, port, previous_id)
-        config["last_route_changes"] = [item for item in config.get("last_route_changes", []) if item is not change]
+        remember_route_change(config, port, current_id, previous_id)
         config["canary_routes"] = [item for item in config.get("canary_routes", []) if int(item.get("port", 0)) != port]
-        save_and_reload(config, f"restore-port:{port}:{change['endpoint_id']}->{previous_id}")
+        save_and_reload(config, f"restore-port:{port}:{current_id}->{previous_id}")
         request_reconnect(port)
+        send_route_event("route_restored", port, endpoint,
+            f"端口 {port} 已恢复到历史线路，矿机正在自动重连。")
+        queue_route_sync(config, port, f"restore-port:{port}")
         flash(f"端口 {port} 已恢复到 {endpoint['pool']}；该端口矿机正在自动重连。")
     except (KeyError, StopIteration, ValueError, ConfigError, OSError) as exc:
         flash(f"恢复失败：{exc}")
@@ -969,10 +1137,55 @@ def apply_verified_route(port):
         request_reconnect(port)
         send_route_event("verified_route_applied", port, endpoint,
             f"端口 {port} 已从已验证地址库直接切换，矿机正在自动重连。")
+        queue_route_sync(config, port, f"apply-verified:{port}")
         flash(f"端口 {port} 已直接切换到已验证地址 {endpoint['pool']}；该端口矿机正在自动重连。")
     except (KeyError, StopIteration, ValueError, ConfigError, OSError) as exc:
         flash(f"直接切换失败：{exc}")
     return redirect(url_for("dashboard_page", page="overview"))
+
+
+@app.route("/peer-settings", methods=["POST"])
+def save_peer_settings():
+    if not authorized() or not csrf_ok():
+        return "Forbidden", 403
+    try:
+        enabled = request.form.get("enabled") == "1"
+        peers = []
+        for line in request.form.get("peers", "").splitlines():
+            value = line.strip()
+            if value:
+                normalized = validate_peer_url(value)
+                if normalized not in peers:
+                    peers.append(normalized)
+        if len(peers) > 4:
+            raise ConfigError("最多配置4台对等VPS")
+        token = request.form.get("token", "").strip()
+        if enabled and not token:
+            token = secrets.token_hex(32)
+        if enabled and (len(token) < 32 or not peers):
+            raise ConfigError("启用同步时必须填写对端地址和至少32位的共享同步密钥")
+        ConfigStore._atomic_write(PEER_SYNC_FILE,
+            json.dumps({"enabled": enabled, "peers": peers, "token": token}, ensure_ascii=False, indent=2) + "\n",
+            mode=0o600)
+        approve_integrity([PEER_SYNC_FILE])
+        flash("VPS双向同步设置已保存。请确保另一台VPS填写相同同步密钥，并把本机地址填为其对端。")
+    except (ValueError, ConfigError, OSError) as exc:
+        flash(f"VPS同步设置保存失败：{exc}")
+    return redirect(url_for("dashboard_page", page="settings"))
+
+
+@app.route("/api/v3/route-sync", methods=["POST"])
+def receive_route_sync():
+    settings = load_peer_settings()
+    authorization = request.headers.get("Authorization", "")
+    supplied = authorization[7:] if authorization.startswith("Bearer ") else ""
+    if not settings["enabled"] or len(settings["token"]) < 32 or not secrets.compare_digest(settings["token"], supplied):
+        return "Not found", 404
+    try:
+        result = apply_peer_payload(request.get_json(silent=False))
+        return jsonify({"ok": True, **result})
+    except (KeyError, StopIteration, TypeError, ValueError, ConfigError, OSError) as exc:
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 400
 
 
 @app.route("/template/create", methods=["POST"])

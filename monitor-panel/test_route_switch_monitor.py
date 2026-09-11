@@ -28,6 +28,9 @@ class RouteSwitchMonitorTest(unittest.TestCase):
         admin.INSPECTOR_STATE_FILE = root / "inspector-state.json"
         admin.RELAY_CONTROL_FILE = root / "control.json"
         admin.ENDPOINT_EVENT_FILE = root / "events.jsonl"
+        admin.PEER_SYNC_FILE = root / "peer.json"
+        admin.PEER_OUTBOX_FILE = root / "peer-outbox.json"
+        admin.PEER_STATE_FILE = root / "peer-state.json"
         admin.store = ConfigStore(config_path, root / "history", root / "audit.jsonl")
         self.events = []
 
@@ -62,6 +65,45 @@ class RouteSwitchMonitorTest(unittest.TestCase):
         self.assertEqual(route["endpoint_id"], "longpool-asia-8080")
         self.assertEqual(config["canary_routes"], [])
         reconnect.assert_called_once_with(11301, "192.168.1.20")
+
+    def test_peer_outbox_delivers_and_removes_item(self):
+        token = "c" * 64
+        admin.PEER_SYNC_FILE.write_text(json.dumps({"enabled": True,
+            "peers": ["https://peer.tail1234.ts.net"], "token": token}), encoding="utf-8")
+        admin.queue_route_sync(admin.store.load(), 11301, "test")
+        captured = {}
+
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return b'{"ok":true,"changed":true}'
+
+        def opener(request, timeout):
+            captured["url"] = request.full_url
+            captured["auth"] = request.headers["Authorization"]
+            return Response()
+
+        result = switcher.flush_peer_outbox(now=1000, opener=opener, notifier=self.events.append)
+        self.assertEqual(result, {"sent": 1, "pending": 0})
+        self.assertEqual(captured["url"], "https://peer.tail1234.ts.net/api/v3/route-sync")
+        self.assertEqual(captured["auth"], "Bearer " + token)
+        self.assertEqual(json.loads(admin.PEER_OUTBOX_FILE.read_text(encoding="utf-8"))["items"], [])
+
+    def test_peer_outbox_failure_is_retained_for_retry(self):
+        token = "d" * 64
+        admin.PEER_SYNC_FILE.write_text(json.dumps({"enabled": True,
+            "peers": ["https://peer.tail1234.ts.net"], "token": token}), encoding="utf-8")
+        admin.queue_route_sync(admin.store.load(), 11301, "test")
+
+        def opener(request, timeout):
+            raise OSError("offline")
+
+        result = switcher.flush_peer_outbox(now=1000, opener=opener, notifier=self.events.append)
+        self.assertEqual(result, {"sent": 0, "pending": 1})
+        item = json.loads(admin.PEER_OUTBOX_FILE.read_text(encoding="utf-8"))["items"][0]
+        self.assertEqual(item["attempts"], 1)
+        self.assertGreater(item["next_attempt"], 1000)
+        self.assertEqual(self.events[0]["type"], "route_sync_failed")
 
 
 if __name__ == "__main__":

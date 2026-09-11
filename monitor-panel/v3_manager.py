@@ -94,7 +94,11 @@ def validate_config(config, resolve=False):
             raise ConfigError(f"单机试切引用了不存在的端口：{port}")
         if canary.get("endpoint_id") not in endpoint_map:
             raise ConfigError("单机试切引用了不存在的矿池地址")
-    for change in config.get("last_route_changes", []):
+    new_history = config.get("route_change_history")
+    if new_history is not None and len(new_history) > 10:
+        raise ConfigError("线路恢复记录最多保留10条")
+    changes = new_history if new_history is not None else config.get("last_route_changes", [])[-10:]
+    for change in changes:
         try:
             port = int(change.get("port", 0))
         except (TypeError, ValueError):

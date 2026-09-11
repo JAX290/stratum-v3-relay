@@ -24,6 +24,7 @@ if [[ -f /opt/stratum-secure-server.py ]]; then cp -a /opt/stratum-secure-server
 if [[ -f /opt/stratum-admin/route_switch_monitor.py ]]; then cp -a /opt/stratum-admin/route_switch_monitor.py "$backup/"; fi
 if [[ -f /opt/stratum-admin/templates/v3_dashboard.html ]]; then cp -a /opt/stratum-admin/templates/v3_dashboard.html "$backup/"; fi
 if [[ -f /opt/stratum-admin/static/v3.css ]]; then cp -a /opt/stratum-admin/static/v3.css "$backup/"; fi
+if [[ -f /etc/stratum-v3-peer.json ]]; then cp -a /etc/stratum-v3-peer.json "$backup/"; fi
 
 python3 -m py_compile ./stratum_admin_v3.py ./stratum_inspector.py ./endpoint_monitor.py ./security_monitor.py ./v3_manager.py ./route_switch_monitor.py "$secure_server"
 systemctl stop stratum-security-monitor.service
@@ -82,7 +83,7 @@ systemctl restart stratum-admin.service
 systemctl start stratum-secure-relay.service
 systemctl start stratum-route-switch-monitor.service
 
-PYTHONPATH=/opt/stratum-admin python3 -c "from security_monitor import BASELINE_FILE,atomic_write,load,snapshot; p=['/opt/stratum-admin/stratum_admin_v3.py','/opt/stratum-admin/stratum_inspector.py','/opt/stratum-admin/endpoint_monitor.py','/opt/stratum-admin/security_monitor.py','/opt/stratum-admin/route_switch_monitor.py','/opt/stratum-admin/templates/v3_dashboard.html','/opt/stratum-admin/static/v3.css','/opt/stratum-secure-server.py','/etc/systemd/system/stratum-route-switch-monitor.service','/etc/stratum-inspector.json','/etc/haproxy/haproxy.cfg']; b=load(BASELINE_FILE,{}); b.update(snapshot(p)); atomic_write(BASELINE_FILE,b)"
+PYTHONPATH=/opt/stratum-admin python3 -c "from security_monitor import BASELINE_FILE,atomic_write,load,snapshot; p=['/opt/stratum-admin/stratum_admin_v3.py','/opt/stratum-admin/stratum_inspector.py','/opt/stratum-admin/endpoint_monitor.py','/opt/stratum-admin/security_monitor.py','/opt/stratum-admin/route_switch_monitor.py','/opt/stratum-admin/templates/v3_dashboard.html','/opt/stratum-admin/static/v3.css','/opt/stratum-secure-server.py','/etc/systemd/system/stratum-route-switch-monitor.service','/etc/stratum-v3-peer.json','/etc/stratum-inspector.json','/etc/haproxy/haproxy.cfg']; b=load(BASELINE_FILE,{}); b.update(snapshot(p)); atomic_write(BASELINE_FILE,b)"
 rm -f "$candidate_inspector" "$candidate_haproxy"
 systemctl start stratum-security-monitor.service
 trap - EXIT

@@ -17,6 +17,7 @@ STATE_FILE = Path(os.getenv("INTEGRITY_STATE_FILE", "/var/lib/stratum-monitor/se
 INSPECTOR_STATE_FILE = Path(os.getenv("INSPECTOR_STATE_FILE", "/var/lib/stratum-inspector/state.json"))
 DEFAULT_PATHS = [
     "/etc/stratum-v3.json",
+    "/etc/stratum-v3-peer.json",
     "/etc/stratum-inspector.json",
     "/etc/haproxy/stratum-v3.cfg",
     "/etc/systemd/system/stratum-inspector.service",

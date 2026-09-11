@@ -2,9 +2,12 @@
 """Finish timed single-miner route trials without requiring the panel to stay open."""
 
 import argparse
+import json
 import logging
 import os
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import stratum_admin_v3 as admin
@@ -61,6 +64,7 @@ def evaluate_due(now=None, notifier=None):
                 "reject_percent": reject_percent}
             admin.save_and_reload(config, f"auto-promote-canary:{port}:{previous}->{canary['endpoint_id']}", actor_value="automatic")
             admin.request_reconnect(port)
+            admin.queue_route_sync(config, port, f"auto-promote-canary:{port}")
             event_type = "canary_passed"
             message = f"单机试跑通过并已自动全量切换。{reason}"
         else:
@@ -78,6 +82,56 @@ def evaluate_due(now=None, notifier=None):
     return completed
 
 
+def flush_peer_outbox(now=None, opener=None, notifier=None):
+    """Deliver queued route changes to peer VPS nodes, retaining failures for retry."""
+    now = int(now or time.time())
+    opener = opener or urllib.request.urlopen
+    notifier = notifier or Notifier(os.getenv("WECHAT_WEBHOOK", ""), admin.ENDPOINT_EVENT_FILE)
+    settings = admin.load_peer_settings()
+    outbox = admin.load_json(admin.PEER_OUTBOX_FILE, {"items": []})
+    items = list(outbox.get("items", []))
+    if not items or not settings["enabled"] or len(settings["token"]) < 32:
+        return {"sent": 0, "pending": len(items)}
+    pending = []
+    sent = 0
+    for item in items:
+        if int(item.get("next_attempt", 0)) > now:
+            pending.append(item)
+            continue
+        payload = item.get("payload", {})
+        peer = str(item.get("peer", "")).rstrip("/")
+        endpoint = payload.get("endpoint", {})
+        try:
+            request = urllib.request.Request(peer + "/api/v3/route-sync",
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), method="POST",
+                headers={"Authorization": "Bearer " + settings["token"],
+                    "Content-Type": "application/json", "User-Agent": "stratum-v3-peer/1"})
+            with opener(request, timeout=8) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            if not result.get("ok"):
+                raise OSError(result.get("error", "对端拒绝同步"))
+            sent += 1
+            notifier({"time": now, "type": "route_sync_ok", "port": payload.get("port"),
+                "pool": endpoint.get("pool", "未知矿池"),
+                "endpoint": f"{endpoint.get('host', '')}:{endpoint.get('port', '')}",
+                "peer": peer, "message": f"线路设置已同步到 {peer}。"})
+        except (OSError, ValueError, urllib.error.URLError) as exc:
+            attempts = int(item.get("attempts", 0)) + 1
+            item["attempts"] = attempts
+            item["next_attempt"] = now + min(300, 5 * (2 ** min(attempts - 1, 6)))
+            item["last_error"] = str(exc)[:300]
+            if not item.get("failure_logged"):
+                notifier({"time": now, "type": "route_sync_failed", "port": payload.get("port"),
+                    "pool": endpoint.get("pool", "未知矿池"),
+                    "endpoint": f"{endpoint.get('host', '')}:{endpoint.get('port', '')}",
+                    "peer": peer, "message": f"暂时无法同步到 {peer}，后台会自动重试：{exc}"})
+                item["failure_logged"] = True
+            pending.append(item)
+    admin.ConfigStore._atomic_write(admin.PEER_OUTBOX_FILE,
+        json.dumps({"items": pending[-100:]}, ensure_ascii=False, indent=2) + "\n", mode=0o600)
+    return {"sent": sent, "pending": len(pending)}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")
@@ -85,6 +139,7 @@ def main():
     while True:
         try:
             evaluate_due()
+            flush_peer_outbox()
         except Exception:
             logging.exception("automatic route trial evaluation failed")
         if args.once:

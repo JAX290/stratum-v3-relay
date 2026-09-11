@@ -31,6 +31,9 @@ class AdminV3Test(unittest.TestCase):
         admin.INSPECTOR_STATE_FILE = root / "inspector-state.json"
         admin.PUBLIC_IP_ALERT_STATE_FILE = root / "public-ip-alert.json"
         admin.RELAY_CONTROL_FILE = root / "relay-control.json"
+        admin.PEER_SYNC_FILE = root / "peer.json"
+        admin.PEER_OUTBOX_FILE = root / "peer-outbox.json"
+        admin.PEER_STATE_FILE = root / "peer-state.json"
         admin.store = ConfigStore(config_path, root / "history", root / "audit.jsonl")
         admin.app.config.update(TESTING=True, SECRET_KEY="test")
         self.client = admin.app.test_client()
@@ -107,7 +110,7 @@ class AdminV3Test(unittest.TestCase):
         route = next(item for item in config["fixed_routes"] if item["port"] == 11301)
         self.assertEqual(route["endpoint_id"], "f2pool-global")
         self.assertEqual(config.get("canary_routes"), [])
-        self.assertEqual(config["last_route_changes"][0]["previous_endpoint_id"], "longpool-asia-8080")
+        self.assertEqual(admin.route_change_history(config)[0]["previous_endpoint_id"], "longpool-asia-8080")
         reconnect.assert_called_once_with(11301)
 
         with patch.object(admin, "request_reconnect") as reconnect:
@@ -116,7 +119,8 @@ class AdminV3Test(unittest.TestCase):
         config = admin.store.load()
         route = next(item for item in config["fixed_routes"] if item["port"] == 11301)
         self.assertEqual(route["endpoint_id"], "longpool-asia-8080")
-        self.assertEqual(config.get("last_route_changes"), [])
+        self.assertEqual(len(admin.route_change_history(config)), 2)
+        self.assertEqual(admin.route_change_history(config)[0]["endpoint_id"], "longpool-asia-8080")
         reconnect.assert_called_once_with(11301)
 
     def test_canary_blocks_mismatched_algorithm_before_reconnect(self):
@@ -239,6 +243,55 @@ class AdminV3Test(unittest.TestCase):
         self.assertEqual(admin.parse_custom_target("stratum+tcp://pool.example.com:3333"), ("pool.example.com", 3333))
         with self.assertRaises(Exception):
             admin.parse_custom_target("stratum+tcp://user:pass@pool.example.com:3333/path")
+
+    def test_route_history_keeps_ten_and_can_restore_an_older_record(self):
+        config = admin.store.load()
+        for number in range(12):
+            admin.remember_route_change(config, 11301, "longpool-asia-8080", "f2pool-global")
+        admin.store.save(config, action="history-test")
+        history = admin.route_change_history(admin.store.load())
+        self.assertEqual(len(history), 10)
+        self.assertEqual(len({item["id"] for item in history}), 10)
+        config = admin.store.load()
+        admin.set_route_endpoint(config, 11301, "f2pool-global")
+        admin.store.save(config, action="set-current")
+        with patch.object(admin, "request_reconnect"):
+            response = self.client.post("/route/11301/restore", data={"csrf": "token", "change_id": history[-1]["id"]})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(admin.route_endpoint_id(admin.store.load(), 11301), "longpool-asia-8080")
+
+    def test_route_events_are_saved_and_visible_without_wechat(self):
+        config = admin.store.load()
+        endpoint = next(item for item in config["endpoints"] if item["id"] == "f2pool-global")
+        admin.send_route_event("route_restored", 11301, endpoint, "测试线路记录")
+        with patch.object(admin, "detect_relay_public_ip", return_value={"ok": True, "host": "93.184.216.34", "source": "test", "message": ""}):
+            response = self.client.get("/overview")
+        self.assertIn("测试线路记录".encode(), response.data)
+        self.assertTrue(admin.ENDPOINT_EVENT_FILE.exists())
+
+    def test_peer_settings_and_authenticated_inbound_sync(self):
+        token = "a" * 64
+        response = self.client.post("/peer-settings", data={"csrf": "token", "enabled": "1",
+            "token": token, "peers": "https://peer.tail1234.ts.net"})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(admin.load_peer_settings()["token"], token)
+        endpoint = next(item for item in admin.store.load()["endpoints"] if item["id"] == "f2pool-global")
+        payload = {"event_id": "b" * 32, "source": "peer-vps", "port": 11301,
+            "action": "test", "endpoint": endpoint}
+        denied = self.client.post("/api/v3/route-sync", json=payload)
+        self.assertEqual(denied.status_code, 404)
+        with patch.object(admin, "request_reconnect") as reconnect:
+            accepted = self.client.post("/api/v3/route-sync", json=payload,
+                headers={"Authorization": "Bearer " + token})
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(admin.route_endpoint_id(admin.store.load(), 11301), "f2pool-global")
+        reconnect.assert_called_once_with(11301)
+        stale = {**payload, "event_id": "c" * 32, "revision": 0,
+            "endpoint": next(item for item in admin.store.load()["endpoints"] if item["id"] == "longpool-asia-8080")}
+        accepted = self.client.post("/api/v3/route-sync", json=stale,
+            headers={"Authorization": "Bearer " + token})
+        self.assertTrue(accepted.get_json()["stale"])
+        self.assertEqual(admin.route_endpoint_id(admin.store.load(), 11301), "f2pool-global")
 
 
 if __name__ == "__main__":

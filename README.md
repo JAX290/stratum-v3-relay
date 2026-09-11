@@ -73,6 +73,7 @@ tailscale serve status
 - `/etc/stratum-admin.env`
 - `/etc/stratum-v3.env`
 - 企业微信 Webhook
+- VPS 双向同步密钥和 `/etc/stratum-v3-peer.json`
 - 面板密码哈希
 - SSH 私钥
 - VPS 备份包
