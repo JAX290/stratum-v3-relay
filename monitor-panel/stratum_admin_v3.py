@@ -19,7 +19,7 @@ from pathlib import Path
 from flask import Flask, flash, redirect, render_template, render_template_string, request, session, url_for
 from werkzeug.security import check_password_hash
 
-from endpoint_monitor import beijing_time, probe_stratum
+from endpoint_monitor import Notifier, beijing_time, probe_stratum
 from security_monitor import atomic_write as write_integrity, load as load_integrity, snapshot
 from v3_manager import ConfigError, ConfigStore, render_haproxy_config, render_inspector_config, route_map, validate_config
 
@@ -544,7 +544,7 @@ def route_page_groups(config, endpoint_state, relay_status=None):
     return groups
 
 
-def save_and_reload(config, action):
+def save_and_reload(config, action, actor_value=None):
     validate_config(config)
     previous = store.load()
     previous_inspector = render_inspector_config(previous)
@@ -560,7 +560,7 @@ def save_and_reload(config, action):
                 raise ConfigError((result.stderr or result.stdout or "HAProxy 配置检查失败")[-500:])
         finally:
             os.unlink(candidate)
-    store.save(config, actor=actor(), action=action)
+    store.save(config, actor=actor_value or actor(), action=action)
     ConfigStore._atomic_write(INSPECTOR_CONFIG, json.dumps(next_inspector, ensure_ascii=False, indent=2) + "\n")
     ConfigStore._atomic_write(HAPROXY_CONFIG, rendered_haproxy, mode=0o644)
     if os.getenv("V3_RELOAD_SERVICES", "0") == "1":
@@ -689,13 +689,17 @@ def build_page_context(page):
         visible_forwarding = active_forwarding
     return dict(page=page, config=config, endpoint_map=endpoint_map, endpoint_rows=rows,
         online=sum(1 for row in rows if row["ok"]), alerting=sum(1 for value in state.get("endpoints", {}).values() if value.get("alerting")),
-        services={"HAProxy": service_state("haproxy"), "协议检查器": service_state("stratum-inspector-v3"), "稳定性监控": service_state("stratum-endpoint-monitor"), "安全监控": service_state("stratum-security-monitor")},
+        services={"HAProxy": service_state("haproxy"), "协议检查器": service_state("stratum-inspector-v3"),
+            "稳定性监控": service_state("stratum-endpoint-monitor"),
+            "自动切换": service_state("stratum-route-switch-monitor"),
+            "安全监控": service_state("stratum-security-monitor")},
         server=server_metrics(), pools=pools, overview=overview_summary(pools), logs=recent_logs(),
         alert_settings=alert_settings, wechat_configured=read_env().get("WECHAT_WEBHOOK", "").startswith("https://"),
         legacy_enabled=monitor_enabled(), history=store.history(), audit=audit_rows(),
         route_groups=route_groups, overview_routes=overview_routes, relay_status=relay_status,
         active_forwarding=active_forwarding, visible_forwarding=visible_forwarding, miner_ips=online_miner_ips(inspector),
         endpoint_options=[{**endpoint, "algorithm_value": endpoint_algorithm(config, endpoint)} for endpoint in config["endpoints"]],
+        verified_endpoints=[{**endpoint, "algorithm_value": endpoint_algorithm(config, endpoint)} for endpoint in config["endpoints"] if endpoint.get("verified")],
         algorithms={"scrypt": "Scrypt", "sha256d": "SHA-256", "other": "其他/自定义", "unknown": "算法待确认"},
         security=security, csrf=session["csrf"])
 
@@ -772,6 +776,14 @@ def remember_route_change(config, port, previous_endpoint_id, endpoint_id):
     changes.append({"port": int(port), "previous_endpoint_id": previous_endpoint_id,
         "endpoint_id": endpoint_id, "changed_at": int(time.time())})
     config["last_route_changes"] = changes[-30:]
+
+
+def send_route_event(kind, port, endpoint, message, **extra):
+    event = {"time": int(time.time()), "type": kind, "port": int(port),
+        "endpoint_id": endpoint.get("id", ""), "endpoint": f"{endpoint.get('host')}:{endpoint.get('port')}",
+        "pool": endpoint.get("pool", "未知矿池"), "region": endpoint.get("region", "未知区域"),
+        "message": message, **extra}
+    Notifier(read_env().get("WECHAT_WEBHOOK", ""), ENDPOINT_EVENT_FILE)(event)
 
 
 @app.route("/route/<int:port>/test", methods=["POST"])
@@ -858,15 +870,16 @@ def start_canary(port):
         if username and result.get("authorized") is not True:
             raise ConfigError(f"测试账号认证失败：{result.get('authorization_error', '矿池拒绝登录')}")
         baseline = endpoint_miner_totals(inspector, target_id, source_ip, port)
-        duration = clamp_int(request.form.get("duration_minutes", "10"), 5, 120)
+        duration = 10
         canary = {"port": port, "source_ip": source_ip, "endpoint_id": target_id,
             "original_endpoint_id": current_id, "algorithm": target_algorithm, "started_at": int(time.time()),
-            "review_after": int(time.time()) + duration * 60, "duration_minutes": duration, "baseline": baseline}
+            "review_after": int(time.time()) + duration * 60, "duration_minutes": duration,
+            "auto_switch": True, "baseline": baseline}
         config["canary_routes"] = [item for item in config.get("canary_routes", []) if int(item.get("port", 0)) != port]
         config["canary_routes"].append(canary)
         save_and_reload(config, f"start-canary:{port}:{source_ip}:{current_id}->{target_id}")
         request_reconnect(port, source_ip)
-        flash(f"已让矿机 {source_ip} 在端口 {port} 试运行 {endpoint_map[target_id]['pool']}；只重连这台矿机，其他矿机不受影响。")
+        flash(f"已让矿机 {source_ip} 在端口 {port} 试运行 {endpoint_map[target_id]['pool']}；10分钟后系统会自动判定、切换或退回，并发送企业微信通知。")
     except (KeyError, StopIteration, ValueError, ConfigError, OSError) as exc:
         flash(f"无法开始单机试切：{exc}")
     return redirect(url_for("dashboard_page", page="overview"))
@@ -929,6 +942,36 @@ def restore_route(port):
         flash(f"端口 {port} 已恢复到 {endpoint['pool']}；该端口矿机正在自动重连。")
     except (KeyError, StopIteration, ValueError, ConfigError, OSError) as exc:
         flash(f"恢复失败：{exc}")
+    return redirect(url_for("dashboard_page", page="overview"))
+
+
+@app.route("/route/<int:port>/verified/apply", methods=["POST"])
+def apply_verified_route(port):
+    if not authorized() or not csrf_ok():
+        return "Forbidden", 403
+    config = store.load()
+    try:
+        endpoint_id = request.form.get("endpoint_id", "")
+        endpoint_map = {item["id"]: item for item in config["endpoints"]}
+        endpoint = endpoint_map[endpoint_id]
+        if not endpoint.get("verified"):
+            raise ConfigError("该地址尚未通过10分钟单机测试，不能免验证直接切换")
+        current_id = route_endpoint_id(config, port)
+        if current_id == endpoint_id:
+            raise ConfigError("所选地址已经是当前线路")
+        current_algorithm = endpoint_algorithm(config, endpoint_map[current_id])
+        target_algorithm = endpoint_algorithm(config, endpoint)
+        if current_algorithm in {"unknown", "other"} or current_algorithm != target_algorithm:
+            raise ConfigError(f"算法不匹配或尚未确认：当前为 {algorithm_text(current_algorithm)}，目标为 {algorithm_text(target_algorithm)}")
+        previous = set_route_endpoint(config, port, endpoint_id)
+        remember_route_change(config, port, previous, endpoint_id)
+        save_and_reload(config, f"apply-verified:{port}:{previous}->{endpoint_id}")
+        request_reconnect(port)
+        send_route_event("verified_route_applied", port, endpoint,
+            f"端口 {port} 已从已验证地址库直接切换，矿机正在自动重连。")
+        flash(f"端口 {port} 已直接切换到已验证地址 {endpoint['pool']}；该端口矿机正在自动重连。")
+    except (KeyError, StopIteration, ValueError, ConfigError, OSError) as exc:
+        flash(f"直接切换失败：{exc}")
     return redirect(url_for("dashboard_page", page="overview"))
 
 

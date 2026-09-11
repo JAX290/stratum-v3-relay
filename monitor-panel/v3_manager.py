@@ -51,6 +51,8 @@ def validate_config(config, resolve=False):
             raise ConfigError(f"暂不支持的协议：{endpoint.get('transport')}")
         if str(endpoint.get("algorithm", "unknown")).lower() not in ALGORITHMS:
             raise ConfigError(f"算法标识不支持：{endpoint.get('algorithm')}")
+        if "verified" in endpoint and not isinstance(endpoint.get("verified"), bool):
+            raise ConfigError(f"地址验证标记不合法：{endpoint.get('id')}")
         if host == "ltc.viabtc.com":
             raise ConfigError("ViaBTC 禁止使用错误的 .com 地址")
         if resolve:

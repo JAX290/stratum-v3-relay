@@ -133,6 +133,20 @@ class AdminV3Test(unittest.TestCase):
         self.assertFalse(probe.called)
         self.assertFalse(reconnect.called)
 
+    def test_verified_address_can_switch_without_another_trial(self):
+        config = admin.store.load()
+        endpoint = next(item for item in config["endpoints"] if item["id"] == "f2pool-global")
+        endpoint["verified"] = True
+        admin.store.save(config, action="mark-verified")
+        with patch.object(admin, "request_reconnect") as reconnect, patch.object(admin, "send_route_event") as notify:
+            response = self.client.post("/route/11301/verified/apply", data={
+                "csrf": "token", "endpoint_id": "f2pool-global"})
+        self.assertEqual(response.status_code, 302)
+        route = next(item for item in admin.store.load()["fixed_routes"] if item["port"] == 11301)
+        self.assertEqual(route["endpoint_id"], "f2pool-global")
+        reconnect.assert_called_once_with(11301)
+        notify.assert_called_once()
+
     def test_overview_does_not_tell_miners_to_bypass_encrypted_relay(self):
         def fake_run(command, **kwargs):
             class Result:

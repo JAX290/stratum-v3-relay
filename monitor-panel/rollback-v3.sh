@@ -7,7 +7,7 @@ if [[ -z "$backup" || ! -d "$backup" ]]; then echo "Backup directory not found."
 resolved=$(readlink -f "$backup")
 case "$resolved" in /root/stratum-v3-backup-*) ;; *) echo "Refusing unexpected backup path: $resolved" >&2; exit 1 ;; esac
 
-systemctl disable --now stratum-security-monitor.service stratum-endpoint-monitor.service stratum-inspector-v3.service 2>/dev/null || true
+systemctl disable --now stratum-security-monitor.service stratum-route-switch-monitor.service stratum-endpoint-monitor.service stratum-inspector-v3.service 2>/dev/null || true
 for name in haproxy.cfg stratum-inspector.json stratum-v3.json stratum-inspector.service stratum-admin.service; do
   source="$resolved/$name"
   if [[ -f "$source" ]]; then

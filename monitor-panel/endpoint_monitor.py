@@ -388,6 +388,18 @@ class Notifier:
         if kind == "tcp_recovery_protocol_degraded":
             return (f"【恢复】上游TCP连接已恢复\n时间（北京时间）：{timestamp}\n矿池：{event.get('pool', '未知')}"
                 f"\n区域：{event.get('region', '未知')}\n上游地址：{endpoint}\n说明：TCP已经重新可达；矿池仍未回应独立 mining.subscribe 探测，该情况只记录稳定性，不再发送异常通知。")
+        if kind in {"canary_passed", "canary_failed", "verified_route_applied"}:
+            titles = {"canary_passed": "【成功】新矿池单机测试通过并已自动切换",
+                "canary_failed": "【退回】新矿池单机测试未通过",
+                "verified_route_applied": "【切换】已验证矿池地址已启用"}
+            shares = ""
+            if kind != "verified_route_applied":
+                shares = (f"\n测试Share（提交/接受/拒绝）：{event.get('submitted', 0)} / "
+                    f"{event.get('accepted', 0)} / {event.get('rejected', 0)}"
+                    f"\n测试拒绝率：{event.get('reject_percent', 0)}%")
+            return (f"{titles[kind]}\n时间（北京时间）：{timestamp}\n端口：{event.get('port', '未知')}"
+                f"\n测试矿机：{event.get('source_ip') or '无'}\n矿池：{event.get('pool', '未知')}"
+                f"\n上游地址：{endpoint}{shares}\n结果：{event.get('message', '未提供')}")
         if kind == "integrity_changed":
             return (f"【严重】中转服务器受保护文件发生变化\n时间（北京时间）：{timestamp}\n文件：{endpoint}"
                 f"\n变化说明：{event.get('message', '文件内容或存在状态变化')}\n原批准哈希：{event.get('expected', {}).get('sha256') or '文件原本不存在'}"
