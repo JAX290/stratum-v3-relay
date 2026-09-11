@@ -712,6 +712,7 @@ def build_page_context(page):
         route_event_labels={"canary_started": "测试已开始", "canary_passed": "测试通过并切换",
             "canary_failed": "测试失败并退回", "canary_stopped": "测试已提前停止",
             "verified_route_applied": "已验证地址切换", "route_restored": "历史线路已恢复",
+            "route_sync_queued": "全部线路已加入同步队列",
             "route_sync_ok": "备用VPS同步成功", "route_sync_failed": "备用VPS同步失败",
             "route_sync_received": "已接收VPS同步"},
         algorithms={"scrypt": "Scrypt", "sha256d": "SHA-256", "other": "其他/自定义", "unknown": "算法待确认"},
@@ -825,7 +826,7 @@ def route_event_rows(limit=10):
     except OSError:
         return rows
     kinds = {"canary_started", "canary_passed", "canary_failed", "canary_stopped",
-        "verified_route_applied", "route_restored", "route_sync_ok", "route_sync_failed", "route_sync_received"}
+        "verified_route_applied", "route_restored", "route_sync_queued", "route_sync_ok", "route_sync_failed", "route_sync_received"}
     for line in reversed(lines):
         try:
             event = json.loads(line)
@@ -870,8 +871,10 @@ def queue_route_sync(config, port, action):
     endpoint = next(item for item in config["endpoints"] if item["id"] == endpoint_id)
     allowed = ("id", "pool", "region", "host", "port", "algorithm", "coins", "transport",
         "source", "enabled", "verified", "verified_at", "verified_test")
-    payload = {"event_id": secrets.token_hex(16), "created_at": int(time.time()), "revision": time.time_ns(),
-        "source": socket.gethostname(), "port": int(port), "action": str(action)[:80],
+    revision = time.time_ns()
+    source = socket.gethostname()
+    payload = {"event_id": secrets.token_hex(16), "created_at": int(time.time()), "revision": revision,
+        "source": source, "port": int(port), "action": str(action)[:80],
         "endpoint": {key: endpoint[key] for key in allowed if key in endpoint}}
     outbox = load_json(PEER_OUTBOX_FILE, {"items": []})
     items = list(outbox.get("items", []))
@@ -880,6 +883,9 @@ def queue_route_sync(config, port, action):
             "payload": payload, "attempts": 0, "next_attempt": 0})
     ConfigStore._atomic_write(PEER_OUTBOX_FILE,
         json.dumps({"items": items[-100:]}, ensure_ascii=False, indent=2) + "\n", mode=0o600)
+    state = load_json(PEER_STATE_FILE, {"received": []})
+    state.setdefault("route_versions", {})[str(int(port))] = {"revision": revision, "source": source}
+    ConfigStore._atomic_write(PEER_STATE_FILE, json.dumps(state, ensure_ascii=False, indent=2) + "\n", mode=0o600)
     return len(settings["peers"])
 
 
@@ -895,8 +901,10 @@ def apply_peer_payload(payload):
     port = int(payload.get("port", 0))
     source = str(payload.get("source", "vps"))[:80]
     revision = int(payload.get("revision", payload.get("created_at", 0)))
-    latest_key = f"{source}:{port}"
-    if revision <= int(state.get("latest", {}).get(latest_key, -1)):
+    current_version = state.get("route_versions", {}).get(str(port), {})
+    incoming_order = (revision, source)
+    current_order = (int(current_version.get("revision", -1)), str(current_version.get("source", "")))
+    if incoming_order <= current_order:
         state["received"] = (list(state.get("received", [])) + [event_id])[-200:]
         ConfigStore._atomic_write(PEER_STATE_FILE, json.dumps(state, ensure_ascii=False, indent=2) + "\n", mode=0o600)
         return {"duplicate": False, "stale": True, "changed": False}
@@ -925,7 +933,7 @@ def apply_peer_payload(payload):
     if changed:
         request_reconnect(port)
     state["received"] = (list(state.get("received", [])) + [event_id])[-200:]
-    state.setdefault("latest", {})[latest_key] = revision
+    state.setdefault("route_versions", {})[str(port)] = {"revision": revision, "source": source}
     ConfigStore._atomic_write(PEER_STATE_FILE, json.dumps(state, ensure_ascii=False, indent=2) + "\n", mode=0o600)
     send_route_event("route_sync_received", port, endpoint,
         f"已接收对端VPS的线路设置并{'完成切换' if changed else '确认一致'}。")
@@ -1171,6 +1179,24 @@ def save_peer_settings():
         flash("VPS双向同步设置已保存。请确保另一台VPS填写相同同步密钥，并把本机地址填为其对端。")
     except (ValueError, ConfigError, OSError) as exc:
         flash(f"VPS同步设置保存失败：{exc}")
+    return redirect(url_for("dashboard_page", page="settings"))
+
+
+@app.route("/peer-sync-all", methods=["POST"])
+def sync_all_routes():
+    if not authorized() or not csrf_ok():
+        return "Forbidden", 403
+    try:
+        config = store.load()
+        routes = route_map(config)
+        queued = sum(queue_route_sync(config, port, "sync-all") for port, _, _, _ in routes)
+        if not queued:
+            raise ConfigError("请先开启VPS双向同步，并填写对端地址和共享同步密钥")
+        send_route_event("route_sync_queued", 0, {},
+            f"本机全部 {len(routes)} 条线路已加入同步队列，共生成 {queued} 个同步任务。")
+        flash(f"本机全部线路已加入同步队列（{queued}个任务），后台会自动发送并重试。")
+    except (KeyError, StopIteration, ValueError, ConfigError, OSError) as exc:
+        flash(f"全部线路同步失败：{exc}")
     return redirect(url_for("dashboard_page", page="settings"))
 
 

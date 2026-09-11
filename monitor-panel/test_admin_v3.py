@@ -275,8 +275,11 @@ class AdminV3Test(unittest.TestCase):
             "token": token, "peers": "https://peer.tail1234.ts.net"})
         self.assertEqual(response.status_code, 302)
         self.assertEqual(admin.load_peer_settings()["token"], token)
+        response = self.client.post("/peer-sync-all", data={"csrf": "token"})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(len(json.loads(admin.PEER_OUTBOX_FILE.read_text(encoding="utf-8"))["items"]), 24)
         endpoint = next(item for item in admin.store.load()["endpoints"] if item["id"] == "f2pool-global")
-        payload = {"event_id": "b" * 32, "source": "peer-vps", "port": 11301,
+        payload = {"event_id": "b" * 32, "source": "peer-vps", "revision": 9999999999999999999, "port": 11301,
             "action": "test", "endpoint": endpoint}
         denied = self.client.post("/api/v3/route-sync", json=payload)
         self.assertEqual(denied.status_code, 404)
