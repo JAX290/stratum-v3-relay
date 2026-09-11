@@ -1,5 +1,7 @@
 # Stratum V3 中转管理面板
 
+> 从全新 VPS 开始部署时，请优先按照仓库根目录的 [从零部署说明](../README.md) 操作。本页用于补充管理面板的功能和维护细节。
+
 这是用于 VPS 上的 Stratum 中转、端口转发、矿机连接观察和报警管理的一套 V3 面板。
 
 核心目标：
@@ -64,18 +66,20 @@ chmod +x bootstrap-vps.sh
 `bootstrap-vps.sh` 会完成：
 
 1. 安装 HAProxy、Python Flask 等依赖；
-2. 创建管理面板密码配置；
+2. 创建管理面板身份验证配置，应急密码可以留空；
 3. 写入企业微信机器人 Webhook；
 4. 安装 V3 中转、检查器、报警和管理面板服务；
 5. 启用 systemd 自启动；
 6. 初始化受保护文件基线。
+
+这个脚本只安装 V3 转发和管理面板。需要 Windows 值守电脑通过 TLS 加密接入时，部署完成后还要继续执行根目录说明中的“安装 TLS 加密入口”。
 
 ## 重新部署时如何设置密码和企业微信
 
 执行 `./bootstrap-vps.sh` 时会提示：
 
 ```text
-Set admin panel password, at least 12 characters:
+Set emergency panel password (at least 12 characters), or leave empty for Tailscale-only access:
 Enterprise WeChat webhook URL, leave empty to skip:
 ```
 
@@ -214,23 +218,19 @@ git push
 
 ## 升级已有 V3 服务器
 
-如果 VPS 已经部署过 V3，只想升级代码，不想全新安装，可以上传最新文件后执行：
+如果 VPS 已经部署过 V3，拉取最新代码后执行：
 
 ```bash
 cd /root/stratum-v3
+git fetch origin
+git checkout main
+git pull --ff-only origin main
+cd /root/stratum-v3/monitor-panel
 chmod +x upgrade-v3-panel.sh
 ./upgrade-v3-panel.sh
 ```
 
-如果只是升级探测设置、首页关键看板、公网 IP 检测等轻量更新，可以执行：
-
-```bash
-cd /root/stratum-v3
-chmod +x upgrade-probe-settings.sh
-./upgrade-probe-settings.sh
-```
-
-升级脚本会备份旧文件，并刷新安全监控基线。
+统一使用完整升级脚本，避免只更新部分文件造成面板、检查器和服务配置版本不一致。升级脚本会备份旧文件，并刷新安全监控基线。
 
 ### 在面板安全切换矿池
 
@@ -268,7 +268,8 @@ chmod +x upgrade-probe-settings.sh
 安装和升级时会生成备份路径。完整 V3 回滚：
 
 ```bash
-/root/stratum-v3/rollback-v3.sh
+cd /root/stratum-v3/monitor-panel
+./rollback-v3.sh
 ```
 
 也可以根据升级脚本输出的 backup 路径手动恢复对应文件。

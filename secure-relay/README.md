@@ -1,4 +1,6 @@
-# 木林森中转 2.1
+# 木林森中转 2.1.5
+
+> 从全新 VPS、备用 VPS、Windows 值守电脑到矿机的完整部署顺序，请按照仓库根目录的 [从零部署说明](../README.md) 操作。本页用于补充 TLS 服务和 Windows 客户端的功能细节。
 
 这套组件在值守 Windows 电脑和 Stratum V3 VPS 之间建立 TLS 1.2 加密连接。局域网矿机仍使用普通 `stratum+tcp`，但这段明文只存在于矿场局域网内；流量卡网络只能看到电脑到 VPS 的 TLS 连接。
 
@@ -13,10 +15,10 @@
 ```bash
 cd /root/stratum-v3/secure-relay/server
 chmod +x install-secure-relay.sh
-./install-secure-relay.sh
+./install-secure-relay.sh --port 452
 ```
 
-脚本默认监听 TCP 443，生成自签名证书和第一组 64 位共享密钥，并输出客户端需要填写的证书 SHA-256 指纹。重复执行会保留已有证书和全部客户端密钥。
+本文使用 TCP `452`，避免和 Tailscale Serve 的 HTTPS 服务混淆。脚本会生成自签名证书和第一组 64 位共享密钥，并输出客户端需要填写的证书 SHA-256 指纹。重复执行会保留已有证书和全部客户端密钥；如果不传 `--port`，首次安装的默认端口仍为 TCP `443`。
 
 升级已有 VPS 时也必须重新运行完整安装脚本，不要只把新版 `stratum_secure_server.py` 复制到 `/opt`。安装脚本会同步程序、systemd 权限和状态目录，并自动保留当前 TLS 端口、证书及客户端密钥。服务端即使暂时无法写入状态文件，也只会暂停心跳状态记录，不会再中断矿机转发。
 
