@@ -29,6 +29,7 @@ VPS（加密入口 + V3 管理面板）
 | 值守电脑 | Windows 10/11，和矿机位于同一局域网，长期运行 |
 | GitHub 仓库 | `https://github.com/JAX290/stratum-v3-relay.git` |
 | 企业微信 Webhook | 可选；不配置也会在面板首页和日志中记录事件 |
+| 域名 | 可选但推荐；用于集中管理 VPS 地址，示例为 `mulinsen.win` |
 
 建议为两台 VPS 分别准备一张记录表。安装完成后把这些信息记下来：
 
@@ -215,6 +216,14 @@ ss -lntp | grep ':452'
 此后在任意一台 VPS 修改、试切、全量切换或恢复线路，系统都会同步到另一台；对端临时离线时会保留任务并重试。同步成功或失败都会写入日志并显示在首页。
 
 “VPS 同步密钥”只用于两台 VPS 的管理面板互相认证；“Windows 客户端共享密钥”用于值守电脑连接加密入口。两者不能混用。
+
+### 使用域名管理 VPS（推荐）
+
+Windows 客户端可以填写域名代替固定 IP，例如 `relay1.mulinsen.win`。以后更换 VPS，只需在 Cloudflare 修改域名指向的新 IP，矿场电脑不需要逐台修改。
+
+中转域名使用自定义 TCP/TLS 端口，Cloudflare 必须设置为“仅 DNS（灰色云朵）”；公开只读面板属于 HTTPS 网站，设置为“已代理（橙色云朵）”。不要把中转域名误设成橙色云朵，否则可能无法连接。
+
+第一次添加记录、更换 VPS、临时域名测试、证书处理和故障排查，请完整阅读：[域名与 Cloudflare 新手说明](docs/cloudflare-domain-guide.md)。
 
 ## 九、设置 Windows 值守电脑
 
@@ -419,3 +428,4 @@ GitHub 保存的是程序和部署方法，不保存每台服务器的秘密配�
 
 - [V3 管理面板说明](monitor-panel/README.md)
 - [木林森 Windows 客户端与 TLS 服务说明](secure-relay/README.md)
+- [域名与 Cloudflare 新手说明](docs/cloudflare-domain-guide.md)

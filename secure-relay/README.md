@@ -4,6 +4,8 @@
 
 这套组件在值守 Windows 电脑和 Stratum V3 VPS 之间建立 TLS 1.2 加密连接。局域网矿机仍使用普通 `stratum+tcp`，但这段明文只存在于矿场局域网内；流量卡网络只能看到电脑到 VPS 的 TLS 连接。
 
+长期使用建议在“VPS 地址”填写域名，例如 `relay1.mulinsen.win`，以后换 VPS 时只需要修改 Cloudflare 的 DNS 记录。Cloudflare 的中转记录必须使用“仅 DNS（灰色云朵）”。完整步骤见 [域名与 Cloudflare 新手说明](../docs/cloudflare-domain-guide.md)。
+
 ```text
 矿机 --局域网明文 Stratum--> 值守电脑 --TLS--> VPS --现有 V3 检查器--> 矿池
 ```
@@ -127,7 +129,7 @@ stratum+tcp://192.168.3.5:9999
 
 ## 各个设置是什么意思
 
-- **VPS 地址**：你的云服务器公网 IP，也就是加密数据要送到哪里。
+- **VPS 地址**：填写 VPS 公网 IP 或中转域名。正式运行推荐域名，例如 `relay1.mulinsen.win`；不要填写 `https://`、端口或结尾斜杠。
 - **TLS 端口**：VPS 接收加密连接的门牌号，通常使用 `443`。
 - **证书名称**：如果 VPS 使用正规域名证书，这里填写证书对应的域名。只使用 IP 和自签名证书时留空。
 - **证书 SHA-256**：服务器证书的唯一指纹。它帮助软件确认对面确实是你的 VPS，防止连接被冒充。
