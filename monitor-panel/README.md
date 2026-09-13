@@ -301,6 +301,21 @@ tail -n 100 /var/lib/stratum-monitor/endpoint-events.jsonl
 tail -n 50 /var/log/stratum-audit.jsonl
 ```
 
+### VPS 内存持续增长
+
+新版检查器会保留累计 Worker 和 Share 统计，但每个 Worker 最多只保留最近 20 条断线连接明细，断线一小时后的明细自动删除；未收到矿池响应的 Share 请求也有数量和时间上限。这样可以避免网络波动产生大量重连时，旧连接对象在内存中保留七天。
+
+查看各服务当前内存：
+
+```bash
+systemctl show haproxy stratum-inspector-v3 stratum-secure-relay stratum-admin \
+  -p Id -p MainPID -p MemoryCurrent -p MemoryPeak
+ps -eo pid,comm,rss,%mem,etime --sort=-rss | head -n 15
+du -h /var/lib/stratum-inspector/state.json /var/lib/stratum-monitor/*.json* 2>/dev/null
+```
+
+如果 `stratum-inspector-v3` 持续增长，升级完整仓库后执行 `monitor-panel/upgrade-v3-panel.sh`。脚本会重启检查器并立即释放旧历史内存，矿机会短暂重连。
+
 ## 本地测试
 
 在 `monitor-panel/` 目录运行：

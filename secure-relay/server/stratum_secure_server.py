@@ -238,6 +238,13 @@ class SecureRelay:
         upstream_writer = None
         client = None
         active_counted = False
+        # Do not let excess or abusive connections wait inside Python while
+        # retaining TLS stream buffers. Existing authenticated miners keep
+        # their slots; callers above the configured ceiling reconnect later.
+        if self.semaphore.locked():
+            logging.warning("relay connection limit reached source=%s", peer[0])
+            await close_writer(writer)
+            return
         async with self.semaphore:
             try:
                 raw = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=10)
@@ -299,7 +306,14 @@ async def main():
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(config["certificate"], config["private_key"])
     relay = SecureRelay(config)
-    server = await asyncio.start_server(relay.handle, config["listen_host"], int(config["listen_port"]), ssl=context)
+    server = await asyncio.start_server(
+        relay.handle,
+        config["listen_host"],
+        int(config["listen_port"]),
+        ssl=context,
+        backlog=256,
+        ssl_handshake_timeout=10,
+    )
     addresses = ", ".join(str(sock.getsockname()) for sock in server.sockets)
     logging.info("secure relay listening on %s", addresses)
     control_task = asyncio.create_task(relay.control_loop())

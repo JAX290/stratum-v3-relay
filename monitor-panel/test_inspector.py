@@ -109,6 +109,39 @@ class InspectorProtocolTest(unittest.TestCase):
             self.assertEqual(inspector.state()["workers"], [])
             self.assertNotIn("owner.old", inspector.workers)
 
+    def test_disconnected_connection_details_are_bounded(self):
+        inspector = Inspector()
+        with patch("stratum_inspector.MAX_DISCONNECTED_DETAILS", 5), \
+             patch("stratum_inspector.CONNECTION_DETAIL_RETENTION", 3600), \
+             patch("stratum_inspector.time.time", return_value=1000):
+            for number in range(40):
+                connection_id = str(number)
+                connection = {
+                    "id": connection_id, "source_ip": "192.0.2.40", "source_port": 51000 + number,
+                    "connected_at": 900, "worker": "", "agent": "Miner", "difficulty": 1,
+                    "pending": {"old": {"started": 1}}, "authorized_worker": "", "jobs": {"job"},
+                    "disconnected_at": 950 + number,
+                }
+                inspector.attach_worker(connection, "owner.flappy")
+                worker = inspector.workers["owner.flappy"]
+                worker["active_connections"].discard(connection_id)
+                inspector.prune_worker_connections(worker, 1000)
+            state = inspector.state()
+        self.assertEqual(len(state["workers"][0]["details"]), 5)
+
+    def test_unanswered_share_requests_are_bounded(self):
+        inspector = Inspector()
+        connection = {
+            "id": "pending", "source_ip": "192.0.2.41", "source_port": 52000,
+            "connected_at": 1, "worker": "", "agent": "Miner", "difficulty": 1,
+            "pending": {}, "authorized_worker": "owner.pending", "jobs": set(),
+        }
+        with patch("stratum_inspector.MAX_PENDING_SHARES", 8):
+            for number in range(30):
+                inspector.from_miner(connection, {"id": number, "method": "mining.submit",
+                    "params": ["owner.pending", "job", "nonce"]})
+        self.assertEqual(len(connection["pending"]), 8)
+
 
 if __name__ == "__main__":
     unittest.main()

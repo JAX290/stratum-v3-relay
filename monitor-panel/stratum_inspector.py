@@ -17,6 +17,10 @@ HASHRATE_WINDOW = int(os.getenv("HASHRATE_WINDOW", "1800"))
 WORKER_OFFLINE_AFTER = int(os.getenv("WORKER_OFFLINE_AFTER", "900"))
 WORKER_INVALID_AFTER = int(os.getenv("WORKER_INVALID_AFTER", "86400"))
 WORKER_RETENTION = int(os.getenv("WORKER_RETENTION", "604800"))
+CONNECTION_DETAIL_RETENTION = int(os.getenv("CONNECTION_DETAIL_RETENTION", "3600"))
+MAX_DISCONNECTED_DETAILS = int(os.getenv("MAX_DISCONNECTED_DETAILS", "20"))
+PENDING_SHARE_RETENTION = int(os.getenv("PENDING_SHARE_RETENTION", "600"))
+MAX_PENDING_SHARES = int(os.getenv("MAX_PENDING_SHARES", "512"))
 BEIJING = ZoneInfo("Asia/Shanghai")
 
 DEFAULT_RELAYS = [
@@ -185,6 +189,12 @@ class Inspector:
                     worker["active_connections"].discard(connection_id)
                     connection["disconnected_at"] = time.time()
                     worker["last_seen"] = connection["disconnected_at"]
+                    # Pending requests and old Job identifiers are useful only
+                    # while this socket is alive. Keeping them for the worker
+                    # history made reconnect storms retain unnecessary memory.
+                    connection["pending"].clear()
+                    connection["jobs"].clear()
+                    self.prune_worker_connections(worker, connection["disconnected_at"])
                 self.connections.pop(connection_id, None)
                 if upstream_writer:
                     upstream_writer.close()
@@ -244,6 +254,29 @@ class Inspector:
         worker["difficulty"] = connection["difficulty"]
         return worker
 
+    @staticmethod
+    def prune_worker_connections(worker, now):
+        """Keep active sockets and only a small, recent diagnostic history."""
+        expired = [
+            connection_id for connection_id, connection in worker["connections"].items()
+            if connection_id not in worker["active_connections"]
+            and connection.get("disconnected_at")
+            and now - connection["disconnected_at"] > CONNECTION_DETAIL_RETENTION
+        ]
+        for connection_id in expired:
+            worker["connections"].pop(connection_id, None)
+        disconnected = sorted(
+            (
+                (connection_id, connection)
+                for connection_id, connection in worker["connections"].items()
+                if connection_id not in worker["active_connections"]
+            ),
+            key=lambda item: item[1].get("disconnected_at") or 0,
+            reverse=True,
+        )
+        for connection_id, _ in disconnected[MAX_DISCONNECTED_DETAILS:]:
+            worker["connections"].pop(connection_id, None)
+
     def from_miner(self, connection, message):
         method = message.get("method")
         params = message.get("params") or []
@@ -270,8 +303,16 @@ class Inspector:
             connection["submitted"] += 1
             connection["last_share"] = now_text()
             request_id = json.dumps(message.get("id"), separators=(",", ":"))
+            pending_now = time.monotonic()
+            stale = [key for key, value in connection["pending"].items()
+                if pending_now - value.get("started", pending_now) > PENDING_SHARE_RETENTION]
+            for key in stale:
+                connection["pending"].pop(key, None)
+            if len(connection["pending"]) >= MAX_PENDING_SHARES:
+                oldest = min(connection["pending"], key=lambda key: connection["pending"][key].get("started", 0))
+                connection["pending"].pop(oldest, None)
             connection["pending"][request_id] = {
-                "started": time.monotonic(),
+                "started": pending_now,
                 "worker": worker["name"],
                 "difficulty": connection["difficulty"],
             }
@@ -329,12 +370,7 @@ class Inspector:
         worker_rows = []
         expired_workers = []
         for name, worker in list(self.workers.items()):
-            expired_connections = [
-                connection_id for connection_id, connection in worker["connections"].items()
-                if connection.get("disconnected_at") and now - connection["disconnected_at"] > WORKER_RETENTION
-            ]
-            for connection_id in expired_connections:
-                worker["connections"].pop(connection_id, None)
+            self.prune_worker_connections(worker, now)
             if not worker["connections"] and not worker["active_connections"] and now - worker.get("last_seen", now) > WORKER_RETENTION:
                 expired_workers.append(name)
                 continue
