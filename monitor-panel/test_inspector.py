@@ -1,5 +1,6 @@
 import unittest
 import json
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -112,7 +113,6 @@ class InspectorProtocolTest(unittest.TestCase):
     def test_disconnected_connection_details_are_bounded(self):
         inspector = Inspector()
         with patch("stratum_inspector.MAX_DISCONNECTED_DETAILS", 5), \
-             patch("stratum_inspector.CONNECTION_DETAIL_RETENTION", 3600), \
              patch("stratum_inspector.time.time", return_value=1000):
             for number in range(40):
                 connection_id = str(number)
@@ -141,6 +141,25 @@ class InspectorProtocolTest(unittest.TestCase):
                 inspector.from_miner(connection, {"id": number, "method": "mining.submit",
                     "params": ["owner.pending", "job", "nonce"]})
         self.assertEqual(len(connection["pending"]), 8)
+
+    def test_disconnect_history_is_written_without_credentials(self):
+        inspector = Inspector()
+        with tempfile.TemporaryDirectory() as folder, \
+             patch("stratum_inspector.DISCONNECT_HISTORY_DIR", Path(folder)):
+            connection = {
+                "source_ip": "192.0.2.50", "source_port": 53000, "public_port": 11301,
+                "worker": "owner.archive", "agent": "Miner/1", "connected_at": 100,
+                "disconnected_at": 160, "submitted": 2, "accepted": 1, "rejected": 1,
+                "latency_total_ms": 40, "latency_samples": 2, "last_share": "test",
+                "last_error": "test error",
+            }
+            inspector.archive_disconnect(connection)
+            files = list(Path(folder).glob("disconnect-*.jsonl"))
+            self.assertEqual(len(files), 1)
+            record = json.loads(files[0].read_text(encoding="utf-8"))
+            self.assertEqual(record["worker"], "owner.archive")
+            self.assertEqual(record["duration_seconds"], 60)
+            self.assertNotIn("password", repr(record).lower())
 
 
 if __name__ == "__main__":

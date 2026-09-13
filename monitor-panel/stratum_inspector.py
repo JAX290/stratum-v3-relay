@@ -17,10 +17,13 @@ HASHRATE_WINDOW = int(os.getenv("HASHRATE_WINDOW", "1800"))
 WORKER_OFFLINE_AFTER = int(os.getenv("WORKER_OFFLINE_AFTER", "900"))
 WORKER_INVALID_AFTER = int(os.getenv("WORKER_INVALID_AFTER", "86400"))
 WORKER_RETENTION = int(os.getenv("WORKER_RETENTION", "604800"))
-CONNECTION_DETAIL_RETENTION = int(os.getenv("CONNECTION_DETAIL_RETENTION", "3600"))
 MAX_DISCONNECTED_DETAILS = int(os.getenv("MAX_DISCONNECTED_DETAILS", "20"))
 PENDING_SHARE_RETENTION = int(os.getenv("PENDING_SHARE_RETENTION", "600"))
 MAX_PENDING_SHARES = int(os.getenv("MAX_PENDING_SHARES", "512"))
+DISCONNECT_HISTORY_DIR = Path(os.getenv("DISCONNECT_HISTORY_DIR", "/var/lib/stratum-inspector/history"))
+DISCONNECT_HISTORY_DAYS = int(os.getenv("DISCONNECT_HISTORY_DAYS", "7"))
+DISCONNECT_HISTORY_FILE_BYTES = int(os.getenv("DISCONNECT_HISTORY_FILE_BYTES", str(32 * 1024 * 1024)))
+DISCONNECT_HISTORY_TOTAL_BYTES = int(os.getenv("DISCONNECT_HISTORY_TOTAL_BYTES", str(256 * 1024 * 1024)))
 BEIJING = ZoneInfo("Asia/Shanghai")
 
 DEFAULT_RELAYS = [
@@ -96,6 +99,7 @@ class Inspector:
         self.upstream_ok = False
         self.upstream_latency_ms = None
         self.anomalies = deque(maxlen=200)
+        self.last_history_cleanup = 0
 
     def worker(self, name):
         if name not in self.workers:
@@ -194,6 +198,7 @@ class Inspector:
                     # history made reconnect storms retain unnecessary memory.
                     connection["pending"].clear()
                     connection["jobs"].clear()
+                    self.archive_disconnect(connection)
                     self.prune_worker_connections(worker, connection["disconnected_at"])
                 self.connections.pop(connection_id, None)
                 if upstream_writer:
@@ -256,15 +261,7 @@ class Inspector:
 
     @staticmethod
     def prune_worker_connections(worker, now):
-        """Keep active sockets and only a small, recent diagnostic history."""
-        expired = [
-            connection_id for connection_id, connection in worker["connections"].items()
-            if connection_id not in worker["active_connections"]
-            and connection.get("disconnected_at")
-            and now - connection["disconnected_at"] > CONNECTION_DETAIL_RETENTION
-        ]
-        for connection_id in expired:
-            worker["connections"].pop(connection_id, None)
+        """Keep every active socket and only the newest diagnostic details."""
         disconnected = sorted(
             (
                 (connection_id, connection)
@@ -276,6 +273,63 @@ class Inspector:
         )
         for connection_id, _ in disconnected[MAX_DISCONNECTED_DETAILS:]:
             worker["connections"].pop(connection_id, None)
+
+    def archive_disconnect(self, connection):
+        """Append a credential-free disconnect record and retain at most seven days."""
+        try:
+            now = connection.get("disconnected_at") or time.time()
+            DISCONNECT_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+            day = datetime.fromtimestamp(now, BEIJING).strftime("%Y-%m-%d")
+            path = DISCONNECT_HISTORY_DIR / f"disconnect-{day}.jsonl"
+            part = 0
+            while path.exists() and path.stat().st_size >= DISCONNECT_HISTORY_FILE_BYTES:
+                part += 1
+                path = DISCONNECT_HISTORY_DIR / f"disconnect-{day}.{part}.jsonl"
+            submitted = int(connection.get("submitted", 0) or 0)
+            rejected = int(connection.get("rejected", 0) or 0)
+            samples = int(connection.get("latency_samples", 0) or 0)
+            record = {
+                "time": now_text(now), "timestamp": int(now),
+                "route_id": self.relay["id"], "pool": self.relay["name"],
+                "region": self.relay["region"], "worker": connection.get("worker", ""),
+                "source_ip": connection.get("source_ip", ""),
+                "source_port": connection.get("source_port", 0),
+                "public_port": connection.get("public_port", self.relay["listen_port"]),
+                "agent": connection.get("agent", "未知"),
+                "duration_seconds": max(0, int(now - connection.get("connected_at", now))),
+                "submitted": submitted, "accepted": int(connection.get("accepted", 0) or 0),
+                "rejected": rejected,
+                "reject_percent": round(rejected * 100 / submitted, 2) if submitted else 0,
+                "latency_ms": round(float(connection.get("latency_total_ms", 0)) / samples) if samples else 0,
+                "last_share": connection.get("last_share") or "",
+                "last_error": str(connection.get("last_error", ""))[:300],
+            }
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+            if now - self.last_history_cleanup >= 300:
+                self.cleanup_disconnect_history(now)
+                self.last_history_cleanup = now
+        except OSError:
+            # Archiving is diagnostic only and must never interrupt mining.
+            pass
+
+    @staticmethod
+    def cleanup_disconnect_history(now=None):
+        now = now or time.time()
+        try:
+            files = sorted(DISCONNECT_HISTORY_DIR.glob("disconnect-*.jsonl"), key=lambda item: item.stat().st_mtime)
+            cutoff = now - DISCONNECT_HISTORY_DAYS * 86400
+            for path in list(files):
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+                    files.remove(path)
+            total = sum(path.stat().st_size for path in files)
+            while len(files) > 1 and total > DISCONNECT_HISTORY_TOTAL_BYTES:
+                oldest = files.pop(0)
+                total -= oldest.stat().st_size
+                oldest.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def from_miner(self, connection, message):
         method = message.get("method")
@@ -371,7 +425,7 @@ class Inspector:
         expired_workers = []
         for name, worker in list(self.workers.items()):
             self.prune_worker_connections(worker, now)
-            if not worker["connections"] and not worker["active_connections"] and now - worker.get("last_seen", now) > WORKER_RETENTION:
+            if not worker["active_connections"] and now - worker.get("last_seen", now) > WORKER_RETENTION:
                 expired_workers.append(name)
                 continue
             events = self.accepted_events[name]

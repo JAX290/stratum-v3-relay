@@ -35,6 +35,7 @@ class AdminV3Test(unittest.TestCase):
         admin.PEER_SYNC_FILE = root / "peer.json"
         admin.PEER_OUTBOX_FILE = root / "peer-outbox.json"
         admin.PEER_STATE_FILE = root / "peer-state.json"
+        admin.DISCONNECT_HISTORY_DIR = root / "disconnect-history"
         admin.store = ConfigStore(config_path, root / "history", root / "audit.jsonl")
         admin.app.config.update(TESTING=True, SECRET_KEY="test")
         self.client = admin.app.test_client()
@@ -87,6 +88,18 @@ class AdminV3Test(unittest.TestCase):
         self.assertEqual(after["endpoint_ids"][0], "viabtc-io")
         self.assertEqual(after["endpoint_ids"][1:], siblings)
         self.assertEqual(admin.read_actual_route_ids()[9999], "viabtc-io")
+
+    def test_disconnect_history_can_be_listed_and_downloaded(self):
+        admin.DISCONNECT_HISTORY_DIR.mkdir()
+        history = admin.DISCONNECT_HISTORY_DIR / "disconnect-2026-09-13.jsonl"
+        history.write_text('{"worker":"owner.test"}\n', encoding="utf-8")
+        response = self.client.get("/logs")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(history.name.encode(), response.data)
+        with self.client.get("/downloads/disconnect-history/" + history.name) as response:
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b"owner.test", response.data)
+        self.assertEqual(self.client.get("/downloads/disconnect-history/../config.json").status_code, 404)
 
     def test_fixed_route_supports_single_miner_canary_and_promotion(self):
         admin.INSPECTOR_STATE_FILE.write_text(json.dumps({"pools": [{"id": "longpool-asia-8080",

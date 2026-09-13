@@ -16,7 +16,7 @@ from ipaddress import ip_address
 from urllib.parse import urlsplit
 from pathlib import Path
 
-from flask import Flask, flash, jsonify, redirect, render_template, render_template_string, request, session, url_for
+from flask import Flask, flash, jsonify, redirect, render_template, render_template_string, request, send_from_directory, session, url_for
 from werkzeug.security import check_password_hash
 
 from endpoint_monitor import Notifier, beijing_time, probe_stratum
@@ -41,6 +41,7 @@ RELAY_CONTROL_FILE = Path(os.getenv("SECURE_RELAY_CONTROL", "/var/lib/stratum-se
 PEER_SYNC_FILE = Path(os.getenv("V3_PEER_SYNC_FILE", "/etc/stratum-v3-peer.json"))
 PEER_OUTBOX_FILE = Path(os.getenv("V3_PEER_OUTBOX_FILE", "/var/lib/stratum-monitor/peer-sync-outbox.json"))
 PEER_STATE_FILE = Path(os.getenv("V3_PEER_STATE_FILE", "/var/lib/stratum-monitor/peer-sync-state.json"))
+DISCONNECT_HISTORY_DIR = Path(os.getenv("DISCONNECT_HISTORY_DIR", "/var/lib/stratum-inspector/history"))
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("PANEL_SECRET_KEY", secrets.token_hex(32))
@@ -448,6 +449,20 @@ def audit_rows(limit=30):
     return list(reversed(rows))
 
 
+def disconnect_history_rows():
+    rows = []
+    try:
+        files = sorted(DISCONNECT_HISTORY_DIR.glob("disconnect-*.jsonl"),
+            key=lambda path: path.stat().st_mtime, reverse=True)
+        for path in files[:50]:
+            stat = path.stat()
+            rows.append({"name": path.name, "size": f"{stat.st_size / 1024 / 1024:.1f} MB",
+                "modified": beijing_time(stat.st_mtime)})
+    except OSError:
+        pass
+    return rows
+
+
 def stratum_pool_rows(config, inspector):
     states = {pool.get("id"): pool for pool in inspector.get("pools", [])}
     public_by_endpoint = {}
@@ -729,6 +744,7 @@ def build_page_context(page):
         server=server_metrics(), pools=pools, overview=overview_summary(pools), logs=recent_logs(),
         alert_settings=alert_settings, wechat_configured=read_env().get("WECHAT_WEBHOOK", "").startswith("https://"),
         legacy_enabled=monitor_enabled(), history=store.history(), audit=audit_rows(),
+        disconnect_history=disconnect_history_rows(),
         route_groups=route_groups, overview_routes=overview_routes, relay_status=relay_status,
         active_forwarding=active_forwarding, visible_forwarding=visible_forwarding, miner_ips=online_miner_ips(inspector),
         endpoint_options=[{**endpoint, "algorithm_value": endpoint_algorithm(config, endpoint)} for endpoint in config["endpoints"]],
@@ -759,6 +775,18 @@ def dashboard_page(page):
     if page not in {"overview", "miners", "routes", "alerts", "settings", "logs"}:
         return "Not found", 404
     return render_template("v3_dashboard.html", **build_page_context(page))
+
+
+@app.route("/downloads/disconnect-history/<name>")
+def download_disconnect_history(name):
+    if not authorized():
+        return redirect(url_for("login"))
+    if not re.fullmatch(r"disconnect-\d{4}-\d{2}-\d{2}(?:\.\d+)?\.jsonl", name):
+        return "Not found", 404
+    path = DISCONNECT_HISTORY_DIR / name
+    if not path.is_file():
+        return "Not found", 404
+    return send_from_directory(str(DISCONNECT_HISTORY_DIR), name, as_attachment=True, download_name=name)
 
 
 @app.route("/group/<group_id>", methods=["POST"])
