@@ -26,8 +26,32 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Stratum V3 TLS client for mine-site LAN relaying")]
 [assembly: AssemblyCompany("Stratum V3 Relay")]
 [assembly: AssemblyProduct("木林森中转")]
-[assembly: AssemblyVersion("2.1.5.0")]
-[assembly: AssemblyFileVersion("2.1.5.0")]
+[assembly: AssemblyVersion("2.1.6.0")]
+[assembly: AssemblyFileVersion("2.1.6.0")]
+
+public static class AppBrand
+{
+    public const string Name = "木林森中转";
+    public static string Version
+    {
+        get
+        {
+            System.Version version = Assembly.GetExecutingAssembly().GetName().Version;
+            return version.Major + "." + version.Minor + "." + version.Build;
+        }
+    }
+    public static string Title { get { return Name + " v" + Version; } }
+    public static Icon LoadIcon()
+    {
+        Icon icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+        return icon ?? SystemIcons.Application;
+    }
+    public static void Apply(Form form, string suffix)
+    {
+        form.Text = Title + (suffix ?? "");
+        form.Icon = LoadIcon();
+    }
+}
 
 [DataContract]
 public sealed class ServerProfile
@@ -575,7 +599,7 @@ public sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "木林森中转";
+        AppBrand.Apply(this, "");
         Font = new Font("Microsoft YaHei UI", 9F);
         ClientSize = new Size(820, 856);
         MinimumSize = new Size(760, 720);
@@ -591,10 +615,8 @@ public sealed class MainForm : Form
         statusTimer.Interval = 1000;
         statusTimer.Tick += delegate { RefreshStatus(); };
         statusTimer.Start();
-        tray.Text = "木林森中转";
-        Icon appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-        if (appIcon != null) { Icon = appIcon; tray.Icon = appIcon; }
-        else tray.Icon = SystemIcons.Application;
+        tray.Text = AppBrand.Title;
+        tray.Icon = Icon;
         tray.Visible = true;
         tray.DoubleClick += delegate { Show(); WindowState = FormWindowState.Normal; Activate(); };
         ContextMenu menu = new ContextMenu();
@@ -836,7 +858,7 @@ public sealed class MinerStatusForm : Form
     private readonly RelayManager manager; private readonly DataGridView grid=new DataGridView(); private readonly Label summary=new Label();
     public MinerStatusForm(RelayManager relay)
     {
-        manager=relay;Text="木林森中转 - 矿机状态";Font=new Font("Microsoft YaHei UI",9F);ClientSize=new Size(1450,620);MinimumSize=new Size(980,500);StartPosition=FormStartPosition.CenterParent;Icon appIcon=Icon.ExtractAssociatedIcon(Application.ExecutablePath);if(appIcon!=null)Icon=appIcon;
+        manager=relay;AppBrand.Apply(this," - 矿机状态");Font=new Font("Microsoft YaHei UI",9F);ClientSize=new Size(1450,620);MinimumSize=new Size(980,500);StartPosition=FormStartPosition.CenterParent;
         summary.Dock=DockStyle.Top;summary.Height=42;summary.Padding=new Padding(12,11,0,0);summary.BackColor=Color.FromArgb(236,244,252);Controls.Add(summary);
         FlowLayoutPanel actions=new FlowLayoutPanel();actions.Dock=DockStyle.Top;actions.Height=43;actions.Padding=new Padding(10,6,0,0);Button refresh=new Button();refresh.Text="刷新";refresh.AutoSize=true;refresh.Click+=delegate{RefreshRows();};Button remove=new Button();remove.Text="删除选中记录";remove.AutoSize=true;remove.Click+=delegate{RemoveSelected();};Button prune=new Button();prune.Text="清理离线超过24小时";prune.AutoSize=true;prune.Click+=delegate{int count=manager.RemoveExpiredMiners(TimeSpan.FromHours(24));RefreshRows();MessageBox.Show(this,"已清理 "+count+" 条记录。","清理完成",MessageBoxButtons.OK,MessageBoxIcon.Information);};actions.Controls.Add(refresh);actions.Controls.Add(remove);actions.Controls.Add(prune);Controls.Add(actions);actions.BringToFront();
         grid.Dock=DockStyle.Fill;grid.ReadOnly=true;grid.AllowUserToAddRows=false;grid.AllowUserToDeleteRows=false;grid.AutoSizeRowsMode=DataGridViewAutoSizeRowsMode.AllCells;grid.SelectionMode=DataGridViewSelectionMode.FullRowSelect;grid.RowHeadersVisible=false;grid.BackgroundColor=Color.White;grid.AutoGenerateColumns=false;
@@ -865,7 +887,7 @@ public sealed class BackupForm : Form
     public List<ServerProfile> Profiles = new List<ServerProfile>();
     public BackupForm(List<ServerProfile> profiles,RelayManager manager,string siteName)
     {
-        Text="备用 VPS 设置"; Font=new Font("Microsoft YaHei UI",9F); ClientSize=new Size(690,500); StartPosition=FormStartPosition.CenterParent;
+        AppBrand.Apply(this," - 备用 VPS 设置"); Font=new Font("Microsoft YaHei UI",9F); ClientSize=new Size(690,500); StartPosition=FormStartPosition.CenterParent;
         TabControl tabs=new TabControl(); tabs.Dock=DockStyle.Fill;
         for(int i=0;i<2;i++) { ServerProfile p=i<profiles.Count?profiles[i].Copy():new ServerProfile{Name="备用VPS "+(i+1),Enabled=false,Port=443}; ServerEditor editor=new ServerEditor(p,manager,siteName); editors.Add(editor); TabPage page=new TabPage("备用 VPS "+(i+1)); page.Controls.Add(editor); tabs.TabPages.Add(page); }
         FlowLayoutPanel buttons=new FlowLayoutPanel(); buttons.Dock=DockStyle.Bottom; buttons.Height=48; buttons.FlowDirection=FlowDirection.RightToLeft; buttons.Padding=new Padding(0,8,12,0);
