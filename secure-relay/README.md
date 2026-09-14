@@ -66,6 +66,8 @@ stratum-relay-client rotate mine-a
 
 旧密钥会立即失效。电脑停用时执行 `stratum-relay-client disable mine-a`，恢复时执行 `stratum-relay-client enable mine-a`。服务端会自动重新读取密钥文件，不需要重启。
 
+如果以后更换 Windows 值守电脑，可以通过 Tailscale 打开 V3 管理面板，在“设置 → 客户端接入资料”中重新复制 TLS 端口、证书指纹和对应客户端的共享密钥。共享密钥默认隐藏，查看和复制都会留下审计记录。证书私钥只保存在 VPS，Windows 客户端不使用，管理面板也不会显示或提供下载。
+
 ### 矿场离线告警
 
 客户端每 30 秒发送一次经过认证的心跳。连续 180 秒没有心跳时，`stratum-secure-monitor` 会向原 V3 使用的企业微信机器人发送离线告警；恢复后发送一次恢复通知。可以编辑 `/etc/stratum-secure-relay.json` 中的 `offline_after_seconds` 改变等待时间，修改后重启监控：

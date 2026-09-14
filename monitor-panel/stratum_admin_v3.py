@@ -8,6 +8,7 @@ import re
 import secrets
 import shutil
 import socket
+import ssl
 import subprocess
 import tempfile
 import time
@@ -42,6 +43,8 @@ PEER_SYNC_FILE = Path(os.getenv("V3_PEER_SYNC_FILE", "/etc/stratum-v3-peer.json"
 PEER_OUTBOX_FILE = Path(os.getenv("V3_PEER_OUTBOX_FILE", "/var/lib/stratum-monitor/peer-sync-outbox.json"))
 PEER_STATE_FILE = Path(os.getenv("V3_PEER_STATE_FILE", "/var/lib/stratum-monitor/peer-sync-state.json"))
 DISCONNECT_HISTORY_DIR = Path(os.getenv("DISCONNECT_HISTORY_DIR", "/var/lib/stratum-inspector/history"))
+SECURE_RELAY_CONFIG = Path(os.getenv("SECURE_RELAY_CONFIG", "/etc/stratum-secure-relay.json"))
+SECURE_RELAY_STATE = Path(os.getenv("SECURE_RELAY_STATE", "/var/lib/stratum-secure-relay/sites.json"))
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("PANEL_SECRET_KEY", secrets.token_hex(32))
@@ -323,6 +326,84 @@ def csrf_ok():
 
 def actor():
     return session.get("tailscale_identity") or request.remote_addr or "panel"
+
+
+def current_tailscale_admin():
+    """Require a fresh identity header from the local Tailscale Serve proxy."""
+    return authorized() and bool(tailscale_identity())
+
+
+def append_audit(action):
+    """Record a sensitive read without changing or backing up the main config."""
+    try:
+        AUDIT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with AUDIT_FILE.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"time": int(time.time()), "actor": actor(), "action": action}, ensure_ascii=False) + "\n")
+    except OSError:
+        app.logger.exception("cannot append audit record")
+
+
+def certificate_summary(path_value):
+    result = {"available": False, "name": "", "fingerprint": ""}
+    try:
+        path = Path(str(path_value))
+        pem = path.read_text(encoding="utf-8", errors="strict")
+        match = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", pem, re.S)
+        if not match:
+            return result
+        der = ssl.PEM_cert_to_DER_cert(match.group(0))
+        result["fingerprint"] = hashlib.sha256(der).hexdigest().upper()
+        result["available"] = True
+        try:
+            decoded = ssl._ssl._test_decode_cert(str(path))
+            dns_names = [str(value) for kind, value in decoded.get("subjectAltName", ()) if kind == "DNS"]
+            if dns_names:
+                result["name"] = dns_names[0]
+                return result
+            for rdn in decoded.get("subject", ()):
+                for key, value in rdn:
+                    if key == "commonName" and "." in str(value) and " " not in str(value):
+                        result["name"] = str(value)
+                        return result
+        except (AttributeError, OSError, ValueError, ssl.SSLError):
+            pass
+    except (OSError, ValueError, ssl.SSLError):
+        pass
+    return result
+
+
+def client_access_context(config):
+    relay = load_json(SECURE_RELAY_CONFIG, {})
+    sites = load_json(SECURE_RELAY_STATE, {"sites": {}}).get("sites", {})
+    if not isinstance(sites, dict):
+        sites = {}
+    certificate = certificate_summary(relay.get("certificate", "")) if relay else {"available": False, "name": "", "fingerprint": ""}
+    reveal_id = str(session.get("revealed_client_id", ""))
+    reveal_active = float(session.get("revealed_client_until", 0) or 0) > time.time()
+    if not reveal_active:
+        session.pop("revealed_client_id", None)
+        session.pop("revealed_client_until", None)
+        reveal_id = ""
+    clients = relay.get("clients", []) if isinstance(relay.get("clients", []), list) else []
+    if not clients and relay.get("token"):
+        clients = [{"id": "default", "name": "默认客户端", "token": relay.get("token"), "enabled": True}]
+    rows = []
+    for item in clients:
+        client_id = str(item.get("id", "")).strip()
+        token = str(item.get("token", ""))
+        site = sites.get(client_id, {}) if isinstance(sites.get(client_id, {}), dict) else {}
+        last_seen = int(site.get("last_seen", 0) or 0)
+        row = {"id": client_id, "name": str(item.get("name") or client_id or "未命名客户端"),
+            "enabled": bool(item.get("enabled", True)), "active": int(site.get("active", 0) or 0),
+            "last_ip": str(site.get("last_ip", "")), "last_seen": beijing_time(last_seen) if last_seen else "尚未连接",
+            "masked_token": ("••••••••••••" + token[-4:]) if token else "未配置", "revealed_token": ""}
+        if reveal_active and reveal_id == client_id:
+            row["revealed_token"] = token
+        rows.append(row)
+    configured_host = str(config.get("settings", {}).get("secure_relay_host", "")).strip()
+    relay_status = detect_relay_public_ip(config)
+    return {"installed": bool(relay), "host": configured_host or relay_status.get("host", "") or "请填写VPS域名或公网IP",
+        "port": int(relay.get("listen_port", 0) or 0), "certificate": certificate, "clients": rows}
 
 
 def service_state(name):
@@ -735,6 +816,7 @@ def build_page_context(page):
         visible_forwarding = active_forwarding
     peer_settings = load_peer_settings()
     peer_outbox = load_json(PEER_OUTBOX_FILE, {"items": []})
+    access = client_access_context(config) if page == "access" else None
     return dict(page=page, config=config, endpoint_map=endpoint_map, endpoint_rows=rows,
         online=sum(1 for row in rows if row["ok"]), alerting=sum(1 for value in state.get("endpoints", {}).values() if value.get("alerting")),
         services={"HAProxy": service_state("haproxy"), "协议检查器": service_state("stratum-inspector-v3"),
@@ -758,7 +840,7 @@ def build_page_context(page):
             "route_sync_ok": "备用VPS同步成功", "route_sync_failed": "备用VPS同步失败",
             "route_sync_received": "已接收VPS同步"},
         algorithms={"scrypt": "Scrypt", "sha256d": "SHA-256", "other": "其他/自定义", "unknown": "算法待确认"},
-        security=security, csrf=session["csrf"])
+        security=security, client_access=access, tailscale_access_available=bool(tailscale_identity()), csrf=session["csrf"])
 
 
 @app.route("/")
@@ -772,9 +854,56 @@ def index():
 def dashboard_page(page):
     if not authorized():
         return redirect(url_for("login"))
-    if page not in {"overview", "miners", "routes", "alerts", "settings", "logs"}:
+    if page not in {"overview", "miners", "routes", "alerts", "settings", "logs", "access"}:
+        return "Not found", 404
+    if page == "access" and not current_tailscale_admin():
         return "Not found", 404
     return render_template("v3_dashboard.html", **build_page_context(page))
+
+
+def find_relay_client(client_id):
+    relay = load_json(SECURE_RELAY_CONFIG, {})
+    clients = relay.get("clients", []) if isinstance(relay.get("clients", []), list) else []
+    if not clients and relay.get("token"):
+        clients = [{"id": "default", "name": "默认客户端", "token": relay.get("token"), "enabled": True}]
+    return next((item for item in clients if str(item.get("id", "")) == client_id), None)
+
+
+@app.route("/client-access/<client_id>/reveal", methods=["POST"])
+def reveal_client_secret(client_id):
+    if not current_tailscale_admin():
+        return "Not found", 404
+    if not csrf_ok():
+        return "Forbidden", 403
+    client = find_relay_client(client_id)
+    if not client:
+        return "Not found", 404
+    session["revealed_client_id"] = client_id
+    session["revealed_client_until"] = int(time.time()) + 60
+    append_audit(f"查看客户端共享密钥:{client_id}")
+    return redirect(url_for("dashboard_page", page="access"))
+
+
+@app.route("/client-access/<client_id>/copy", methods=["POST"])
+def copy_client_secret(client_id):
+    if not current_tailscale_admin():
+        return "Not found", 404
+    if not csrf_ok():
+        return "Forbidden", 403
+    client = find_relay_client(client_id)
+    if not client:
+        return "Not found", 404
+    append_audit(f"复制客户端共享密钥:{client_id}")
+    return jsonify({"value": str(client.get("token", ""))})
+
+
+@app.after_request
+def protect_sensitive_responses(response):
+    if request.path == "/access" or request.path.startswith("/client-access/"):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 @app.route("/downloads/disconnect-history/<name>")

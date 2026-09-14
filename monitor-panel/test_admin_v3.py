@@ -36,7 +36,10 @@ class AdminV3Test(unittest.TestCase):
         admin.PEER_OUTBOX_FILE = root / "peer-outbox.json"
         admin.PEER_STATE_FILE = root / "peer-state.json"
         admin.DISCONNECT_HISTORY_DIR = root / "disconnect-history"
-        admin.store = ConfigStore(config_path, root / "history", root / "audit.jsonl")
+        admin.AUDIT_FILE = root / "audit.jsonl"
+        admin.SECURE_RELAY_CONFIG = root / "secure-relay.json"
+        admin.SECURE_RELAY_STATE = root / "relay-sites.json"
+        admin.store = ConfigStore(config_path, root / "history", admin.AUDIT_FILE)
         admin.app.config.update(TESTING=True, SECRET_KEY="test")
         self.client = admin.app.test_client()
         with self.client.session_transaction() as session:
@@ -211,6 +214,48 @@ class AdminV3Test(unittest.TestCase):
                 environ_base={"REMOTE_ADDR": "192.0.2.10"})
         self.assertEqual(response.status_code, 302)
         self.assertIn("/login", response.headers["Location"])
+
+    def test_client_access_is_available_only_through_current_tailscale_request(self):
+        secret = "a" * 64
+        admin.SECURE_RELAY_CONFIG.write_text(json.dumps({"listen_port": 452,
+            "certificate": str(Path(self.temp.name) / "server.crt"), "private_key": "/secret/server.key",
+            "clients": [{"id": "mine-a", "name": "一号矿场", "token": secret, "enabled": True}]}), encoding="utf-8")
+        admin.SECURE_RELAY_STATE.write_text(json.dumps({"sites": {"mine-a": {
+            "last_seen": 1789000000, "last_ip": "198.51.100.20", "active": 12}}}), encoding="utf-8")
+        self.assertEqual(self.client.get("/access").status_code, 404)
+        with patch.object(admin, "certificate_summary", return_value={"available": True,
+                "name": "relay.example.com", "fingerprint": "F" * 64}), \
+                patch.object(admin, "detect_relay_public_ip", return_value={"ok": True,
+                    "host": "93.184.216.34", "source": "test", "message": ""}):
+            response = self.client.get("/access", headers={"Tailscale-User-Login": "owner@example.com"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("客户端接入资料".encode(), response.data)
+        self.assertIn(("F" * 64).encode(), response.data)
+        self.assertIn(("••••••••••••" + secret[-4:]).encode(), response.data)
+        self.assertNotIn(secret.encode(), response.data)
+        self.assertNotIn(b"/secret/server.key", response.data)
+        self.assertEqual(response.headers["Cache-Control"], "no-store, max-age=0")
+
+    def test_client_secret_reveal_and_copy_are_audited(self):
+        secret = "b" * 64
+        admin.SECURE_RELAY_CONFIG.write_text(json.dumps({"listen_port": 452, "certificate": "",
+            "private_key": "/secret/server.key", "clients": [{"id": "mine-a", "name": "一号矿场",
+                "token": secret, "enabled": True}]}), encoding="utf-8")
+        headers = {"Tailscale-User-Login": "owner@example.com"}
+        response = self.client.post("/client-access/mine-a/reveal", data={"csrf": "token"}, headers=headers)
+        self.assertEqual(response.status_code, 302)
+        with patch.object(admin, "detect_relay_public_ip", return_value={"ok": True,
+                "host": "93.184.216.34", "source": "test", "message": ""}):
+            response = self.client.get("/access", headers=headers)
+        self.assertIn(secret.encode(), response.data)
+        response = self.client.post("/client-access/mine-a/copy", data={"csrf": "token"}, headers=headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["value"], secret)
+        audit = admin.AUDIT_FILE.read_text(encoding="utf-8")
+        self.assertIn("查看客户端共享密钥:mine-a", audit)
+        self.assertIn("复制客户端共享密钥:mine-a", audit)
+        self.assertNotIn(secret, audit)
+        self.assertEqual(self.client.post("/client-access/mine-a/copy", data={"csrf": "token"}).status_code, 404)
 
     def test_same_worker_from_multiple_routes_is_merged(self):
         config = admin.store.load()
