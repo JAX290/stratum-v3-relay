@@ -7,7 +7,7 @@ public static class ClientCoreTests
     private static void Check(bool condition,string name){if(condition)Console.WriteLine("PASS "+name);else{Console.WriteLine("FAIL "+name);failures++;}}
     public static int Main()
     {
-        Check(AppBrand.Version=="2.2.0"&&AppBrand.Title=="木林森中转 v2.2.0","visible application version");
+        Check(AppBrand.Version=="2.2.1"&&AppBrand.Title=="木林森中转 v2.2.1","visible application version");
         List<PortRoute> routes=PortRoute.Parse("9999, 10041=10001");
         Check(routes.Count==2,"route count");
         Check(routes[0].LocalPort==9999&&routes[0].RemotePort==9999,"same-port route");
@@ -32,6 +32,7 @@ public static class ClientCoreTests
         Check(snapshot.Worker.Contains("account.worker01")&&snapshot.Agent.Contains("Antminer/S19"),"stratum identity parsed");
         Check(snapshot.Submitted==1&&snapshot.Accepted==1&&snapshot.Rejected==0,"accepted share tracked");
         Check(snapshot.Hashrate10m>0&&snapshot.Hashrate1h>0&&snapshot.Hashrate24h>0,"rolling hashrates estimated");
+        MinerConnection flood=new MinerConnection{State=new MinerState{Ip="192.168.1.21",Connections=1,FirstSeen=DateTime.Now,LastActivity=DateTime.Now}};for(int i=0;i<5000;i++)Feed(flood,"{\"id\":"+i+",\"method\":\"mining.submit\",\"params\":[\"account.worker\",\"job\",\"x\"]}\n",true);System.Reflection.FieldInfo pendingField=typeof(MinerConnection).GetField("pending",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic);System.Collections.IDictionary pending=(System.Collections.IDictionary)pendingField.GetValue(flood);Check(pending.Count<=4096,"unanswered share tracking is bounded");
         MinerHistoryFile history=new MinerHistoryFile();history.Miners.Add(new MinerHistoryItem{Ip="192.168.1.20",Shares=new List<ShareHistoryItem>{new ShareHistoryItem{Time=DateTime.Now,Difficulty=1024}}});
         try{using(System.IO.MemoryStream stream=new System.IO.MemoryStream()){new System.Runtime.Serialization.Json.DataContractJsonSerializer(typeof(MinerHistoryFile)).WriteObject(stream,history);stream.Position=0;MinerHistoryFile restored=(MinerHistoryFile)new System.Runtime.Serialization.Json.DataContractJsonSerializer(typeof(MinerHistoryFile)).ReadObject(stream);Check(restored.Miners.Count==1&&restored.Miners[0].Shares.Count==1&&restored.Miners[0].Shares[0].Difficulty==1024,"24-hour history serializes");}}catch(Exception ex){Console.WriteLine("HISTORY ERROR "+ex.GetType().FullName+" "+ex.Message);failures++;}
         RelayManager relay=new RelayManager(delegate(string value){});System.Reflection.FieldInfo minerField=typeof(RelayManager).GetField("miners",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic);Dictionary<string,MinerState> registry=(Dictionary<string,MinerState>)minerField.GetValue(relay);registry["203.0.113.250"]=new MinerState{Ip="203.0.113.250",Connections=4,FirstSeen=DateTime.Now,LastActivity=DateTime.Now};registry["203.0.113.251"]=new MinerState{Ip="203.0.113.251",Connections=0,FirstSeen=DateTime.Now,LastActivity=DateTime.Now};Check(relay.Snapshot().ActiveMiners==1&&relay.Snapshot().Active==0,"main count uses unique online IPs");

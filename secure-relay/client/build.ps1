@@ -1,4 +1,4 @@
-param([switch]$TestBuild)
+param([switch]$TestBuild,[switch]$Sign)
 $ErrorActionPreference = 'Stop'
 $source = Join-Path $PSScriptRoot 'StratumSecureRelay.cs'
 $sourceText = Get-Content -LiteralPath $source -Raw -Encoding UTF8
@@ -16,4 +16,12 @@ if (-not (Test-Path -LiteralPath $icon)) { throw "Application icon not found: $i
   /reference:System.Windows.Forms.dll /reference:System.Runtime.Serialization.dll `
   /reference:System.Security.dll /reference:System.Web.Extensions.dll $source
 if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
+if ($Sign) {
+  $thumbprint = 'D83C5C3E10822B6A4B45333EF41AFCC4F9156AAB'
+  $certificate = Get-Item -LiteralPath ("Cert:\CurrentUser\My\{0}" -f $thumbprint) -ErrorAction Stop
+  if (-not $certificate.HasPrivateKey) { throw '木林森代码签名证书没有可用私钥。' }
+  $signature = Set-AuthenticodeSignature -LiteralPath $output -Certificate $certificate -HashAlgorithm SHA256 -TimestampServer 'http://timestamp.digicert.com'
+  if ($signature.Status -ne 'Valid') { throw "Code signing failed: $($signature.Status) $($signature.StatusMessage)" }
+  Write-Host "Signed by $($certificate.Subject); thumbprint $thumbprint"
+}
 Get-FileHash -Algorithm SHA256 -LiteralPath $output

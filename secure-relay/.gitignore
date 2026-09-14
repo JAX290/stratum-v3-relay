@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 client/client-core-tests.exe
+*.pfx
+*.pvk
+*.key

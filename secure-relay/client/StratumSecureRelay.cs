@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Net;
@@ -27,8 +28,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Stratum V3 TLS client for mine-site LAN relaying")]
 [assembly: AssemblyCompany("Stratum V3 Relay")]
 [assembly: AssemblyProduct("木林森中转")]
-[assembly: AssemblyVersion("2.2.0.0")]
-[assembly: AssemblyFileVersion("2.2.0.0")]
+[assembly: AssemblyVersion("2.2.1.0")]
+[assembly: AssemblyFileVersion("2.2.1.0")]
 
 public static class AppBrand
 {
@@ -58,6 +59,35 @@ public static class SystemStatus
 {
     [DllImport("kernel32.dll")] private static extern ulong GetTickCount64();
     public static TimeSpan Uptime { get { try { return TimeSpan.FromMilliseconds(GetTickCount64()); } catch { return TimeSpan.Zero; } } }
+}
+
+public static class CrashRecovery
+{
+    private static int restartScheduled;
+    private static readonly string CrashLog=Path.Combine(ConfigStore.Folder,"crash.log");
+    private static readonly string RestartHistory=Path.Combine(ConfigStore.Folder,"restart-history.txt");
+
+    public static void Log(Exception error,string source)
+    {
+        try{Directory.CreateDirectory(ConfigStore.Folder);File.AppendAllText(CrashLog,DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")+"  "+source+Environment.NewLine+error+Environment.NewLine+Environment.NewLine,Encoding.UTF8);if(new FileInfo(CrashLog).Length>2097152){string text=File.ReadAllText(CrashLog,Encoding.UTF8);File.WriteAllText(CrashLog,text.Substring(Math.Max(0,text.Length-1048576)),Encoding.UTF8);}}catch{}
+    }
+
+    public static void Schedule(Exception error,string source)
+    {
+        Log(error,source);if(Interlocked.Exchange(ref restartScheduled,1)!=0)return;
+        try{if(!AllowRestart()){Log(new InvalidOperationException("10分钟内已发生3次异常，停止自动重启，避免循环。"),"自动恢复保护");return;}ProcessStartInfo helper=new ProcessStartInfo(Application.ExecutablePath,"--recover "+Process.GetCurrentProcess().Id);helper.UseShellExecute=false;helper.CreateNoWindow=true;Process.Start(helper);}catch(Exception restartError){Log(restartError,"启动自动恢复失败");}
+    }
+
+    private static bool AllowRestart()
+    {
+        try{Directory.CreateDirectory(ConfigStore.Folder);DateTime cutoff=DateTime.UtcNow.AddMinutes(-10);List<long> ticks=new List<long>();if(File.Exists(RestartHistory))foreach(string line in File.ReadAllLines(RestartHistory)){long value;if(Int64.TryParse(line,out value)&&new DateTime(value,DateTimeKind.Utc)>=cutoff)ticks.Add(value);}if(ticks.Count>=3)return false;ticks.Add(DateTime.UtcNow.Ticks);List<string> output=new List<string>();foreach(long value in ticks)output.Add(value.ToString());File.WriteAllLines(RestartHistory,output.ToArray());return true;}catch{return true;}
+    }
+
+    public static bool RunHelper(string[] args)
+    {
+        if(args==null||args.Length<2||!String.Equals(args[0],"--recover",StringComparison.OrdinalIgnoreCase))return false;
+        int pid;try{if(Int32.TryParse(args[1],out pid)){try{Process.GetProcessById(pid).WaitForExit(30000);}catch{}}Thread.Sleep(3000);ProcessStartInfo start=new ProcessStartInfo(Application.ExecutablePath);start.UseShellExecute=false;Process.Start(start);}catch(Exception error){Log(error,"自动恢复助手");}return true;
+    }
 }
 
 [DataContract]
@@ -199,6 +229,9 @@ public sealed class RelayManager
     private readonly object stateLock = new object();
     private readonly Dictionary<string, EndpointState> endpointStates = new Dictionary<string, EndpointState>();
     private readonly Dictionary<string, MinerState> miners = new Dictionary<string, MinerState>();
+    // Only connection setup is limited. Established mining connections do not occupy a slot.
+    // This prevents hundreds of reconnecting miners from creating hundreds of slow VPS probes at once.
+    private readonly SemaphoreSlim connectionSetupSlots = new SemaphoreSlim(32, 32);
     public bool IsRunning { get { return stop != null; } }
 
     public RelayManager(Action<string> logger) { log = logger; LoadMinerHistory(); }
@@ -241,7 +274,7 @@ public sealed class RelayManager
     {
         while (!cancellation.IsCancellationRequested) {
             try {
-                TcpClient miner = await listener.AcceptTcpClientAsync();
+                TcpClient miner = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
                 Handle(miner, config, route, cancellation);
             } catch (ObjectDisposedException) { break; }
               catch (Exception ex) { if (!cancellation.IsCancellationRequested) log("接收连接失败：" + ex.Message); }
@@ -258,21 +291,24 @@ public sealed class RelayManager
         MinerConnection minerState = OpenMiner(minerIp, route);
         TcpClient remote = null;
         SslStream tls = null;
+        bool setupSlot = false;
         try {
             miner.NoDelay = true;
+            setupSlot = await connectionSetupSlots.WaitAsync(15000, cancellation).ConfigureAwait(false);
+            if (!setupSlot) throw new IOException("VPS连接排队过多，已保护性拒绝本次连接，请稍后自动重试。");
             ServerProfile selected = null;
             Exception last = null;
             int minerPort = endpoint == null ? 1 : endpoint.Port;
             foreach (ServerProfile profile in EnabledProfiles(config)) {
+                if (IsCoolingDown(profile)) { last = new IOException(profile.Name + "刚刚检测失败，暂缓重复连接。"); continue; }
                 try {
-                    TlsConnection connection = await OpenTls(profile, 10000); tls = connection.Stream; remote = connection.Client;
+                    TlsConnection connection = await OpenTls(profile, 10000, cancellation).ConfigureAwait(false); tls = connection.Stream; remote = connection.Client;
                     string targetName = String.IsNullOrWhiteSpace(profile.ServerName) ? profile.Address : profile.ServerName.Trim();
                     string request = "CONNECT /relay/v1/" + route.RemotePort + " HTTP/1.1\r\n" +
                         "Host: " + targetName + "\r\nUser-Agent: MulinSenRelay/2.0\r\nAuthorization: Bearer " + profile.SharedKey + "\r\n" +
                         "X-Site-Name: " + SafeHeader(config.SiteName) + "\r\nX-Client-Version: " + AppBrand.Version + "\r\nX-Miner-IP: " + minerIp + "\r\nX-Miner-Port: " + minerPort + "\r\n\r\n";
                     byte[] requestBytes = Encoding.ASCII.GetBytes(request);
-                    await tls.WriteAsync(requestBytes, 0, requestBytes.Length, cancellation); await tls.FlushAsync(cancellation);
-                    string response = await ReadHeader(tls, cancellation);
+                    string response = await ExchangeHeaderWithTimeout(tls, remote, requestBytes, 10000, cancellation).ConfigureAwait(false);
                     if (!response.StartsWith("HTTP/1.1 200 ", StringComparison.Ordinal)) throw new IOException("VPS 拒绝认证或没有这个转发端口。");
                     selected = profile; MarkSuccess(profile, 0); SetMinerEndpoint(minerState,profile.Name); break;
                 } catch (Exception ex) {
@@ -282,18 +318,20 @@ public sealed class RelayManager
                 }
             }
             if (selected == null) throw new IOException("主、备用 VPS 都无法连接。" + (last == null ? "" : " " + FriendlyError(last)));
+            connectionSetupSlots.Release(); setupSlot = false;
             log(source + " 已通过" + selected.Name + "加密连接，本地 " + route.LocalPort + " → VPS " + route.RemotePort + "；当前连接 " + number);
             Task up = CopyAndCount(miner.GetStream(), tls, true, minerState, cancellation);
             Task down = CopyAndCount(tls, miner.GetStream(), false, minerState, cancellation);
-            await Task.WhenAny(up, down);
+            await Task.WhenAny(up, down).ConfigureAwait(false);
             try { miner.Client.Shutdown(SocketShutdown.Both); } catch { }
             try { remote.Client.Shutdown(SocketShutdown.Both); } catch { }
-            try { await Task.WhenAll(up, down); } catch { }
+            try { await Task.WhenAll(up, down).ConfigureAwait(false); } catch { }
         } catch (Exception ex) {
             Interlocked.Increment(ref failedConnections);
             MinerFailed(minerState,FriendlyError(ex));
             if (!cancellation.IsCancellationRequested) log(source + " 连接失败：" + FriendlyError(ex));
         } finally {
+            if (setupSlot) connectionSetupSlots.Release();
             try { if (tls != null) tls.Dispose(); } catch { }
             try { miner.Close(); } catch { }
             try { if (remote != null) remote.Close(); } catch { }
@@ -303,11 +341,11 @@ public sealed class RelayManager
         }
     }
 
-    private async Task<TlsConnection> OpenTls(ServerProfile profile, int timeoutMs)
+    private async Task<TlsConnection> OpenTls(ServerProfile profile, int timeoutMs, CancellationToken cancellation)
     {
         TcpClient client = new TcpClient();
         try {
-            await ConnectWithTimeout(client, profile.Address, profile.Port, timeoutMs);
+            await ConnectWithTimeout(client, profile.Address, profile.Port, timeoutMs, cancellation).ConfigureAwait(false);
             client.NoDelay = true;
             string expectedPin = NormalizePin(profile.CertificateSha256);
             RemoteCertificateValidationCallback validator = delegate(object sender, X509Certificate cert, X509Chain chain, SslPolicyErrors errors) {
@@ -323,8 +361,14 @@ public sealed class RelayManager
             SslStream tls = new SslStream(client.GetStream(), false, validator);
             string targetName = String.IsNullOrWhiteSpace(profile.ServerName) ? profile.Address : profile.ServerName.Trim();
             Task auth = tls.AuthenticateAsClientAsync(targetName, null, SslProtocols.Tls12, false);
-            if (await Task.WhenAny(auth, Task.Delay(timeoutMs)) != auth) throw new System.TimeoutException("TLS 握手超时。");
-            await auth;
+            Task authDelay = Task.Delay(timeoutMs, cancellation);
+            if (await Task.WhenAny(auth, authDelay).ConfigureAwait(false) != auth) {
+                client.Close();
+                ObserveFault(auth);
+                if (cancellation.IsCancellationRequested) throw new OperationCanceledException(cancellation);
+                throw new System.TimeoutException("TLS 握手超时。");
+            }
+            await auth.ConfigureAwait(false);
             return new TlsConnection { Stream=tls, Client=client };
         } catch { client.Close(); throw; }
     }
@@ -334,10 +378,10 @@ public sealed class RelayManager
         while (!cancellation.IsCancellationRequested) {
             foreach (ServerProfile profile in EnabledProfiles(config)) {
                 try {
-                    await TestProfileAsync(profile, config.SiteName, cancellation);
+                    await TestProfileAsync(profile, config.SiteName, cancellation).ConfigureAwait(false);
                 } catch { }
             }
-            try { await Task.Delay(TimeSpan.FromMinutes(config.HealthCheckMinutes), cancellation); } catch { break; }
+            try { await Task.Delay(TimeSpan.FromMinutes(config.HealthCheckMinutes), cancellation).ConfigureAwait(false); } catch { break; }
         }
     }
 
@@ -345,13 +389,12 @@ public sealed class RelayManager
     {
         DateTime begin = DateTime.UtcNow;
         try {
-            TlsConnection connection = await OpenTls(profile, 8000);
+            TlsConnection connection = await OpenTls(profile, 8000, cancellation).ConfigureAwait(false);
             using (connection.Client) using (SslStream tls = connection.Stream) {
                 string host = String.IsNullOrWhiteSpace(profile.ServerName) ? profile.Address : profile.ServerName.Trim();
                 RelaySnapshot status=Snapshot();
                 byte[] bytes = Encoding.ASCII.GetBytes("CONNECT /relay/v2/health HTTP/1.1\r\nHost: " + host + "\r\nAuthorization: Bearer " + profile.SharedKey + "\r\nX-Site-Name: " + SafeHeader(siteName) + "\r\nX-Client-Version: " + AppBrand.Version + "\r\nX-Miner-Count: " + status.ActiveMiners + "\r\nX-Active-Connections: " + status.Active + "\r\n\r\n");
-                await tls.WriteAsync(bytes, 0, bytes.Length, cancellation); await tls.FlushAsync(cancellation);
-                string response = await ReadHeader(tls, cancellation);
+                string response = await ExchangeHeaderWithTimeout(tls, connection.Client, bytes, 8000, cancellation).ConfigureAwait(false);
                 if (!response.StartsWith("HTTP/1.1 200 ", StringComparison.Ordinal)) throw new IOException("VPS拒绝认证，请检查共享密钥和服务版本。");
             }
             MarkSuccess(profile, (int)(DateTime.UtcNow - begin).TotalMilliseconds);
@@ -373,9 +416,9 @@ public sealed class RelayManager
     {
         byte[] buffer = new byte[65536];
         while (!cancellation.IsCancellationRequested) {
-            int count = await input.ReadAsync(buffer, 0, buffer.Length, cancellation);
+            int count = await input.ReadAsync(buffer, 0, buffer.Length, cancellation).ConfigureAwait(false);
             if (count <= 0) break;
-            await output.WriteAsync(buffer, 0, count, cancellation);
+            await output.WriteAsync(buffer, 0, count, cancellation).ConfigureAwait(false);
             if (upload) Interlocked.Add(ref uploadedBytes, count); else Interlocked.Add(ref downloadedBytes, count);
             ObserveMiner(connection,buffer,count,upload);
         }
@@ -383,6 +426,7 @@ public sealed class RelayManager
 
     private void MarkSuccess(ServerProfile p, int latency) { lock(stateLock) { EndpointState s=GetState(p); s.Online=true; s.LatencyMs=latency; s.LastError=""; s.LastCheck=DateTime.Now; } }
     private void MarkFailure(ServerProfile p, string error) { lock(stateLock) { EndpointState s=GetState(p); s.Online=false; s.Failures++; s.LastError=error; s.LastCheck=DateTime.Now; } }
+    private bool IsCoolingDown(ServerProfile p) { lock(stateLock) { EndpointState s=GetState(p); return s.LastCheck!=DateTime.MinValue&&!s.Online&&(DateTime.Now-s.LastCheck)<TimeSpan.FromSeconds(15); } }
     private EndpointState GetState(ServerProfile p) { EndpointState s; if (!endpointStates.TryGetValue(p.Name, out s)) { s=new EndpointState{Name=p.Name}; endpointStates[p.Name]=s; } return s; }
     private EndpointState GetStateCopy(ServerProfile p) { lock(stateLock) { return GetState(p).Copy(); } }
 
@@ -439,11 +483,44 @@ public sealed class RelayManager
     }
     private static DateTime FromTicks(long ticks){return ticks<=0?DateTime.MinValue:new DateTime(ticks,DateTimeKind.Local);}
 
-    private static async Task ConnectWithTimeout(TcpClient client, string host, int port, int timeoutMs)
+    private static async Task ConnectWithTimeout(TcpClient client, string host, int port, int timeoutMs, CancellationToken cancellation)
     {
         Task connect = client.ConnectAsync(host, port);
-        if (await Task.WhenAny(connect, Task.Delay(timeoutMs)) != connect) throw new System.TimeoutException("连接 VPS 超时。");
-        await connect;
+        Task delay = Task.Delay(timeoutMs, cancellation);
+        if (await Task.WhenAny(connect, delay).ConfigureAwait(false) != connect) {
+            client.Close();
+            ObserveFault(connect);
+            if (cancellation.IsCancellationRequested) throw new OperationCanceledException(cancellation);
+            throw new System.TimeoutException("连接 VPS 超时。");
+        }
+        await connect.ConfigureAwait(false);
+    }
+
+    private static async Task<string> ExchangeHeaderWithTimeout(SslStream stream, TcpClient client, byte[] request, int timeoutMs, CancellationToken cancellation)
+    {
+        Task<string> exchange = WriteAndReadHeader(stream, request, cancellation);
+        Task delay = Task.Delay(timeoutMs, cancellation);
+        if (await Task.WhenAny(exchange, delay).ConfigureAwait(false) != exchange) {
+            // Older .NET Framework SslStream versions may ignore cancellation while the peer stays silent.
+            try { client.Close(); } catch { }
+            ObserveFault(exchange);
+            if (cancellation.IsCancellationRequested) throw new OperationCanceledException(cancellation);
+            throw new System.TimeoutException("VPS认证响应超时。");
+        }
+        return await exchange.ConfigureAwait(false);
+    }
+
+    private static async Task<string> WriteAndReadHeader(SslStream stream, byte[] request, CancellationToken cancellation)
+    {
+        await stream.WriteAsync(request, 0, request.Length, cancellation).ConfigureAwait(false);
+        await stream.FlushAsync(cancellation).ConfigureAwait(false);
+        return await ReadHeader(stream, cancellation).ConfigureAwait(false);
+    }
+
+    private static void ObserveFault(Task task)
+    {
+        task.ContinueWith(delegate(Task failed) { Exception ignored = failed.Exception; }, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     private static async Task<string> ReadHeader(Stream stream, CancellationToken cancellation)
@@ -451,7 +528,7 @@ public sealed class RelayManager
         MemoryStream buffer = new MemoryStream();
         byte[] one = new byte[1];
         while (buffer.Length < 8192) {
-            int count = await stream.ReadAsync(one, 0, 1, cancellation);
+            int count = await stream.ReadAsync(one, 0, 1, cancellation).ConfigureAwait(false);
             if (count == 0) throw new IOException("VPS 在握手时断开连接。");
             buffer.WriteByte(one[0]);
             byte[] data = buffer.GetBuffer();
@@ -499,21 +576,21 @@ public sealed class MinerSnapshot
 }
 public sealed class MinerConnection
 {
-    public MinerState State; private readonly JavaScriptSerializer json=new JavaScriptSerializer(); private string upBuffer="",downBuffer=""; private double difficulty; private readonly Dictionary<string,PendingShare> pending=new Dictionary<string,PendingShare>();
+    public MinerState State; private readonly JavaScriptSerializer json=new JavaScriptSerializer(); private string upBuffer="",downBuffer=""; private double difficulty; private DateTime lastPendingCleanup=DateTime.MinValue; private readonly Dictionary<string,PendingShare> pending=new Dictionary<string,PendingShare>();
     public void Observe(byte[] bytes,int count,bool fromMiner)
     {
         string buffer=(fromMiner?upBuffer:downBuffer)+Encoding.UTF8.GetString(bytes,0,count);int lineEnd;
         while((lineEnd=buffer.IndexOf('\n'))>=0){string line=buffer.Substring(0,lineEnd).Trim();buffer=buffer.Substring(lineEnd+1);if(line.Length>0&&line.Length<1048576)Parse(line,fromMiner);}
-        if(buffer.Length>1048576)buffer="";if(fromMiner)upBuffer=buffer;else downBuffer=buffer;
+        if(buffer.Length>262144)buffer="";if(fromMiner)upBuffer=buffer;else downBuffer=buffer;
     }
     private void Parse(string line,bool fromMiner)
     {
-        Dictionary<string,object> message;try{message=json.DeserializeObject(line) as Dictionary<string,object>;}catch{return;}if(message==null)return;
+        DateTime now=DateTime.UtcNow;if(lastPendingCleanup==DateTime.MinValue||(now-lastPendingCleanup)>TimeSpan.FromMinutes(1)){List<string>expired=new List<string>();foreach(KeyValuePair<string,PendingShare> item in pending)if((now-item.Value.Time)>TimeSpan.FromMinutes(10))expired.Add(item.Key);foreach(string key in expired)pending.Remove(key);if(pending.Count>4096)pending.Clear();lastPendingCleanup=now;}Dictionary<string,object> message;try{message=json.DeserializeObject(line) as Dictionary<string,object>;}catch{return;}if(message==null)return;
         object methodValue;string method=message.TryGetValue("method",out methodValue)&&methodValue!=null?methodValue.ToString():"";IList parameters=Parameters(message);
         if(fromMiner){
-            if(method=="mining.subscribe"&&parameters.Count>0&&parameters[0]!=null)State.Agents.Add(parameters[0].ToString());
-            else if(method=="mining.authorize"&&parameters.Count>0&&parameters[0]!=null)State.Workers.Add(parameters[0].ToString());
-            else if(method=="mining.submit"&&parameters.Count>0){State.Submitted++;if(parameters[0]!=null)State.Workers.Add(parameters[0].ToString());object id;if(message.TryGetValue("id",out id))pending[json.Serialize(id)]=new PendingShare{Time=DateTime.UtcNow,Difficulty=difficulty};}
+            if(method=="mining.subscribe"&&parameters.Count>0&&parameters[0]!=null)AddIdentity(State.Agents,parameters[0]);
+            else if(method=="mining.authorize"&&parameters.Count>0&&parameters[0]!=null)AddIdentity(State.Workers,parameters[0]);
+            else if(method=="mining.submit"&&parameters.Count>0){State.Submitted++;if(parameters[0]!=null)AddIdentity(State.Workers,parameters[0]);object id;if(message.TryGetValue("id",out id)){if(pending.Count>=4096)pending.Clear();pending[json.Serialize(id)]=new PendingShare{Time=DateTime.UtcNow,Difficulty=difficulty};}}
             return;
         }
         if(method=="mining.set_difficulty"&&parameters.Count>0){double value;if(Double.TryParse(Convert.ToString(parameters[0],System.Globalization.CultureInfo.InvariantCulture),System.Globalization.NumberStyles.Float,System.Globalization.CultureInfo.InvariantCulture,out value))difficulty=value;return;}
@@ -521,6 +598,7 @@ public sealed class MinerConnection
         object result,error;bool accepted=message.TryGetValue("result",out result)&&result is bool&&(bool)result&&(!message.TryGetValue("error",out error)||error==null);double latency=(DateTime.UtcNow-share.Time).TotalMilliseconds;State.LatencyTotal+=latency;State.LatencySamples++;
         if(accepted){State.Accepted++;State.LastAccepted=DateTime.Now;State.Shares.Add(new ShareEvent{Time=DateTime.Now,Difficulty=share.Difficulty});State.LastError="";}else{State.Rejected++;State.LastError="Share 被矿池拒绝";}
     }
+    private static void AddIdentity(HashSet<string> values,object value){if(values.Count<32)values.Add(value.ToString());}
     private static IList Parameters(Dictionary<string,object> message){object value;if(message.TryGetValue("params",out value)&&value is IList)return (IList)value;return new object[0];}
 }
 
@@ -535,7 +613,7 @@ public static class MinerHistoryStore
     public static readonly string FilePath=Path.Combine(ConfigStore.Folder,"miner-history.json");
     public static void Save(IEnumerable<MinerState> states)
     {
-        DateTime cutoff=DateTime.Now.AddHours(-24);MinerHistoryFile file=new MinerHistoryFile();foreach(MinerState s in states){if(s.LastActivity<cutoff)continue;MinerHistoryItem item=new MinerHistoryItem{Ip=s.Ip,Endpoint=s.Endpoint,LastError=s.LastError,Disconnects=s.Disconnects,Failures=s.Failures,Submitted=s.Submitted,Accepted=s.Accepted,Rejected=s.Rejected,LatencySamples=s.LatencySamples,Uploaded=s.Uploaded,Downloaded=s.Downloaded,LatencyTotal=s.LatencyTotal,FirstSeenTicks=s.FirstSeen.Ticks,LastActivityTicks=s.LastActivity.Ticks,LastAcceptedTicks=s.LastAccepted.Ticks,LocalPorts=new List<int>(s.LocalPorts),Workers=new List<string>(s.Workers),Agents=new List<string>(s.Agents)};foreach(ShareEvent e in s.Shares)if(e.Time>=cutoff)item.Shares.Add(new ShareHistoryItem{Time=e.Time,Difficulty=e.Difficulty});file.Miners.Add(item);}
+        DateTime cutoff=DateTime.Now.AddHours(-24);MinerHistoryFile file=new MinerHistoryFile();foreach(MinerState s in states){s.Shares.RemoveAll(delegate(ShareEvent e){return e.Time<cutoff;});if(s.LastActivity<cutoff)continue;MinerHistoryItem item=new MinerHistoryItem{Ip=s.Ip,Endpoint=s.Endpoint,LastError=s.LastError,Disconnects=s.Disconnects,Failures=s.Failures,Submitted=s.Submitted,Accepted=s.Accepted,Rejected=s.Rejected,LatencySamples=s.LatencySamples,Uploaded=s.Uploaded,Downloaded=s.Downloaded,LatencyTotal=s.LatencyTotal,FirstSeenTicks=s.FirstSeen.Ticks,LastActivityTicks=s.LastActivity.Ticks,LastAcceptedTicks=s.LastAccepted.Ticks,LocalPorts=new List<int>(s.LocalPorts),Workers=new List<string>(s.Workers),Agents=new List<string>(s.Agents)};foreach(ShareEvent e in s.Shares)item.Shares.Add(new ShareHistoryItem{Time=e.Time,Difficulty=e.Difficulty});file.Miners.Add(item);}
         Directory.CreateDirectory(ConfigStore.Folder);string temporary=FilePath+".tmp";using(FileStream stream=File.Create(temporary))new DataContractJsonSerializer(typeof(MinerHistoryFile)).WriteObject(stream,file);if(File.Exists(FilePath))File.Replace(temporary,FilePath,null);else File.Move(temporary,FilePath);
     }
     public static List<MinerHistoryItem> Load(){try{using(FileStream stream=File.OpenRead(FilePath)){MinerHistoryFile file=(MinerHistoryFile)new DataContractJsonSerializer(typeof(MinerHistoryFile)).ReadObject(stream);return file.Miners??new List<MinerHistoryItem>();}}catch{return new List<MinerHistoryItem>();}}
@@ -601,6 +679,9 @@ public sealed class MainForm : Form
     private readonly RelayManager manager;
     private readonly System.Windows.Forms.Timer ipTimer = new System.Windows.Forms.Timer();
     private readonly System.Windows.Forms.Timer statusTimer = new System.Windows.Forms.Timer();
+    private readonly System.Windows.Forms.Timer logTimer = new System.Windows.Forms.Timer();
+    private readonly Queue<string> pendingLogs = new Queue<string>();
+    private readonly object logLock = new object();
     private readonly Label status = new Label();
     private List<ServerProfile> backupProfiles = new List<ServerProfile>();
     private int statusTicks;
@@ -624,6 +705,9 @@ public sealed class MainForm : Form
         statusTimer.Interval = 1000;
         statusTimer.Tick += delegate { RefreshStatus(); };
         statusTimer.Start();
+        logTimer.Interval = 250;
+        logTimer.Tick += delegate { DrainLogs(); };
+        logTimer.Start();
         tray.Text = AppBrand.Title;
         tray.Icon = Icon;
         tray.Visible = true;
@@ -792,11 +876,11 @@ public sealed class MainForm : Form
         ServerProfile profile=CurrentConfig().Servers[0];
         try {
             ValidateProfile(profile); testPrimary.Enabled=false; testPrimary.Text="测试中…";
-            EndpointState result=await manager.TestProfileAsync(profile,siteName.Text.Trim(),CancellationToken.None);
+            EndpointState result=await manager.TestProfileAsync(profile,siteName.Text.Trim(),CancellationToken.None);if(IsDisposed||Disposing)return;
             Log("主VPS测试成功：TCP、TLS证书和共享密钥均正常，延迟 "+result.LatencyMs+" ms。");
             MessageBox.Show(this,"主VPS连接正常。\r\n\r\nTLS证书验证：通过\r\n共享密钥认证：通过\r\n响应时间："+result.LatencyMs+" ms","测试成功",MessageBoxButtons.OK,MessageBoxIcon.Information);
-        } catch(Exception ex) { Log("主VPS测试失败："+ex.Message); MessageBox.Show(this,"主VPS连接失败。\r\n\r\n"+ex.Message,"测试失败",MessageBoxButtons.OK,MessageBoxIcon.Warning); }
-        finally { testPrimary.Enabled=true; testPrimary.Text="测试主VPS"; RefreshStatus(); }
+        } catch(Exception ex) { if(IsDisposed||Disposing)return;Log("主VPS测试失败："+ex.Message); MessageBox.Show(this,"主VPS连接失败。\r\n\r\n"+ex.Message,"测试失败",MessageBoxButtons.OK,MessageBoxIcon.Warning); }
+        finally { if(!IsDisposed&&!Disposing){testPrimary.Enabled=true; testPrimary.Text="测试主VPS"; RefreshStatus();} }
     }
 
     private void SetRunning(bool running)
@@ -850,12 +934,12 @@ public sealed class MainForm : Form
             report.AppendLine();report.AppendLine("【当前生产状态】");report.AppendLine("中转状态："+(snapshot.Running?"运行中":"未启动"));report.AppendLine("在线矿机："+snapshot.ActiveMiners);report.AppendLine("当前连接："+snapshot.Active);report.AppendLine("累计失败："+snapshot.Failures);report.AppendLine("传输流量：上传 "+FormatBytes(snapshot.Uploaded)+" / 下载 "+FormatBytes(snapshot.Downloaded));
             int warning=0,offline=0;foreach(MinerSnapshot miner in miners){if(miner.Connections==0)offline++;else if(miner.Health<85)warning++;}report.AppendLine("需要注意的在线矿机："+warning);report.AppendLine("历史离线记录："+offline);if(snapshot.Running&&snapshot.ActiveMiners==0)problems.Add("中转正在运行，但目前没有矿机连接这台电脑。");if(warning>0)problems.Add("有 "+warning+" 台在线矿机健康度偏低，请打开“矿机状态”查看。");
             report.AppendLine();report.AppendLine("【主、备用VPS检测】");int usable=0;foreach(ServerProfile profile in config.Servers){if(profile==null||!profile.Enabled)continue;try{ValidateProfile(profile);EndpointState result=await manager.TestProfileAsync(profile,config.SiteName,CancellationToken.None);usable++;report.AppendLine(profile.Name+"：正常，响应 "+result.LatencyMs+" ms，地址 "+profile.Address+":"+profile.Port);}catch(Exception ex){report.AppendLine(profile.Name+"：失败，"+ex.Message);problems.Add(profile.Name+"当前无法通过完整的TCP、TLS和共享密钥检测。");}}
-            if(usable==0)problems.Add("没有任何一台VPS检测成功，矿机的新连接将无法建立。");
+            if(IsDisposed||Disposing)return;if(usable==0)problems.Add("没有任何一台VPS检测成功，矿机的新连接将无法建立。");
             report.AppendLine();report.AppendLine("【管理员结论】");if(problems.Count==0){report.AppendLine("当前未发现明显问题，可以继续运行。");}else{for(int i=0;i<problems.Count;i++)report.AppendLine((i+1)+". "+problems[i]);}
             report.AppendLine();report.AppendLine("说明：报告不包含共享密钥、证书私钥或矿池密码，可以复制给维护人员排查。");
             Directory.CreateDirectory(ConfigStore.Folder);string path=Path.Combine(ConfigStore.Folder,"diagnostic-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+".txt");File.WriteAllText(path,report.ToString(),Encoding.UTF8);Log("一键诊断完成，报告已保存："+path);using(DiagnosticReportForm form=new DiagnosticReportForm(report.ToString(),path))form.ShowDialog(this);
-        } catch(Exception ex){Log("一键诊断失败："+ex.Message);MessageBox.Show(this,"无法完成诊断。\r\n\r\n"+ex.Message,"诊断失败",MessageBoxButtons.OK,MessageBoxIcon.Warning);}
-        finally{diagnostics.Enabled=true;diagnostics.Text="一键诊断";RefreshStatus();}
+        } catch(Exception ex){if(IsDisposed||Disposing)return;Log("一键诊断失败："+ex.Message);MessageBox.Show(this,"无法完成诊断。\r\n\r\n"+ex.Message,"诊断失败",MessageBoxButtons.OK,MessageBoxIcon.Warning);}
+        finally{if(!IsDisposed&&!Disposing){diagnostics.Enabled=true;diagnostics.Text="一键诊断";RefreshStatus();}}
     }
 
     private void RefreshStatus()
@@ -866,21 +950,29 @@ public sealed class MainForm : Form
         string uptime=s.Running ? FormatDuration(DateTime.Now-s.StartedAt) : "--";
         List<string> endpoints=new List<string>(); foreach(EndpointState e in s.Endpoints) endpoints.Add(e.Name+":"+(e.Online ? "正常 "+e.LatencyMs+"ms" : "异常 "+e.LastError)+"（"+(e.LastCheck==DateTime.MinValue?"未检测":e.LastCheck.ToString("HH:mm:ss"))+"）");
         start.Enabled=!manager.IsRunning;
-        status.Text="状态："+line+"    当前矿机："+s.ActiveMiners+"    当前连接："+s.Active+"    累计连接："+s.Total+"    失败："+s.Failures+"    运行："+uptime+"\r\n流量：上传 "+FormatBytes(s.Uploaded)+" / 下载 "+FormatBytes(s.Downloaded)+"\r\n线路检测："+(endpoints.Count==0 ? "启动中转后自动检测，也可点击测试按钮" : String.Join("，",endpoints.ToArray()));
+        status.Text="状态："+line+"    当前矿机："+s.ActiveMiners+"    当前连接："+s.Active+"    累计连接："+s.Total+"    失败："+s.Failures+"    运行："+uptime+"\r\n流量：上传 "+FormatBytes(s.Uploaded)+" / 下载 "+FormatBytes(s.Downloaded)+"    异常退出自动恢复：已启用\r\n线路检测："+(endpoints.Count==0 ? "启动中转后自动检测，也可点击测试按钮" : String.Join("，",endpoints.ToArray()));
     }
     private static string FormatDuration(TimeSpan t){ return ((int)t.TotalDays>0 ? ((int)t.TotalDays)+"天 " : "")+t.Hours.ToString("00")+":"+t.Minutes.ToString("00")+":"+t.Seconds.ToString("00"); }
     private static string FormatBytes(long value){ string[] u={"B","KB","MB","GB","TB"}; double n=value; int i=0; while(n>=1024&&i<u.Length-1){n/=1024;i++;} return n.ToString(i==0?"0":"0.0")+" "+u[i]; }
 
     private void Log(string message)
     {
-        if (InvokeRequired) { BeginInvoke(new Action<string>(Log), message); return; }
-        logs.AppendText(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + message + Environment.NewLine);
+        string line=DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")+"  "+message+Environment.NewLine;
+        lock(logLock){if(pendingLogs.Count>=5000)pendingLogs.Dequeue();pendingLogs.Enqueue(line);}
+    }
+
+    private void DrainLogs()
+    {
+        StringBuilder batch=new StringBuilder();lock(logLock){int count=Math.Min(500,pendingLogs.Count);for(int i=0;i<count;i++)batch.Append(pendingLogs.Dequeue());}
+        if(batch.Length==0||IsDisposed||Disposing)return;
+        const int maximum=524288,keep=393216;if(logs.TextLength+batch.Length>maximum){int remove=Math.Max(0,logs.TextLength-keep);if(remove>0){logs.Select(0,remove);logs.SelectedText="";}}
+        logs.AppendText(batch.ToString());
     }
 
     private void OnClosing(object sender, FormClosingEventArgs e)
     {
         if (!exiting && closeToTray.Checked && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); tray.ShowBalloonTip(1500, "木林森中转", "程序仍在后台运行。", ToolTipIcon.Info); return; }
-        ipTimer.Stop(); statusTimer.Stop(); manager.SaveMinerHistory(); manager.Stop(); tray.Visible = false;
+        ipTimer.Stop(); statusTimer.Stop(); logTimer.Stop(); manager.SaveMinerHistory(); manager.Stop(); tray.Visible = false;
     }
 }
 
@@ -948,19 +1040,25 @@ public sealed class ServerEditor : Panel
     }
     private static void Add(TableLayoutPanel g,int row,string text,Control c){g.RowStyles.Add(new RowStyle(SizeType.Absolute,48));Label l=new Label();l.Text=text;l.Dock=DockStyle.Fill;l.TextAlign=ContentAlignment.MiddleLeft;c.Dock=DockStyle.Fill;c.Margin=new Padding(3,8,3,8);g.Controls.Add(l,0,row);g.Controls.Add(c,1,row);}
     public ServerProfile Value(){return new ServerProfile{Name=profileName,Enabled=enabled.Checked,Address=address.Text.Trim(),Port=(int)port.Value,ServerName=serverName.Text.Trim(),CertificateSha256=pin.Text.Trim(),SharedKey=key.Text.Trim()};}
-    private async void TestConnection(){ServerProfile p=Value();try{if(String.IsNullOrWhiteSpace(p.Address))throw new InvalidOperationException("请填写VPS地址。");if((p.SharedKey??"").Length<32)throw new InvalidOperationException("共享密钥格式不正确。");if(String.IsNullOrWhiteSpace(p.CertificateSha256)&&String.IsNullOrWhiteSpace(p.ServerName))throw new InvalidOperationException("请填写证书名称或证书指纹。");test.Enabled=false;test.Text="测试中…";testResult.ForeColor=Color.DimGray;testResult.Text="正在验证TCP、TLS和密钥";EndpointState result=await manager.TestProfileAsync(p,siteName,CancellationToken.None);testResult.ForeColor=Color.ForestGreen;testResult.Text="正常 · "+result.LatencyMs+" ms · "+result.LastCheck.ToString("HH:mm:ss");}catch(Exception ex){testResult.ForeColor=Color.Firebrick;testResult.Text="失败 · "+ex.Message;}finally{test.Enabled=true;test.Text="测试这台VPS";}}
+    private async void TestConnection(){ServerProfile p=Value();try{if(String.IsNullOrWhiteSpace(p.Address))throw new InvalidOperationException("请填写VPS地址。");if((p.SharedKey??"").Length<32)throw new InvalidOperationException("共享密钥格式不正确。");if(String.IsNullOrWhiteSpace(p.CertificateSha256)&&String.IsNullOrWhiteSpace(p.ServerName))throw new InvalidOperationException("请填写证书名称或证书指纹。");test.Enabled=false;test.Text="测试中…";testResult.ForeColor=Color.DimGray;testResult.Text="正在验证TCP、TLS和密钥（最长约24秒）";EndpointState result=await manager.TestProfileAsync(p,siteName,CancellationToken.None);if(IsDisposed||Disposing)return;testResult.ForeColor=Color.ForestGreen;testResult.Text="正常 · "+result.LatencyMs+" ms · "+result.LastCheck.ToString("HH:mm:ss");}catch(Exception ex){if(IsDisposed||Disposing)return;testResult.ForeColor=Color.Firebrick;testResult.Text="失败 · "+ex.Message;}finally{if(!IsDisposed&&!Disposing){test.Enabled=true;test.Text="测试这台VPS";}}}
 }
 
 public static class Program
 {
     [STAThread]
-    public static void Main()
+    public static void Main(string[] args)
     {
+        if(CrashRecovery.RunHelper(args))return;
         bool created;
         using (Mutex single = new Mutex(true, "Local\\MulinSenSecureRelayV2", out created)) {
             if (!created) { MessageBox.Show("木林森中转已经在运行，请查看任务栏右下角托盘。", "木林森中转", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
-            Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false); Application.Run(new MainForm());
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException+=delegate(object sender,ThreadExceptionEventArgs e){CrashRecovery.Schedule(e.Exception,"界面线程异常");Application.ExitThread();};
+            AppDomain.CurrentDomain.UnhandledException+=delegate(object sender,UnhandledExceptionEventArgs e){CrashRecovery.Schedule(e.ExceptionObject as Exception??new Exception("未知后台异常"),"后台线程异常");};
+            TaskScheduler.UnobservedTaskException+=delegate(object sender,UnobservedTaskExceptionEventArgs e){CrashRecovery.Log(e.Exception,"已处理的后台任务异常");e.SetObserved();};
+            try{Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);Application.Run(new MainForm());}
+            catch(Exception error){CrashRecovery.Schedule(error,"程序主循环异常");}
         }
     }
 }
