@@ -87,7 +87,7 @@ cd /root/stratum-v3/secure-relay/server
 
 ## 2. Windows 客户端
 
-运行 `client/木林森中转.exe`，填写：
+运行 `client/木林森中转2.1.6正式版.exe`，填写：
 
 - VPS 地址和 TLS 端口；
 - 自签名证书填写安装脚本输出的 SHA-256 指纹；使用正规证书时填写证书域名；
