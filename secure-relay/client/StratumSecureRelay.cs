@@ -11,6 +11,7 @@ using System.Net.NetworkInformation;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -26,8 +27,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Stratum V3 TLS client for mine-site LAN relaying")]
 [assembly: AssemblyCompany("Stratum V3 Relay")]
 [assembly: AssemblyProduct("木林森中转")]
-[assembly: AssemblyVersion("2.1.6.0")]
-[assembly: AssemblyFileVersion("2.1.6.0")]
+[assembly: AssemblyVersion("2.2.0.0")]
+[assembly: AssemblyFileVersion("2.2.0.0")]
 
 public static class AppBrand
 {
@@ -51,6 +52,12 @@ public static class AppBrand
         form.Text = Title + (suffix ?? "");
         form.Icon = LoadIcon();
     }
+}
+
+public static class SystemStatus
+{
+    [DllImport("kernel32.dll")] private static extern ulong GetTickCount64();
+    public static TimeSpan Uptime { get { try { return TimeSpan.FromMilliseconds(GetTickCount64()); } catch { return TimeSpan.Zero; } } }
 }
 
 [DataContract]
@@ -262,7 +269,7 @@ public sealed class RelayManager
                     string targetName = String.IsNullOrWhiteSpace(profile.ServerName) ? profile.Address : profile.ServerName.Trim();
                     string request = "CONNECT /relay/v1/" + route.RemotePort + " HTTP/1.1\r\n" +
                         "Host: " + targetName + "\r\nUser-Agent: MulinSenRelay/2.0\r\nAuthorization: Bearer " + profile.SharedKey + "\r\n" +
-                        "X-Site-Name: " + SafeHeader(config.SiteName) + "\r\nX-Miner-IP: " + minerIp + "\r\nX-Miner-Port: " + minerPort + "\r\n\r\n";
+                        "X-Site-Name: " + SafeHeader(config.SiteName) + "\r\nX-Client-Version: " + AppBrand.Version + "\r\nX-Miner-IP: " + minerIp + "\r\nX-Miner-Port: " + minerPort + "\r\n\r\n";
                     byte[] requestBytes = Encoding.ASCII.GetBytes(request);
                     await tls.WriteAsync(requestBytes, 0, requestBytes.Length, cancellation); await tls.FlushAsync(cancellation);
                     string response = await ReadHeader(tls, cancellation);
@@ -341,7 +348,8 @@ public sealed class RelayManager
             TlsConnection connection = await OpenTls(profile, 8000);
             using (connection.Client) using (SslStream tls = connection.Stream) {
                 string host = String.IsNullOrWhiteSpace(profile.ServerName) ? profile.Address : profile.ServerName.Trim();
-                byte[] bytes = Encoding.ASCII.GetBytes("CONNECT /relay/v2/health HTTP/1.1\r\nHost: " + host + "\r\nAuthorization: Bearer " + profile.SharedKey + "\r\nX-Site-Name: " + SafeHeader(siteName) + "\r\n\r\n");
+                RelaySnapshot status=Snapshot();
+                byte[] bytes = Encoding.ASCII.GetBytes("CONNECT /relay/v2/health HTTP/1.1\r\nHost: " + host + "\r\nAuthorization: Bearer " + profile.SharedKey + "\r\nX-Site-Name: " + SafeHeader(siteName) + "\r\nX-Client-Version: " + AppBrand.Version + "\r\nX-Miner-Count: " + status.ActiveMiners + "\r\nX-Active-Connections: " + status.Active + "\r\n\r\n");
                 await tls.WriteAsync(bytes, 0, bytes.Length, cancellation); await tls.FlushAsync(cancellation);
                 string response = await ReadHeader(tls, cancellation);
                 if (!response.StartsWith("HTTP/1.1 200 ", StringComparison.Ordinal)) throw new IOException("VPS拒绝认证，请检查共享密钥和服务版本。");
@@ -587,6 +595,7 @@ public sealed class MainForm : Form
     private readonly Button start = new Button();
     private readonly Button stop = new Button();
     private readonly Button testPrimary = new Button();
+    private readonly Button diagnostics = new Button();
     private readonly TextBox logs = new TextBox();
     private readonly NotifyIcon tray = new NotifyIcon();
     private readonly RelayManager manager;
@@ -664,14 +673,15 @@ public sealed class MainForm : Form
         Controls.Add(grid);
 
         FlowLayoutPanel buttons = new FlowLayoutPanel();
-        buttons.Dock = DockStyle.Top; buttons.Height = 52; buttons.Padding = new Padding(180, 6, 0, 0);
+        buttons.Dock = DockStyle.Top; buttons.Height = 84; buttons.Padding = new Padding(90, 6, 0, 0); buttons.WrapContents = true;
         Button save = new Button(); save.Text = "保存设置"; save.AutoSize = true; save.Click += delegate { SaveConfig(true); };
         Button backups = new Button(); backups.Text = "备用 VPS 设置"; backups.AutoSize = true; backups.Click += delegate { EditBackups(); };
         Button miners = new Button(); miners.Text="矿机状态"; miners.AutoSize=true; miners.Click+=delegate{new MinerStatusForm(manager).Show(this);};
+        diagnostics.Text="一键诊断"; diagnostics.AutoSize=true; diagnostics.Click+=delegate{RunDiagnostics();};
         Button help = new Button(); help.Text = "各项说明"; help.AutoSize = true; help.Click += delegate { ShowHelp(); };
         start.Text = "启动中转"; start.AutoSize = true; start.Click += delegate { StartRelay(); };
         stop.Text = "停止"; stop.AutoSize = true; stop.Enabled = false; stop.Click += delegate { manager.Stop(); SetRunning(false); };
-        buttons.Controls.Add(save); buttons.Controls.Add(backups); buttons.Controls.Add(miners); buttons.Controls.Add(start); buttons.Controls.Add(stop); buttons.Controls.Add(help);
+        buttons.Controls.Add(save); buttons.Controls.Add(backups); buttons.Controls.Add(miners); buttons.Controls.Add(diagnostics); buttons.Controls.Add(start); buttons.Controls.Add(stop); buttons.Controls.Add(help);
         Controls.Add(buttons); buttons.BringToFront();
 
         status.Text = "状态：未启动"; status.Dock = DockStyle.Top; status.Height = 86; status.Padding = new Padding(18, 7, 18, 4);
@@ -827,6 +837,27 @@ public sealed class MainForm : Form
         using (BackupForm form = new BackupForm(backupProfiles,manager,siteName.Text.Trim())) if (form.ShowDialog(this) == DialogResult.OK) backupProfiles = form.Profiles;
     }
 
+    private async void RunDiagnostics()
+    {
+        diagnostics.Enabled=false;diagnostics.Text="诊断中…";Log("开始一键诊断，请稍候。");
+        StringBuilder report=new StringBuilder();List<string> problems=new List<string>();
+        try {
+            AppConfig config=CurrentConfig();RelaySnapshot snapshot=manager.Snapshot();List<MinerSnapshot> miners=manager.MinerSnapshots();
+            report.AppendLine("木林森中转一键诊断报告");report.AppendLine("生成时间："+DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));report.AppendLine("程序版本：v"+AppBrand.Version);report.AppendLine("矿场名称："+(config.SiteName.Length==0?"未填写":config.SiteName));report.AppendLine();
+            report.AppendLine("【电脑与局域网】");report.AppendLine("Windows："+Environment.OSVersion);report.AppendLine("电脑连续运行："+FormatDuration(SystemStatus.Uptime));report.AppendLine("处理器线程："+Environment.ProcessorCount);report.AppendLine("程序内存："+FormatBytes(Environment.WorkingSet));string lan=NetworkHelper.GetLanIPv4();report.AppendLine("当前局域网IP："+(lan.Length==0?"未找到":lan));if(lan.Length==0)problems.Add("没有找到矿机局域网IP，请检查网线、网卡和IP设置。");
+            try{List<PortRoute> routes=PortRoute.Parse(config.Ports);report.AppendLine("本地监听端口："+String.Join("，",routes.ConvertAll(delegate(PortRoute r){return r.LocalPort.ToString();}).ToArray()));if(!snapshot.Running)problems.Add("中转目前没有启动，矿机无法通过这台电脑连接VPS。");}
+            catch(Exception ex){report.AppendLine("本地端口：配置有误（"+ex.Message+"）");problems.Add("本地端口配置有误，需要先修正设置。");}
+            report.AppendLine();report.AppendLine("【当前生产状态】");report.AppendLine("中转状态："+(snapshot.Running?"运行中":"未启动"));report.AppendLine("在线矿机："+snapshot.ActiveMiners);report.AppendLine("当前连接："+snapshot.Active);report.AppendLine("累计失败："+snapshot.Failures);report.AppendLine("传输流量：上传 "+FormatBytes(snapshot.Uploaded)+" / 下载 "+FormatBytes(snapshot.Downloaded));
+            int warning=0,offline=0;foreach(MinerSnapshot miner in miners){if(miner.Connections==0)offline++;else if(miner.Health<85)warning++;}report.AppendLine("需要注意的在线矿机："+warning);report.AppendLine("历史离线记录："+offline);if(snapshot.Running&&snapshot.ActiveMiners==0)problems.Add("中转正在运行，但目前没有矿机连接这台电脑。");if(warning>0)problems.Add("有 "+warning+" 台在线矿机健康度偏低，请打开“矿机状态”查看。");
+            report.AppendLine();report.AppendLine("【主、备用VPS检测】");int usable=0;foreach(ServerProfile profile in config.Servers){if(profile==null||!profile.Enabled)continue;try{ValidateProfile(profile);EndpointState result=await manager.TestProfileAsync(profile,config.SiteName,CancellationToken.None);usable++;report.AppendLine(profile.Name+"：正常，响应 "+result.LatencyMs+" ms，地址 "+profile.Address+":"+profile.Port);}catch(Exception ex){report.AppendLine(profile.Name+"：失败，"+ex.Message);problems.Add(profile.Name+"当前无法通过完整的TCP、TLS和共享密钥检测。");}}
+            if(usable==0)problems.Add("没有任何一台VPS检测成功，矿机的新连接将无法建立。");
+            report.AppendLine();report.AppendLine("【管理员结论】");if(problems.Count==0){report.AppendLine("当前未发现明显问题，可以继续运行。");}else{for(int i=0;i<problems.Count;i++)report.AppendLine((i+1)+". "+problems[i]);}
+            report.AppendLine();report.AppendLine("说明：报告不包含共享密钥、证书私钥或矿池密码，可以复制给维护人员排查。");
+            Directory.CreateDirectory(ConfigStore.Folder);string path=Path.Combine(ConfigStore.Folder,"diagnostic-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+".txt");File.WriteAllText(path,report.ToString(),Encoding.UTF8);Log("一键诊断完成，报告已保存："+path);using(DiagnosticReportForm form=new DiagnosticReportForm(report.ToString(),path))form.ShowDialog(this);
+        } catch(Exception ex){Log("一键诊断失败："+ex.Message);MessageBox.Show(this,"无法完成诊断。\r\n\r\n"+ex.Message,"诊断失败",MessageBoxButtons.OK,MessageBoxIcon.Warning);}
+        finally{diagnostics.Enabled=true;diagnostics.Text="一键诊断";RefreshStatus();}
+    }
+
     private void RefreshStatus()
     {
         if(++statusTicks>=30){statusTicks=0;manager.SaveMinerHistory();}
@@ -851,6 +882,12 @@ public sealed class MainForm : Form
         if (!exiting && closeToTray.Checked && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); tray.ShowBalloonTip(1500, "木林森中转", "程序仍在后台运行。", ToolTipIcon.Info); return; }
         ipTimer.Stop(); statusTimer.Stop(); manager.SaveMinerHistory(); manager.Stop(); tray.Visible = false;
     }
+}
+
+public sealed class DiagnosticReportForm : Form
+{
+    private readonly TextBox content=new TextBox();private readonly string originalPath;
+    public DiagnosticReportForm(string report,string path){originalPath=path;AppBrand.Apply(this," - 诊断报告");Font=new Font("Microsoft YaHei UI",9F);ClientSize=new Size(820,620);MinimumSize=new Size(650,450);StartPosition=FormStartPosition.CenterParent;Label note=new Label();note.Text="报告已自动保存在本机。它不包含共享密钥、证书私钥或矿池密码。";note.Dock=DockStyle.Top;note.Height=40;note.Padding=new Padding(12,11,0,0);note.BackColor=Color.FromArgb(236,244,252);content.Text=report;content.Multiline=true;content.ReadOnly=true;content.ScrollBars=ScrollBars.Both;content.WordWrap=false;content.Dock=DockStyle.Fill;content.Font=new Font("Consolas",10F);FlowLayoutPanel actions=new FlowLayoutPanel();actions.Dock=DockStyle.Bottom;actions.Height=50;actions.FlowDirection=FlowDirection.RightToLeft;actions.Padding=new Padding(0,8,12,0);Button close=new Button();close.Text="关闭";close.AutoSize=true;close.Click+=delegate{Close();};Button copy=new Button();copy.Text="复制报告";copy.AutoSize=true;copy.Click+=delegate{Clipboard.SetText(content.Text);copy.Text="已复制";};Button save=new Button();save.Text="另存为";save.AutoSize=true;save.Click+=delegate{SaveFileDialog dialog=new SaveFileDialog();dialog.Filter="文本文件|*.txt";dialog.FileName=Path.GetFileName(originalPath);if(dialog.ShowDialog(this)==DialogResult.OK)File.WriteAllText(dialog.FileName,content.Text,Encoding.UTF8);dialog.Dispose();};actions.Controls.Add(close);actions.Controls.Add(copy);actions.Controls.Add(save);Controls.Add(content);Controls.Add(note);Controls.Add(actions);}
 }
 
 public sealed class MinerStatusForm : Form

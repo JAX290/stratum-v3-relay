@@ -1,5 +1,7 @@
 import tempfile
 import unittest
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from security_monitor import SecurityMonitor, atomic_write, snapshot
@@ -74,6 +76,22 @@ class SecurityMonitorTest(unittest.TestCase):
             monitor.check(now=300)
             self.assertEqual(events, [])
             self.assertEqual(monitor.state["unknown_job_suppressed"], 20)
+
+    def test_expiry_warning_is_sent_once_per_day(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            protected = root / "protected.txt"
+            protected.write_text("approved", encoding="utf-8")
+            config = root / "v3.json"
+            config.write_text(json.dumps({"settings": {"vps_name": "美国主VPS", "vps_expiry": "2026-09-20",
+                "expiry_reminder_days": 30}}), encoding="utf-8")
+            events = []
+            monitor = SecurityMonitor([str(protected)], snapshot([str(protected)]), notify=events.append, config_path=config)
+            now = int(datetime(2026, 9, 14, tzinfo=timezone.utc).timestamp())
+            monitor.check(now=now)
+            monitor.check(now=now + 60)
+            self.assertEqual([item["type"] for item in events], ["expiry_warning"])
+            self.assertIn("美国主VPS", events[0]["message"])
 
 
 if __name__ == "__main__":

@@ -7,6 +7,8 @@ import json
 import os
 import tempfile
 import time
+import ssl
+from datetime import datetime, timezone
 from pathlib import Path
 
 from endpoint_monitor import Notifier
@@ -15,6 +17,8 @@ from endpoint_monitor import Notifier
 BASELINE_FILE = Path(os.getenv("INTEGRITY_BASELINE_FILE", "/var/lib/stratum-monitor/integrity.json"))
 STATE_FILE = Path(os.getenv("INTEGRITY_STATE_FILE", "/var/lib/stratum-monitor/security-state.json"))
 INSPECTOR_STATE_FILE = Path(os.getenv("INSPECTOR_STATE_FILE", "/var/lib/stratum-inspector/state.json"))
+V3_CONFIG_FILE = Path(os.getenv("V3_CONFIG_FILE", "/etc/stratum-v3.json"))
+SECURE_RELAY_CONFIG = Path(os.getenv("SECURE_RELAY_CONFIG", "/etc/stratum-secure-relay.json"))
 DEFAULT_PATHS = [
     "/etc/stratum-v3.json",
     "/etc/stratum-v3-peer.json",
@@ -76,7 +80,7 @@ def load(path, fallback):
 
 class SecurityMonitor:
     def __init__(self, paths, baseline, state=None, notify=None, repeat_seconds=900,
-                 inspector_state_path=None, baseline_path=None):
+                 inspector_state_path=None, baseline_path=None, config_path=None, secure_relay_config_path=None):
         self.paths = paths
         self.baseline = baseline
         self.baseline_path = Path(baseline_path) if baseline_path else None
@@ -84,6 +88,8 @@ class SecurityMonitor:
         self.notify = notify
         self.repeat_seconds = repeat_seconds
         self.inspector_state_path = Path(inspector_state_path) if inspector_state_path else None
+        self.config_path = Path(config_path) if config_path else None
+        self.secure_relay_config_path = Path(secure_relay_config_path) if secure_relay_config_path else None
 
     def refresh_baseline(self):
         if not self.baseline_path:
@@ -121,8 +127,54 @@ class SecurityMonitor:
                     self.notify(event)
         self.state["events"] = self.state.get("events", [])[-200:]
         self.check_protocol_anomalies(now)
+        self.check_expiry_reminders(now)
         self.state["updated_at"] = now
         return self.state
+
+    def check_expiry_reminders(self, now):
+        if not self.config_path:
+            return
+        settings = load(self.config_path, {}).get("settings", {})
+        threshold = max(1, min(365, int(settings.get("expiry_reminder_days", 30) or 30)))
+        today = datetime.fromtimestamp(now, timezone.utc).date()
+        candidates = []
+        for key, label, date_key in (("vps", str(settings.get("vps_name", "本机VPS") or "本机VPS"), "vps_expiry"),
+                ("domain", str(settings.get("domain_name", "中转域名") or "中转域名"), "domain_expiry")):
+            try:
+                target = datetime.strptime(str(settings.get(date_key, "")), "%Y-%m-%d").date()
+                candidates.append((key, label, (target - today).days, target.isoformat()))
+            except ValueError:
+                pass
+        if self.secure_relay_config_path:
+            relay = load(self.secure_relay_config_path, {})
+            try:
+                decoded = ssl._ssl._test_decode_cert(str(relay.get("certificate", "")))
+                expiry = datetime.strptime(decoded["notAfter"], "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+                candidates.append(("certificate", "TLS证书", int((expiry - datetime.fromtimestamp(now, timezone.utc)).total_seconds() // 86400), expiry.date().isoformat()))
+            except (AttributeError, KeyError, OSError, ValueError, ssl.SSLError):
+                pass
+        active = self.state.setdefault("expiry_alerts", {})
+        present = set()
+        for key, label, days, date_text in candidates:
+            present.add(key)
+            previous = active.get(key)
+            due = days <= threshold
+            if due and (not previous or now - int(previous.get("last_alert", 0)) >= 86400):
+                message = f"{label}已到期，请立即处理" if days < 0 else f"{label}将在 {days} 天后到期（{date_text}），请提前续费或更新"
+                event = {"time": now, "type": "expiry_warning", "endpoint": label, "message": message, "days_left": days}
+                self.state.setdefault("events", []).append(event)
+                active[key] = {"last_alert": now, "days_left": days}
+                if self.notify:
+                    self.notify(event)
+            elif not due and previous:
+                event = {"time": now, "type": "expiry_recovery", "endpoint": label, "message": f"{label}的到期提醒已解除"}
+                self.state.setdefault("events", []).append(event)
+                active.pop(key, None)
+                if self.notify:
+                    self.notify(event)
+        for key in list(active):
+            if key not in present:
+                active.pop(key, None)
 
     def check_protocol_anomalies(self, now):
         if not self.inspector_state_path:
@@ -179,7 +231,7 @@ def main():
         raise SystemExit("Integrity baseline is missing. Run with --initialize after reviewing installed files.")
     monitor = SecurityMonitor(paths, baseline, state=load(args.state, {}),
         notify=Notifier(os.getenv("WECHAT_WEBHOOK", "")), inspector_state_path=INSPECTOR_STATE_FILE,
-        baseline_path=args.baseline)
+        baseline_path=args.baseline, config_path=V3_CONFIG_FILE, secure_relay_config_path=SECURE_RELAY_CONFIG)
     while True:
         monitor.check()
         atomic_write(args.state, monitor.state)

@@ -12,7 +12,9 @@ done
 test -f ./templates/v3_dashboard.html
 test -f ./static/v3.css
 secure_server="../secure-relay/server/stratum_secure_server.py"
+secure_monitor="../secure-relay/server/stratum_secure_monitor.py"
 test -f "$secure_server" || { echo "Missing $secure_server; update the complete Git repository first." >&2; exit 1; }
+test -f "$secure_monitor" || { echo "Missing $secure_monitor; update the complete Git repository first." >&2; exit 1; }
 test -f /etc/systemd/system/stratum-secure-relay.service || { echo "The encrypted relay is not installed on this VPS." >&2; exit 1; }
 
 stamp=$(date +%Y%m%d-%H%M%S)
@@ -21,13 +23,14 @@ install -d -m 0700 "$backup"
 cp -a /opt/stratum-admin/stratum_admin_v3.py /opt/stratum-admin/stratum_inspector.py /opt/stratum-admin/endpoint_monitor.py /opt/stratum-admin/security_monitor.py /opt/stratum-admin/v3_manager.py "$backup/"
 cp -a /etc/stratum-inspector.json /etc/haproxy/haproxy.cfg "$backup/"
 if [[ -f /opt/stratum-secure-server.py ]]; then cp -a /opt/stratum-secure-server.py "$backup/"; fi
+if [[ -f /opt/stratum-secure-monitor.py ]]; then cp -a /opt/stratum-secure-monitor.py "$backup/"; fi
 if [[ -f /opt/stratum-admin/route_switch_monitor.py ]]; then cp -a /opt/stratum-admin/route_switch_monitor.py "$backup/"; fi
 if [[ -f /opt/stratum-admin/reset-panel-password.sh ]]; then cp -a /opt/stratum-admin/reset-panel-password.sh "$backup/"; fi
 if [[ -f /opt/stratum-admin/templates/v3_dashboard.html ]]; then cp -a /opt/stratum-admin/templates/v3_dashboard.html "$backup/"; fi
 if [[ -f /opt/stratum-admin/static/v3.css ]]; then cp -a /opt/stratum-admin/static/v3.css "$backup/"; fi
 if [[ -f /etc/stratum-v3-peer.json ]]; then cp -a /etc/stratum-v3-peer.json "$backup/"; fi
 
-python3 -m py_compile ./stratum_admin_v3.py ./stratum_inspector.py ./endpoint_monitor.py ./security_monitor.py ./v3_manager.py ./route_switch_monitor.py "$secure_server"
+python3 -m py_compile ./stratum_admin_v3.py ./stratum_inspector.py ./endpoint_monitor.py ./security_monitor.py ./v3_manager.py ./route_switch_monitor.py "$secure_server" "$secure_monitor"
 systemctl stop stratum-security-monitor.service
 systemctl stop stratum-route-switch-monitor.service 2>/dev/null || true
 systemctl stop stratum-secure-relay.service
@@ -38,6 +41,7 @@ install -d -m 0755 /opt/stratum-admin/templates /opt/stratum-admin/static
 install -m 0644 ./templates/v3_dashboard.html /opt/stratum-admin/templates/v3_dashboard.html
 install -m 0644 ./static/v3.css /opt/stratum-admin/static/v3.css
 install -o root -g root -m 0755 "$secure_server" /opt/stratum-secure-server.py
+install -o root -g root -m 0755 "$secure_monitor" /opt/stratum-secure-monitor.py
 
 cat >/etc/systemd/system/stratum-route-switch-monitor.service <<'EOF'
 [Unit]
@@ -83,11 +87,12 @@ systemctl reload haproxy.service
 systemctl restart stratum-endpoint-monitor.service
 systemctl restart stratum-admin.service
 systemctl start stratum-secure-relay.service
+systemctl restart stratum-secure-monitor.service
 systemctl start stratum-route-switch-monitor.service
 
-PYTHONPATH=/opt/stratum-admin python3 -c "from security_monitor import BASELINE_FILE,atomic_write,load,snapshot; p=['/opt/stratum-admin/stratum_admin_v3.py','/opt/stratum-admin/stratum_inspector.py','/opt/stratum-admin/endpoint_monitor.py','/opt/stratum-admin/security_monitor.py','/opt/stratum-admin/route_switch_monitor.py','/opt/stratum-admin/reset-panel-password.sh','/opt/stratum-admin/templates/v3_dashboard.html','/opt/stratum-admin/static/v3.css','/opt/stratum-secure-server.py','/etc/systemd/system/stratum-route-switch-monitor.service','/etc/stratum-v3-peer.json','/etc/stratum-inspector.json','/etc/haproxy/haproxy.cfg']; b=load(BASELINE_FILE,{}); b.update(snapshot(p)); atomic_write(BASELINE_FILE,b)"
+PYTHONPATH=/opt/stratum-admin python3 -c "from security_monitor import BASELINE_FILE,atomic_write,load,snapshot; p=['/opt/stratum-admin/stratum_admin_v3.py','/opt/stratum-admin/stratum_inspector.py','/opt/stratum-admin/endpoint_monitor.py','/opt/stratum-admin/security_monitor.py','/opt/stratum-admin/route_switch_monitor.py','/opt/stratum-admin/reset-panel-password.sh','/opt/stratum-admin/templates/v3_dashboard.html','/opt/stratum-admin/static/v3.css','/opt/stratum-secure-server.py','/opt/stratum-secure-monitor.py','/etc/systemd/system/stratum-route-switch-monitor.service','/etc/stratum-v3-peer.json','/etc/stratum-inspector.json','/etc/haproxy/haproxy.cfg']; b=load(BASELINE_FILE,{}); b.update(snapshot(p)); atomic_write(BASELINE_FILE,b)"
 rm -f "$candidate_inspector" "$candidate_haproxy"
 systemctl start stratum-security-monitor.service
 trap - EXIT
-systemctl --no-pager --full status haproxy.service stratum-inspector-v3.service stratum-endpoint-monitor.service stratum-route-switch-monitor.service stratum-security-monitor.service stratum-admin.service stratum-secure-relay.service
+systemctl --no-pager --full status haproxy.service stratum-inspector-v3.service stratum-endpoint-monitor.service stratum-route-switch-monitor.service stratum-security-monitor.service stratum-admin.service stratum-secure-relay.service stratum-secure-monitor.service
 echo "Panel upgrade complete. Backup: $backup"

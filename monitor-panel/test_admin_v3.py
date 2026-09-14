@@ -39,6 +39,8 @@ class AdminV3Test(unittest.TestCase):
         admin.AUDIT_FILE = root / "audit.jsonl"
         admin.SECURE_RELAY_CONFIG = root / "secure-relay.json"
         admin.SECURE_RELAY_STATE = root / "relay-sites.json"
+        admin.SECURE_RELAY_MONITOR_STATE = root / "relay-monitor.json"
+        admin.SECURE_RELAY_EVENT_FILE = root / "relay-events.jsonl"
         admin.store = ConfigStore(config_path, root / "history", admin.AUDIT_FILE)
         admin.app.config.update(TESTING=True, SECRET_KEY="test")
         self.client = admin.app.test_client()
@@ -55,7 +57,7 @@ class AdminV3Test(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         for label in ("总览", "矿机", "线路与端口", "报警", "设置", "日志"):
             self.assertIn(label.encode(), response.data)
-        self.assertIn("关键看板".encode(), response.data)
+        self.assertIn("管理员总览".encode(), response.data)
         self.assertIn("当前活跃转发线路".encode(), response.data)
         self.assertIn("矿机仍填写值守电脑地址".encode(), response.data)
         response = self.client.post("/group/backup-1", data={
@@ -196,6 +198,31 @@ class AdminV3Test(unittest.TestCase):
         for page in ("overview", "miners", "routes", "alerts", "settings", "logs"):
             response = self.client.get("/" + page)
             self.assertEqual(response.status_code, 200, page)
+
+    def test_administrator_overview_groups_sites_versions_and_expiry(self):
+        admin.SECURE_RELAY_CONFIG.write_text(json.dumps({"listen_port": 452, "certificate": "",
+            "clients": [{"id": "mine-a", "name": "一号矿场", "token": "a" * 64, "enabled": True}],
+            "offline_after_seconds": 180}), encoding="utf-8")
+        admin.SECURE_RELAY_STATE.write_text(json.dumps({"server_version": "2.2.0", "sites": {"mine-a": {
+            "last_seen": 200, "last_ip": "198.51.100.20", "active": 8, "miner_count": 3,
+            "miners": ["192.168.1.20", "192.168.1.21", "192.168.1.22"], "client_version": "2.2.0"}}}), encoding="utf-8")
+        admin.SECURE_RELAY_MONITOR_STATE.write_text(json.dumps({"clients": {"mine-a": "offline"}}), encoding="utf-8")
+        with patch.object(admin, "certificate_summary", return_value={"available": True, "name": "relay.example.com",
+                "fingerprint": "F" * 64, "expires": "2026-10-01", "days_left": 17}), \
+                patch.object(admin, "detect_relay_public_ip", return_value={"ok": True, "host": "93.184.216.34", "source": "test", "message": ""}):
+            response = self.client.get("/overview")
+        self.assertEqual(response.status_code, 200)
+        for value in ("管理员总览", "一号矿场", "v2.2.0", "到期提醒", "当前生产存在明确异常"):
+            self.assertIn(value.encode(), response.data)
+
+    def test_administrator_reminder_settings_are_saved(self):
+        response = self.client.post("/administrator-reminders", data={"csrf": "token", "vps_name": "美国主VPS",
+            "vps_expiry": "2027-01-02", "domain_name": "relay.example.com", "domain_expiry": "2027-02-03",
+            "expiry_reminder_days": "45"})
+        self.assertEqual(response.status_code, 302)
+        settings = admin.store.load()["settings"]
+        self.assertEqual(settings["vps_name"], "美国主VPS")
+        self.assertEqual(settings["expiry_reminder_days"], 45)
 
     def test_tailscale_identity_can_log_in_without_panel_password(self):
         with self.client.session_transaction() as session:

@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+from datetime import datetime, timezone
 from ipaddress import ip_address
 from urllib.parse import urlsplit
 from pathlib import Path
@@ -45,6 +46,11 @@ PEER_STATE_FILE = Path(os.getenv("V3_PEER_STATE_FILE", "/var/lib/stratum-monitor
 DISCONNECT_HISTORY_DIR = Path(os.getenv("DISCONNECT_HISTORY_DIR", "/var/lib/stratum-inspector/history"))
 SECURE_RELAY_CONFIG = Path(os.getenv("SECURE_RELAY_CONFIG", "/etc/stratum-secure-relay.json"))
 SECURE_RELAY_STATE = Path(os.getenv("SECURE_RELAY_STATE", "/var/lib/stratum-secure-relay/sites.json"))
+SECURE_RELAY_MONITOR_STATE = Path(os.getenv("SECURE_RELAY_MONITOR_STATE", "/var/lib/stratum-secure-relay/monitor.json"))
+SECURE_RELAY_EVENT_FILE = Path(os.getenv("SECURE_RELAY_EVENT_FILE", "/var/lib/stratum-secure-relay/events.jsonl"))
+PANEL_VERSION = "3.1.0"
+CURRENT_CLIENT_VERSION = "2.2.0"
+CURRENT_RELAY_VERSION = "2.2.0"
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("PANEL_SECRET_KEY", secrets.token_hex(32))
@@ -344,7 +350,7 @@ def append_audit(action):
 
 
 def certificate_summary(path_value):
-    result = {"available": False, "name": "", "fingerprint": ""}
+    result = {"available": False, "name": "", "fingerprint": "", "expires": "", "days_left": None}
     try:
         path = Path(str(path_value))
         pem = path.read_text(encoding="utf-8", errors="strict")
@@ -356,6 +362,10 @@ def certificate_summary(path_value):
         result["available"] = True
         try:
             decoded = ssl._ssl._test_decode_cert(str(path))
+            if decoded.get("notAfter"):
+                expiry = datetime.strptime(decoded["notAfter"], "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+                result["expires"] = expiry.astimezone().strftime("%Y-%m-%d")
+                result["days_left"] = int((expiry - datetime.now(timezone.utc)).total_seconds() // 86400)
             dns_names = [str(value) for kind, value in decoded.get("subjectAltName", ()) if kind == "DNS"]
             if dns_names:
                 result["name"] = dns_names[0]
@@ -404,6 +414,145 @@ def client_access_context(config):
     relay_status = detect_relay_public_ip(config)
     return {"installed": bool(relay), "host": configured_host or relay_status.get("host", "") or "请填写VPS域名或公网IP",
         "port": int(relay.get("listen_port", 0) or 0), "certificate": certificate, "clients": rows}
+
+
+def site_overview_rows(now=None):
+    now = int(now or time.time())
+    relay = load_json(SECURE_RELAY_CONFIG, {})
+    state = load_json(SECURE_RELAY_STATE, {"sites": {}})
+    sites = state.get("sites", {}) if isinstance(state.get("sites", {}), dict) else {}
+    monitor = load_json(SECURE_RELAY_MONITOR_STATE, {"clients": {}}).get("clients", {})
+    clients = relay.get("clients", []) if isinstance(relay.get("clients", []), list) else []
+    if not clients and relay.get("token"):
+        clients = [{"id": "default", "name": "默认矿场", "enabled": True}]
+    offline_after = int(relay.get("offline_after_seconds", 180) or 180)
+    rows = []
+    for client in clients:
+        client_id = str(client.get("id", "default"))
+        site = sites.get(client_id, {}) if isinstance(sites.get(client_id, {}), dict) else {}
+        last_seen = int(site.get("last_seen", 0) or 0)
+        enabled = bool(client.get("enabled", True))
+        current = str(monitor.get(client_id, ""))
+        if not enabled:
+            status, text = "disabled", "已停用"
+        elif current == "offline" or (last_seen and now - last_seen > offline_after):
+            status, text = "offline", "离线"
+        elif last_seen:
+            status, text = "online", "在线"
+        else:
+            status, text = "waiting", "等待首次连接"
+        miners = site.get("miners", []) if isinstance(site.get("miners", []), list) else []
+        current_miners = int(site.get("reported_miner_count", site.get("miner_count", len(miners))) or 0)
+        current_connections = int(site.get("reported_connections", site.get("active", 0)) or 0)
+        client_version = str(site.get("client_version", "未上报"))
+        server_version = str(state.get("server_version", "未上报"))
+        rows.append({"id": client_id, "name": str(client.get("name") or client_id), "status": status,
+            "status_text": text, "connections": current_connections,
+            "miner_count": current_miners,
+            "impact_miner_count": int(site.get("last_miner_count", site.get("miner_count", len(miners))) or 0), "last_ip": str(site.get("last_ip", "")),
+            "last_seen": beijing_time(last_seen) if last_seen else "尚未连接", "last_seen_ts": last_seen,
+            "client_version": client_version, "client_outdated": client_version not in {"未上报", CURRENT_CLIENT_VERSION},
+            "server_version": server_version, "server_outdated": server_version not in {"未上报", CURRENT_RELAY_VERSION}})
+    return rows
+
+
+def parse_expiry(value):
+    try:
+        target = datetime.strptime(str(value).strip(), "%Y-%m-%d").date()
+        return (target - datetime.now().astimezone().date()).days
+    except ValueError:
+        return None
+
+
+def reminder_rows(config, certificate):
+    settings = config.get("settings", {})
+    threshold = max(1, min(365, int(settings.get("expiry_reminder_days", 30) or 30)))
+    rows = []
+    for key, label, subject in (("vps_expiry", "VPS 到期", str(settings.get("vps_name", "本机 VPS") or "本机 VPS")),
+            ("domain_expiry", "域名到期", str(settings.get("domain_name", "中转域名") or "中转域名"))):
+        value = str(settings.get(key, "")).strip()
+        days = parse_expiry(value) if value else None
+        status = "unknown" if days is None else "expired" if days < 0 else "warning" if days <= threshold else "ok"
+        rows.append({"key": key, "label": label, "subject": subject, "date": value or "尚未填写", "days": days,
+            "status": status, "message": "请立即续费" if status == "expired" else f"剩余 {days} 天" if days is not None else "填写日期后自动提醒"})
+    cert_days = certificate.get("days_left")
+    cert_status = "unknown" if cert_days is None else "expired" if cert_days < 0 else "warning" if cert_days <= threshold else "ok"
+    rows.append({"key": "certificate", "label": "TLS 证书到期", "subject": certificate.get("name") or "加密入口证书",
+        "date": certificate.get("expires") or "无法读取", "days": cert_days, "status": cert_status,
+        "message": "请立即更新证书" if cert_status == "expired" else f"剩余 {cert_days} 天" if cert_days is not None else "请检查证书文件"})
+    return rows
+
+
+def administrator_brief(overview, services, sites, alerting, reminders):
+    stopped = [name for name, value in services.items() if value != "active"]
+    offline_sites = [site for site in sites if site["status"] == "offline"]
+    due = [item for item in reminders if item["status"] in {"warning", "expired"}]
+    outdated = [site for site in sites if site.get("client_outdated") or site.get("server_outdated")]
+    impacted = max(overview.get("offline_workers", 0) + overview.get("invalid_workers", 0),
+        sum(site.get("impact_miner_count", 0) for site in offline_sites))
+    advice = []
+    if stopped:
+        advice.append("核心服务异常：" + "、".join(stopped) + "。请先检查 VPS 服务状态。")
+    if offline_sites:
+        advice.append("矿场客户端离线：" + "、".join(site["name"] for site in offline_sites) + "。请检查值守电脑、矿场网络和VPS连接。")
+    if alerting:
+        advice.append(f"有 {alerting} 条矿池地址正在报警，建议先查看“报警”和备用线路。")
+    if overview.get("reject_percent", 0) > 1:
+        advice.append(f"当前拒绝率为 {overview['reject_percent']}%，建议检查线路延迟和矿池状态。")
+    if due:
+        advice.append("有即将到期或已经到期的资源，请查看下方到期提醒。")
+    if outdated:
+        advice.append("发现版本不一致：" + "、".join(site["name"] for site in outdated) + "。建议先在一台客户端验证新版，再分批升级。")
+    if stopped or offline_sites:
+        level, headline = "danger", "当前生产存在明确异常"
+    elif alerting or overview.get("reject_percent", 0) > 1 or due or outdated:
+        level, headline = "warning", "当前可以运行，但有事项需要关注"
+    else:
+        level, headline = "good", "当前运行正常，无需人工处理"
+    return {"level": level, "headline": headline, "impacted": impacted, "advice": advice or ["继续观察即可；系统没有发现需要管理员立即处理的问题。"]}
+
+
+def operation_timeline(security, limit=20):
+    rows = []
+    labels = {"site_offline": "矿场客户端离线", "site_recovered": "矿场客户端恢复",
+        "canary_started": "单机测试开始", "canary_passed": "单机测试通过并切换", "canary_failed": "单机测试失败并退回",
+        "canary_stopped": "单机测试提前停止", "verified_route_applied": "已验证线路切换", "route_restored": "线路恢复",
+        "route_sync_queued": "线路等待同步", "route_sync_ok": "VPS同步成功", "route_sync_failed": "VPS同步失败",
+        "route_sync_received": "收到对端VPS同步", "integrity_changed": "受保护文件异常", "integrity_recovery": "受保护文件恢复"}
+    labels.update({"expiry_warning": "资源即将到期", "expiry_recovery": "到期提醒已解除"})
+    for path in (ENDPOINT_EVENT_FILE, SECURE_RELAY_EVENT_FILE):
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-100:]
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if event.get("type") in labels:
+                rows.append(event)
+    rows.extend(event for event in security.get("events", [])[-100:] if event.get("type") in labels)
+    rows.sort(key=lambda item: int(item.get("time", 0) or 0), reverse=True)
+    output, seen = [], set()
+    for event in rows:
+        fingerprint = (event.get("type"), int(event.get("time", 0) or 0), event.get("message", ""))
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        kind = str(event.get("type", ""))
+        bad = kind in {"site_offline", "canary_failed", "route_sync_failed", "integrity_changed", "expiry_warning"}
+        good = kind in {"site_recovered", "canary_passed", "route_sync_ok", "integrity_recovery", "expiry_recovery"}
+        impact = ""
+        if event.get("miner_count"):
+            impact = f"影响约 {event['miner_count']} 台矿机、{event.get('connections', 0)} 条连接"
+        elif event.get("port"):
+            impact = f"涉及端口 {event['port']}"
+        output.append({**event, "label": labels.get(kind, kind), "display_time": beijing_time(event.get("time", 0)),
+            "level": "bad" if bad else "good" if good else "normal", "impact": impact})
+        if len(output) >= limit:
+            break
+    return output
 
 
 def service_state(name):
@@ -807,6 +956,14 @@ def build_page_context(page):
             "jitter": f"{stats['jitter_ms']} ms" if stats.get("jitter_ms") is not None else "-"})
     security = load_json(SECURITY_STATE_FILE, {"events": [], "active": {}})
     pools = stratum_pool_rows(config, inspector)
+    overview = overview_summary(pools)
+    services = {"HAProxy": service_state("haproxy"), "协议检查器": service_state("stratum-inspector-v3"),
+        "稳定性监控": service_state("stratum-endpoint-monitor"), "自动切换": service_state("stratum-route-switch-monitor"),
+        "安全监控": service_state("stratum-security-monitor"), "加密入口": service_state("stratum-secure-relay")}
+    sites = site_overview_rows()
+    relay_config = load_json(SECURE_RELAY_CONFIG, {})
+    certificate = certificate_summary(relay_config.get("certificate", "")) if relay_config else {"available": False, "name": "", "fingerprint": "", "expires": "", "days_left": None}
+    reminders = reminder_rows(config, certificate)
     relay_status = detect_relay_public_ip(config)
     route_groups = route_page_groups(config, state, relay_status)
     overview_routes = [row for group in route_groups for row in group["rows"]]
@@ -819,11 +976,7 @@ def build_page_context(page):
     access = client_access_context(config) if page == "access" else None
     return dict(page=page, config=config, endpoint_map=endpoint_map, endpoint_rows=rows,
         online=sum(1 for row in rows if row["ok"]), alerting=sum(1 for value in state.get("endpoints", {}).values() if value.get("alerting")),
-        services={"HAProxy": service_state("haproxy"), "协议检查器": service_state("stratum-inspector-v3"),
-            "稳定性监控": service_state("stratum-endpoint-monitor"),
-            "自动切换": service_state("stratum-route-switch-monitor"),
-            "安全监控": service_state("stratum-security-monitor")},
-        server=server_metrics(), pools=pools, overview=overview_summary(pools), logs=recent_logs(),
+        services=services, server=server_metrics(), pools=pools, overview=overview, logs=recent_logs(),
         alert_settings=alert_settings, wechat_configured=read_env().get("WECHAT_WEBHOOK", "").startswith("https://"),
         legacy_enabled=monitor_enabled(), history=store.history(), audit=audit_rows(),
         disconnect_history=disconnect_history_rows(),
@@ -840,7 +993,11 @@ def build_page_context(page):
             "route_sync_ok": "备用VPS同步成功", "route_sync_failed": "备用VPS同步失败",
             "route_sync_received": "已接收VPS同步"},
         algorithms={"scrypt": "Scrypt", "sha256d": "SHA-256", "other": "其他/自定义", "unknown": "算法待确认"},
-        security=security, client_access=access, tailscale_access_available=bool(tailscale_identity()), csrf=session["csrf"])
+        security=security, sites=sites, reminders=reminders, admin_brief=administrator_brief(overview, services, sites, len([value for value in state.get("endpoints", {}).values() if value.get("alerting")]), reminders),
+        operation_timeline=operation_timeline(security), panel_version=PANEL_VERSION,
+        current_client_version=CURRENT_CLIENT_VERSION, current_relay_version=CURRENT_RELAY_VERSION,
+        relay_server_version=(sites[0]["server_version"] if sites else load_json(SECURE_RELAY_STATE, {}).get("server_version", "未上报")),
+        client_access=access, tailscale_access_available=bool(tailscale_identity()), csrf=session["csrf"])
 
 
 @app.route("/")
@@ -1514,6 +1671,29 @@ def save_probe_settings():
             flash("地址自动探测已关闭；后台不会再持续 mining.subscribe 探测矿池，手动“立即检测”仍可使用。")
     except (KeyError, ValueError, ConfigError, OSError):
         flash("探测参数不合法，设置未保存。")
+    return redirect(url_for("dashboard_page", page="settings"))
+
+
+@app.route("/administrator-reminders", methods=["POST"])
+def save_administrator_reminders():
+    if not authorized() or not csrf_ok():
+        return "Forbidden", 403
+    config = store.load()
+    try:
+        values = {"vps_name": request.form.get("vps_name", "").strip()[:80],
+            "domain_name": request.form.get("domain_name", "").strip()[:253],
+            "vps_expiry": request.form.get("vps_expiry", "").strip(),
+            "domain_expiry": request.form.get("domain_expiry", "").strip()}
+        for key in ("vps_expiry", "domain_expiry"):
+            if values[key] and parse_expiry(values[key]) is None:
+                raise ValueError
+        values["expiry_reminder_days"] = clamp_int(request.form.get("expiry_reminder_days", "30"), 1, 365)
+        config.setdefault("settings", {}).update(values)
+        store.save(config, actor=actor(), action="update-administrator-reminders")
+        approve_integrity([CONFIG_FILE])
+        flash("管理员到期提醒已保存。")
+    except (ValueError, ConfigError, OSError):
+        flash("到期日期格式不正确，设置未保存。")
     return redirect(url_for("dashboard_page", page="settings"))
 
 

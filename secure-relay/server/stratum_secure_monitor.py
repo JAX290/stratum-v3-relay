@@ -12,6 +12,7 @@ from pathlib import Path
 CONFIG_FILE = Path(os.getenv("SECURE_RELAY_CONFIG", "/etc/stratum-secure-relay.json"))
 STATE_FILE = Path(os.getenv("SECURE_RELAY_STATE", "/var/lib/stratum-secure-relay/sites.json"))
 MONITOR_FILE = Path(os.getenv("SECURE_RELAY_MONITOR_STATE", "/var/lib/stratum-secure-relay/monitor.json"))
+EVENT_FILE = Path(os.getenv("SECURE_RELAY_EVENT_FILE", "/var/lib/stratum-secure-relay/events.jsonl"))
 ENV_FILE = Path("/etc/stratum-v3.env")
 
 
@@ -52,6 +53,15 @@ def save_monitor(value):
     os.replace(temporary, MONITOR_FILE)
 
 
+def append_event(kind, client_id, name, message, now, site=None):
+    site = site or {}
+    EVENT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with EVENT_FILE.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"time": int(now), "type": kind, "client_id": client_id,
+            "site": name, "message": message, "miner_count": int(site.get("last_miner_count", site.get("miner_count", 0)) or 0),
+            "connections": int(site.get("active", 0) or 0)}, ensure_ascii=False) + "\n")
+
+
 def check_once(now=None):
     now = int(now or time.time())
     config = read_json(CONFIG_FILE, {})
@@ -68,15 +78,20 @@ def check_once(now=None):
             continue
         client_id = str(client.get("id", "default"))
         name = str(client.get("name", client_id))
-        last_seen = int(sites.get(client_id, {}).get("last_seen", 0))
+        site = sites.get(client_id, {})
+        last_seen = int(site.get("last_seen", 0))
         offline = (last_seen and now - last_seen > offline_after) or (not last_seen and now - int(monitor["started_at"]) > offline_after)
         previous = statuses.get(client_id, "waiting")
         current = "offline" if offline else ("online" if last_seen else "waiting")
         if current == "offline" and previous != "offline":
             when = datetime.fromtimestamp(last_seen, timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S") if last_seen else "从未连接"
-            events.append(f"【木林森中转离线】\n矿场：{name}\n最后连接：{when}\n请检查值守电脑、流量卡和VPS线路。")
+            message = f"【木林森中转离线】\n矿场：{name}\n最后连接：{when}\n请检查值守电脑、流量卡和VPS线路。"
+            events.append(message)
+            append_event("site_offline", client_id, name, message, now, site)
         elif current == "online" and previous == "offline":
-            events.append(f"【木林森中转恢复】\n矿场：{name}\n客户端心跳已经恢复。")
+            message = f"【木林森中转恢复】\n矿场：{name}\n客户端心跳已经恢复。"
+            events.append(message)
+            append_event("site_recovered", client_id, name, message, now, site)
         statuses[client_id] = current
     save_monitor(monitor)
     return events

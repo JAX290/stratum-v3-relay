@@ -24,6 +24,7 @@ V3_CONFIG_FILE = Path(os.getenv("V3_CONFIG_FILE", "/etc/stratum-v3.json"))
 MAX_HEADER = 8192
 INTERNAL_START = 20000
 DEFAULT_STATE_FILE = Path("/var/lib/stratum-secure-relay/sites.json")
+SERVER_VERSION = "2.2.0"
 CONTROL_FILE = Path(os.getenv("SECURE_RELAY_CONTROL", "/var/lib/stratum-secure-relay/control.json"))
 
 
@@ -124,6 +125,7 @@ class SiteState:
     def __init__(self, path):
         self.path = Path(path)
         self.sites = {}
+        self.miner_counts = {}
         self.last_write = 0.0
         self.last_write_error_log = 0.0
         try:
@@ -134,16 +136,35 @@ class SiteState:
         # Every connection in a new process starts from zero.
         for site in self.sites.values():
             site["active"] = 0
+            site["miners"] = []
+            site["miner_count"] = 0
         if self.sites:
             self.write()
 
-    def update(self, client, peer, active_delta=0, force=False):
+    def update(self, client, peer, active_delta=0, force=False, miner_ip="", client_version="",
+               reported_miner_count=None, reported_connections=None):
         now = time.time()
         site = self.sites.setdefault(client["id"], {"id": client["id"], "name": client["name"], "active": 0})
         site["name"] = client["name"]
         site["last_seen"] = int(now)
         site["last_ip"] = str(peer[0])
         site["active"] = max(0, int(site.get("active", 0)) + active_delta)
+        if client_version:
+            site["client_version"] = str(client_version)[:32]
+        if reported_miner_count is not None:
+            site["reported_miner_count"] = max(0, min(100000, int(reported_miner_count)))
+            site["last_miner_count"] = max(int(site.get("last_miner_count", 0) or 0), site["reported_miner_count"])
+        if reported_connections is not None:
+            site["reported_connections"] = max(0, min(1000000, int(reported_connections)))
+        if miner_ip and active_delta:
+            counts = self.miner_counts.setdefault(client["id"], {})
+            counts[miner_ip] = max(0, int(counts.get(miner_ip, 0)) + active_delta)
+            if counts[miner_ip] == 0:
+                counts.pop(miner_ip, None)
+            site["miners"] = sorted(counts)
+            site["miner_count"] = len(counts)
+            if active_delta > 0:
+                site["last_miner_count"] = max(int(site.get("last_miner_count", 0) or 0), len(counts))
         if force or now - self.last_write >= 5:
             self.write()
 
@@ -153,7 +174,7 @@ class SiteState:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd, temporary = tempfile.mkstemp(prefix=self.path.name + ".", dir=str(self.path.parent))
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump({"updated_at": int(time.time()), "sites": self.sites}, handle, ensure_ascii=False, indent=2)
+                json.dump({"updated_at": int(time.time()), "server_version": SERVER_VERSION, "sites": self.sites}, handle, ensure_ascii=False, indent=2)
                 handle.write("\n")
             os.chmod(temporary, 0o640)
             os.replace(temporary, self.path)
@@ -186,6 +207,14 @@ def source_address(headers, peer):
         source_ip = str(peer[0])
         ipaddress.ip_address(source_ip)
     return source_ip
+
+
+def optional_count(headers, name):
+    try:
+        value = int(headers.get(name, ""))
+        return value if value >= 0 else None
+    except (TypeError, ValueError):
+        return None
 
 
 def proxy_header(headers, peer, destination_port):
@@ -252,7 +281,10 @@ class SecureRelay:
                     raise ValueError("header too large")
                 port, supplied_token, headers = parse_request(raw)
                 client = authenticate(self.current_config(), supplied_token)
-                self.state.update(client, peer)
+                client_version = headers.get("x-client-version", "")
+                self.state.update(client, peer, client_version=client_version,
+                    reported_miner_count=optional_count(headers, "x-miner-count"),
+                    reported_connections=optional_count(headers, "x-active-connections"))
                 if port is None:
                     writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                     await writer.drain()
@@ -268,7 +300,7 @@ class SecureRelay:
                 await upstream_writer.drain()
                 writer.write(b"HTTP/1.1 200 Connection Established\r\nContent-Length: 0\r\n\r\n")
                 await writer.drain()
-                self.state.update(client, peer, active_delta=1, force=True)
+                self.state.update(client, peer, active_delta=1, force=True, miner_ip=miner_ip, client_version=client_version)
                 active_counted = True
                 connection_key = id(writer)
                 self.connections[connection_key] = {"writer": writer, "port": port, "miner_ip": miner_ip}
@@ -288,7 +320,7 @@ class SecureRelay:
             finally:
                 self.connections.pop(id(writer), None)
                 if active_counted and client:
-                    self.state.update(client, peer, active_delta=-1, force=True)
+                    self.state.update(client, peer, active_delta=-1, force=True, miner_ip=miner_ip)
                 await close_writer(upstream_writer)
                 await close_writer(writer)
 

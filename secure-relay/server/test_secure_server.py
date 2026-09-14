@@ -98,6 +98,27 @@ class SecureServerTests(unittest.TestCase):
                 state.update({"id": "mine-a", "name": "矿场A"}, ("198.51.100.4", 50000), force=True)
             self.assertEqual(state.sites["mine-a"]["last_ip"], "198.51.100.4")
 
+    def test_site_state_groups_unique_miners_and_records_versions(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "sites.json"
+            state = secure.SiteState(path)
+            client = {"id": "mine-a", "name": "矿场A"}
+            state.update(client, ("198.51.100.4", 50000), active_delta=1, miner_ip="192.168.1.20", client_version="2.2.0")
+            state.update(client, ("198.51.100.4", 50001), active_delta=1, miner_ip="192.168.1.20")
+            state.update(client, ("198.51.100.4", 50002), active_delta=1, miner_ip="192.168.1.21", force=True)
+            self.assertEqual(state.sites["mine-a"]["miner_count"], 2)
+            self.assertEqual(state.sites["mine-a"]["active"], 3)
+            self.assertEqual(state.sites["mine-a"]["client_version"], "2.2.0")
+            state.update(client, ("198.51.100.4", 50000), active_delta=-1, miner_ip="192.168.1.20")
+            self.assertEqual(state.sites["mine-a"]["miner_count"], 2)
+            state.update(client, ("198.51.100.4", 50001), active_delta=-1, miner_ip="192.168.1.20", force=True)
+            self.assertEqual(state.sites["mine-a"]["miner_count"], 1)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["server_version"], secure.SERVER_VERSION)
+            state.update(client, ("198.51.100.4", 50003), reported_miner_count=88, reported_connections=352, force=True)
+            self.assertEqual(state.sites["mine-a"]["reported_miner_count"], 88)
+            self.assertEqual(state.sites["mine-a"]["reported_connections"], 352)
+
 
 class RelayFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_authenticated_bidirectional_tunnel(self):
@@ -144,12 +165,13 @@ class MonitorTests(unittest.TestCase):
             config = root / "config.json"
             state = root / "sites.json"
             monitor_state = root / "monitor.json"
+            event_file = root / "events.jsonl"
             config.write_text(json.dumps({"offline_after_seconds": 60, "clients": [
                 {"id": "mine-a", "name": "矿场A", "enabled": True, "alert_enabled": True}
             ]}), encoding="utf-8")
             state.write_text(json.dumps({"sites": {"mine-a": {"last_seen": 100}}}), encoding="utf-8")
             monitor_state.write_text(json.dumps({"started_at": 0, "clients": {"mine-a": "online"}}), encoding="utf-8")
-            with patch.object(monitor, "CONFIG_FILE", config), patch.object(monitor, "STATE_FILE", state), patch.object(monitor, "MONITOR_FILE", monitor_state):
+            with patch.object(monitor, "CONFIG_FILE", config), patch.object(monitor, "STATE_FILE", state), patch.object(monitor, "MONITOR_FILE", monitor_state), patch.object(monitor, "EVENT_FILE", event_file):
                 events = monitor.check_once(now=200)
                 self.assertEqual(len(events), 1)
                 self.assertIn("离线", events[0])
@@ -157,6 +179,8 @@ class MonitorTests(unittest.TestCase):
                 events = monitor.check_once(now=210)
                 self.assertEqual(len(events), 1)
                 self.assertIn("恢复", events[0])
+                records = [json.loads(line) for line in event_file.read_text(encoding="utf-8").splitlines()]
+                self.assertEqual([item["type"] for item in records], ["site_offline", "site_recovered"])
 
 
 class CredentialTests(unittest.TestCase):
