@@ -11,6 +11,7 @@ import socket
 import ssl
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from urllib.parse import urlsplit
 from pathlib import Path
 
 from flask import Flask, flash, jsonify, redirect, render_template, render_template_string, request, send_from_directory, session, url_for
+from flask.sessions import SecureCookieSessionInterface
 from werkzeug.security import check_password_hash
 
 from endpoint_monitor import Notifier, beijing_time, probe_stratum
@@ -67,9 +69,32 @@ JOURNAL_SERVICES = {
 }
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("PANEL_SECRET_KEY", secrets.token_hex(32))
+app.secret_key = os.environ.get("PANEL_SECRET_KEY")
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict", MAX_CONTENT_LENGTH=65536)
 store = ConfigStore(CONFIG_FILE, HISTORY_DIR, AUDIT_FILE)
+LOGIN_FAILURES = {}
+LOGIN_FAILURES_LOCK = threading.Lock()
+LOGIN_WINDOW_SECONDS = 300
+LOGIN_MAX_FAILURES = 5
+LOGIN_COOLDOWN_SECONDS = 900
+
+
+def trusted_https_request():
+    return request.is_secure or (request.remote_addr in {"127.0.0.1", "::1"} and
+        request.headers.get("X-Forwarded-Proto", "").lower() == "https")
+
+
+def require_secret_key():
+    if not app.secret_key:
+        raise RuntimeError("PANEL_SECRET_KEY is required; run bootstrap-vps.sh or repair /etc/stratum-admin.env")
+
+
+class RequestAwareSessionInterface(SecureCookieSessionInterface):
+    def get_cookie_secure(self, flask_app):
+        return trusted_https_request()
+
+
+app.session_interface = RequestAwareSessionInterface()
 
 
 def tailscale_identity():
@@ -1034,18 +1059,52 @@ pre{margin:8px 0 0;background:#101a20;color:#dce8ee;border-radius:6px;padding:13
 """
 
 
+def login_attempt_key():
+    return request.remote_addr or "unknown"
+
+
+def login_retry_after(key, now=None):
+    now = float(now if now is not None else time.time())
+    with LOGIN_FAILURES_LOCK:
+        row = LOGIN_FAILURES.get(key, {"attempts": [], "locked_until": 0})
+        if float(row.get("locked_until", 0)) > now:
+            return max(1, int(float(row["locked_until"]) - now))
+        row["attempts"] = [stamp for stamp in row.get("attempts", []) if now - stamp <= LOGIN_WINDOW_SECONDS]
+        row["locked_until"] = 0
+        LOGIN_FAILURES[key] = row
+        return 0
+
+
+def record_login_failure(key, now=None):
+    now = float(now if now is not None else time.time())
+    with LOGIN_FAILURES_LOCK:
+        row = LOGIN_FAILURES.setdefault(key, {"attempts": [], "locked_until": 0})
+        row["attempts"] = [stamp for stamp in row.get("attempts", []) if now - stamp <= LOGIN_WINDOW_SECONDS]
+        row["attempts"].append(now)
+        if len(row["attempts"]) >= LOGIN_MAX_FAILURES:
+            row["locked_until"] = now + LOGIN_COOLDOWN_SECONDS
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     error = None
     if request.method == "GET" and session.get("tailscale_identity"):
         return redirect(url_for("index"))
     if request.method == "POST":
+        key = login_attempt_key()
+        retry_after = login_retry_after(key)
+        if retry_after:
+            response = render_template_string(LOGIN, error=f"尝试次数过多，请在 {max(1, retry_after // 60)} 分钟后重试")
+            return response, 429, {"Retry-After": str(retry_after)}
         expected = os.environ.get("PANEL_PASSWORD_HASH", "")
         if expected and check_password_hash(expected, request.form.get("password", "")):
+            with LOGIN_FAILURES_LOCK:
+                LOGIN_FAILURES.pop(key, None)
             session.clear()
             session["authenticated"] = True
             session["csrf"] = secrets.token_urlsafe(24)
             return redirect(url_for("index"))
+        record_login_failure(key)
         error = "密码不正确"
     return render_template_string(LOGIN, error=error)
 
@@ -1185,6 +1244,12 @@ def copy_client_secret(client_id):
 
 @app.after_request
 def protect_sensitive_responses(response):
+    response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    if trusted_https_request():
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     if request.path == "/access" or request.path.startswith("/client-access/"):
         response.headers["Cache-Control"] = "no-store, max-age=0"
         response.headers["Pragma"] = "no-cache"
@@ -1942,4 +2007,8 @@ def rollback():
 
 
 if __name__ == "__main__":
+    try:
+        require_secret_key()
+    except RuntimeError as exc:
+        raise SystemExit(str(exc))
     app.run(host="127.0.0.1", port=8789)

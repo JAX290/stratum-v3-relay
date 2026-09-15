@@ -226,6 +226,8 @@ chmod +x install-public-status.sh
 /opt/stratum-admin/reset-panel-password.sh --disable-password
 ```
 
+应急密码在 5 分钟内连续输错 5 次后会暂停 15 分钟。通过 Tailscale 的已验证身份自动登录不受影响。HTTPS 会话使用 Secure Cookie，所有页面统一禁止外部嵌入并带有浏览器安全响应头；`PANEL_SECRET_KEY` 缺失时管理服务会直接拒绝启动并在日志中说明修复位置。
+
 ## GitHub 仓库维护建议
 
 建议只提交 `README.md` 和 `monitor-panel/` 目录，不要提交外层目录里的压缩包、备份、迁移包、本地测试页面等文件。

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from werkzeug.security import generate_password_hash
 
 try:
     import stratum_admin_v3 as admin
@@ -45,6 +46,7 @@ class AdminV3Test(unittest.TestCase):
         admin.SECURE_RELAY_EVENT_FILE = root / "relay-events.jsonl"
         admin.store = ConfigStore(config_path, root / "history", admin.AUDIT_FILE)
         admin.app.config.update(TESTING=True, SECRET_KEY="test")
+        admin.LOGIN_FAILURES.clear()
         self.client = admin.app.test_client()
         with self.client.session_transaction() as session:
             session["authenticated"] = True
@@ -278,6 +280,39 @@ class AdminV3Test(unittest.TestCase):
                 environ_base={"REMOTE_ADDR": "192.0.2.10"})
         self.assertEqual(response.status_code, 302)
         self.assertIn("/login", response.headers["Location"])
+
+    def test_emergency_password_is_rate_limited(self):
+        with self.client.session_transaction() as session:
+            session.clear()
+        password_hash = generate_password_hash("correct-password")
+        with patch.dict(os.environ, {"PANEL_PASSWORD_HASH": password_hash}):
+            for _ in range(5):
+                self.assertEqual(self.client.post("/login", data={"password": "wrong"}).status_code, 200)
+            blocked = self.client.post("/login", data={"password": "correct-password"})
+        self.assertEqual(blocked.status_code, 429)
+        self.assertIn("Retry-After", blocked.headers)
+        self.assertIn("尝试次数过多".encode(), blocked.data)
+
+    def test_https_proxy_gets_secure_cookie_and_security_headers(self):
+        with self.client.session_transaction() as session:
+            session.clear()
+        password_hash = generate_password_hash("correct-password")
+        with patch.dict(os.environ, {"PANEL_PASSWORD_HASH": password_hash}):
+            response = self.client.post("/login", data={"password": "correct-password"},
+                headers={"X-Forwarded-Proto": "https"})
+        self.assertIn("Secure", response.headers.get("Set-Cookie", ""))
+        self.assertEqual(response.headers["X-Frame-Options"], "DENY")
+        self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
+        self.assertIn("max-age=31536000", response.headers["Strict-Transport-Security"])
+
+    def test_missing_session_secret_is_rejected_for_production_start(self):
+        previous = admin.app.secret_key
+        try:
+            admin.app.secret_key = None
+            with self.assertRaisesRegex(RuntimeError, "PANEL_SECRET_KEY"):
+                admin.require_secret_key()
+        finally:
+            admin.app.secret_key = previous
 
     def test_client_access_is_available_only_through_current_tailscale_request(self):
         secret = "a" * 64
