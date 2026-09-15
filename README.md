@@ -494,3 +494,7 @@ GitHub 保存的是程序和部署方法，不保存每台服务器的秘密配�
 - [版本与 GitHub Release 发布流程](docs/releasing.md)
 - [木林森 Windows 客户端与 TLS 服务说明](secure-relay/README.md)
 - [域名与 Cloudflare 新手说明](docs/cloudflare-domain-guide.md)
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。你可以在保留版权和许可声明的前提下使用、复制、修改、发布和分发本项目；软件按原样提供，不附带任何明示或默示担保。
