@@ -38,6 +38,7 @@ DEFAULT_PATHS = [
     "/opt/stratum-admin/endpoint_monitor.py",
     "/opt/stratum-admin/security_monitor.py",
     "/opt/stratum-admin/stratum_admin_v3.py",
+    "/opt/stratum-admin/admin_auth.py",
     "/opt/stratum-admin/version_info.py",
     "/opt/stratum-admin/stratum_public_status.py",
     "/opt/stratum-admin/route_switch_monitor.py",

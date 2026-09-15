@@ -11,7 +11,6 @@ import socket
 import ssl
 import subprocess
 import tempfile
-import threading
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -20,9 +19,11 @@ from urllib.parse import urlsplit
 from pathlib import Path
 
 from flask import Flask, flash, jsonify, redirect, render_template, render_template_string, request, send_from_directory, session, url_for
-from flask.sessions import SecureCookieSessionInterface
 from werkzeug.security import check_password_hash
 
+from admin_auth import (LOGIN_FAILURES, LOGIN_FAILURES_LOCK, RequestAwareSessionInterface,
+    login_attempt_key, login_retry_after, record_login_failure, tailscale_identity,
+    trusted_https_request)
 from endpoint_monitor import Notifier, beijing_time, probe_stratum
 from security_monitor import atomic_write as write_integrity, load as load_integrity, snapshot
 from v3_manager import ConfigError, ConfigStore, append_bounded_jsonl, file_lock, render_haproxy_config, render_inspector_config, route_map, validate_config
@@ -72,16 +73,6 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("PANEL_SECRET_KEY")
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict", MAX_CONTENT_LENGTH=65536)
 store = ConfigStore(CONFIG_FILE, HISTORY_DIR, AUDIT_FILE)
-LOGIN_FAILURES = {}
-LOGIN_FAILURES_LOCK = threading.Lock()
-LOGIN_WINDOW_SECONDS = 300
-LOGIN_MAX_FAILURES = 5
-LOGIN_COOLDOWN_SECONDS = 900
-
-
-def trusted_https_request():
-    return request.is_secure or (request.remote_addr in {"127.0.0.1", "::1"} and
-        request.headers.get("X-Forwarded-Proto", "").lower() == "https")
 
 
 def require_secret_key():
@@ -89,27 +80,7 @@ def require_secret_key():
         raise RuntimeError("PANEL_SECRET_KEY is required; run bootstrap-vps.sh or repair /etc/stratum-admin.env")
 
 
-class RequestAwareSessionInterface(SecureCookieSessionInterface):
-    def get_cookie_secure(self, flask_app):
-        return trusted_https_request()
-
-
 app.session_interface = RequestAwareSessionInterface()
-
-
-def tailscale_identity():
-    """Trust identity headers only from the local Tailscale Serve reverse proxy."""
-    if os.getenv("TAILSCALE_AUTO_LOGIN", "1").lower() not in {"1", "true", "yes", "on"}:
-        return ""
-    if request.remote_addr not in {"127.0.0.1", "::1"}:
-        return ""
-    login_name = request.headers.get("Tailscale-User-Login", "").strip().lower()
-    if not login_name:
-        return ""
-    allowed = {value.strip().lower() for value in os.getenv("TAILSCALE_ALLOWED_USERS", "").split(",") if value.strip()}
-    if allowed and login_name not in allowed:
-        return ""
-    return login_name
 
 
 @app.before_request
@@ -1057,32 +1028,6 @@ pre{margin:8px 0 0;background:#101a20;color:#dce8ee;border-radius:6px;padding:13
 <section class="panel"><h2>最近审计</h2>{% for row in audit %}<div style="padding:7px 0;border-bottom:1px solid var(--line)"><b>{{row.action}}</b><div class="small muted">{{row.display_time}} · {{row.actor}}</div></div>{% else %}<p class="muted">暂无审计记录</p>{% endfor %}</section>
 </div></main></body></html>
 """
-
-
-def login_attempt_key():
-    return request.remote_addr or "unknown"
-
-
-def login_retry_after(key, now=None):
-    now = float(now if now is not None else time.time())
-    with LOGIN_FAILURES_LOCK:
-        row = LOGIN_FAILURES.get(key, {"attempts": [], "locked_until": 0})
-        if float(row.get("locked_until", 0)) > now:
-            return max(1, int(float(row["locked_until"]) - now))
-        row["attempts"] = [stamp for stamp in row.get("attempts", []) if now - stamp <= LOGIN_WINDOW_SECONDS]
-        row["locked_until"] = 0
-        LOGIN_FAILURES[key] = row
-        return 0
-
-
-def record_login_failure(key, now=None):
-    now = float(now if now is not None else time.time())
-    with LOGIN_FAILURES_LOCK:
-        row = LOGIN_FAILURES.setdefault(key, {"attempts": [], "locked_until": 0})
-        row["attempts"] = [stamp for stamp in row.get("attempts", []) if now - stamp <= LOGIN_WINDOW_SECONDS]
-        row["attempts"].append(now)
-        if len(row["attempts"]) >= LOGIN_MAX_FAILURES:
-            row["locked_until"] = now + LOGIN_COOLDOWN_SECONDS
 
 
 @app.route("/login", methods=["GET", "POST"])
