@@ -9,7 +9,7 @@ from stratum_inspector import Inspector
 
 class InspectorProtocolTest(unittest.TestCase):
     def test_relay_config_has_unique_ports(self):
-        config = json.loads(Path("stratum-inspector.json").read_text(encoding="utf-8"))
+        config = json.loads((Path(__file__).resolve().parent / "stratum-inspector.json").read_text(encoding="utf-8"))
         ports = [relay["listen_port"] for relay in config["relays"]]
         self.assertEqual(len(ports), len(set(ports)))
         self.assertEqual(len(ports), 15)

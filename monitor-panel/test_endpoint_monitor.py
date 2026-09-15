@@ -112,7 +112,7 @@ class EndpointMonitorTest(unittest.TestCase):
         self.assertEqual(entry["consecutive_failures"], 0)
 
     def test_repository_config_is_consistent(self):
-        config = json.loads(Path("v3-config.json").read_text(encoding="utf-8"))
+        config = json.loads((Path(__file__).resolve().parent / "v3-config.json").read_text(encoding="utf-8"))
         endpoint_ids = {item["id"] for item in config["endpoints"]}
         ports = [port for group in config["port_groups"] for port in group["ports"]]
         ports += [item["port"] for item in config["fixed_routes"]]

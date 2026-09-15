@@ -45,16 +45,16 @@
 
 ## P2：工程质量
 
-### 建立统一测试入口和持续集成
+### 建立统一测试入口和持续集成（已完成）
 
-目前 Python 测试依赖从特定子目录启动，从仓库根目录执行标准发现命令可能得到“0 tests”。
+Python 测试现在可以从仓库根目录启动，不再依赖当前工作目录。
 
-建议：
+实现：
 
-- 测试数据路径基于测试文件所在目录，不依赖当前工作目录。
-- 在仓库根目录提供统一的 Windows 和 Linux 测试命令。
-- 使用 GitHub Actions 运行 Python 测试、Windows C# 编译、客户端核心测试和配置渲染检查。
-- 明确支持的 Ubuntu、Python 和 .NET Framework 版本，并固定依赖范围。
+- 测试数据路径全部基于测试文件位置。
+- 根目录提供 `test.ps1` 和 `test.sh` 统一入口。
+- GitHub Actions 自动运行 Python 测试、Linux 配置渲染与脚本检查、Windows C# 编译和客户端核心测试。
+- CI 基线为 Ubuntu 24.04 / Python 3.12 与 Windows Server 2022 / .NET Framework，Python 开发依赖使用有上限的版本范围。
 
 ### 改进版本和发布流程
 

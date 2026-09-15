@@ -6,10 +6,12 @@ from unittest.mock import patch
 
 from v3_manager import ConfigError, ConfigStore, append_bounded_jsonl, render_haproxy_config, render_inspector_config, route_map, validate_config
 
+HERE = Path(__file__).resolve().parent
+
 
 class V3ManagerTest(unittest.TestCase):
     def setUp(self):
-        self.config = json.loads(Path("v3-config.json").read_text(encoding="utf-8"))
+        self.config = json.loads((HERE / "v3-config.json").read_text(encoding="utf-8"))
 
     def test_valid_config_and_rendered_routes(self):
         self.assertTrue(validate_config(self.config))

@@ -469,6 +469,22 @@ cd /root/stratum-v3/monitor-panel
 
 GitHub 保存的是程序和部署方法，不保存每台服务器的秘密配置。更换 Windows 电脑时，可通过 Tailscale 在面板“设置 → 客户端接入资料”找回该 VPS 的客户端配置。重建 VPS 时仍应由安装脚本生成新证书和新密钥，再把新信息填入 Windows 客户端；证书私钥不能从网页导出。
 
+## 十六、开发与自动测试
+
+从仓库根目录运行：
+
+```powershell
+# Windows：Python 测试 + TLS 服务测试 + Windows 客户端构建和核心测试
+.\test.ps1
+```
+
+```bash
+# Linux：Python 测试 + TLS 服务测试 + 配置渲染检查
+./test.sh
+```
+
+开发依赖列在 `requirements-dev.txt`。GitHub Actions 会在 Ubuntu 24.04 / Python 3.12 和 Windows Server 2022 / .NET Framework 编译器上自动执行上述检查；合并前应确保两个任务均通过。
+
 ## 详细功能说明
 
 - [V3 管理面板说明](monitor-panel/README.md)

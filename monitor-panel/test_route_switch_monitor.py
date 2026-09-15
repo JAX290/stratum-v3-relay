@@ -8,12 +8,14 @@ import route_switch_monitor as switcher
 import stratum_admin_v3 as admin
 from v3_manager import ConfigStore
 
+HERE = Path(__file__).resolve().parent
+
 
 class RouteSwitchMonitorTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
-        config = json.loads(Path("v3-config.json").read_text(encoding="utf-8"))
+        config = json.loads((HERE / "v3-config.json").read_text(encoding="utf-8"))
         config["canary_routes"] = [{"port": 11301, "source_ip": "192.168.1.20",
             "endpoint_id": "f2pool-global", "original_endpoint_id": "longpool-asia-8080",
             "algorithm": "scrypt", "started_at": 100, "review_after": 700,

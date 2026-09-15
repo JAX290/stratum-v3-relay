@@ -13,12 +13,14 @@ except ModuleNotFoundError as exc:
     raise
 from v3_manager import ConfigStore
 
+HERE = Path(__file__).resolve().parent
+
 
 class AdminV3Test(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
-        config = json.loads(Path("v3-config.json").read_text(encoding="utf-8"))
+        config = json.loads((HERE / "v3-config.json").read_text(encoding="utf-8"))
         config_path = root / "config.json"
         config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
         admin.CONFIG_FILE = config_path
