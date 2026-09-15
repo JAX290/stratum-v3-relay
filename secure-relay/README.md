@@ -76,6 +76,8 @@ stratum-relay-client rotate mine-a
 systemctl restart stratum-secure-monitor
 ```
 
+公网 TLS 入口由专用的 `stratum-relay` 系统账户运行。它只拥有绑定低端口的能力；配置、证书和私钥为组只读，只能写入 `/var/lib/stratum-secure-relay`。已有 VPS 运行最新版 `monitor-panel/upgrade-v3-panel.sh` 时会自动完成权限迁移。
+
 ### 更改 TLS 端口
 
 例如把 TLS 入口改为 `8443`：

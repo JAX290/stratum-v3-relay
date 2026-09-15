@@ -55,6 +55,68 @@ install -m 0644 ./static/public.css /opt/stratum-admin/static/public.css
 install -o root -g root -m 0755 "$secure_server" /opt/stratum-secure-server.py
 install -o root -g root -m 0755 "$secure_monitor" /opt/stratum-secure-monitor.py
 
+# Migrate the Internet-facing TLS process from root to its dedicated account.
+id stratum-relay >/dev/null 2>&1 || useradd --system --home /nonexistent --shell /usr/sbin/nologin stratum-relay
+install -d -o root -g stratum-relay -m 0750 /etc/stratum-secure-relay
+install -d -o stratum-relay -g stratum-relay -m 0750 /var/lib/stratum-secure-relay
+chown -R stratum-relay:stratum-relay /var/lib/stratum-secure-relay
+python3 - <<'PY'
+import json, os, shutil, tempfile
+path = "/etc/stratum-secure-relay.json"
+data = json.load(open(path, encoding="utf-8"))
+for key, name in (("certificate", "server.crt"), ("private_key", "server.key")):
+    source = os.path.abspath(data[key])
+    target = os.path.join("/etc/stratum-secure-relay", name)
+    if source != target:
+        shutil.copyfile(source, target)
+    os.chown(target, 0, __import__("grp").getgrnam("stratum-relay").gr_gid)
+    os.chmod(target, 0o640)
+    data[key] = target
+fd, temporary = tempfile.mkstemp(prefix="stratum-secure-relay.", dir="/etc")
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+os.chown(temporary, 0, __import__("grp").getgrnam("stratum-relay").gr_gid)
+os.chmod(temporary, 0o640)
+os.replace(temporary, path)
+PY
+
+cat >/etc/systemd/system/stratum-secure-relay.service <<'EOF'
+[Unit]
+Description=Stratum V3 encrypted TLS ingress
+After=network-online.target stratum-inspector-v3.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/stratum-secure-server.py
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+Environment=PYTHONUNBUFFERED=1
+User=stratum-relay
+Group=stratum-relay
+SupplementaryGroups=stratum-proxy
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+ReadOnlyPaths=/etc/stratum-v3.json /etc/stratum-secure-relay.json /etc/stratum-secure-relay
+ReadWritePaths=/var/lib/stratum-secure-relay
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 cat >/etc/systemd/system/stratum-route-switch-monitor.service <<'EOF'
 [Unit]
 Description=Stratum timed single-miner route switch monitor

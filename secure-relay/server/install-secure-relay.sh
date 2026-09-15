@@ -12,6 +12,10 @@ for file in stratum_secure_server.py stratum_secure_monitor.py secure_relay_clie
 done
 test -f /etc/stratum-v3.json || { echo "Deploy Stratum V3 first: /etc/stratum-v3.json is missing." >&2; exit 1; }
 test -f /etc/stratum-inspector.json || { echo "Deploy Stratum V3 first: /etc/stratum-inspector.json is missing." >&2; exit 1; }
+id stratum-relay >/dev/null 2>&1 || useradd --system --home /nonexistent --shell /usr/sbin/nologin stratum-relay
+install -d -o root -g stratum-relay -m 0750 /etc/stratum-secure-relay
+install -d -o stratum-relay -g stratum-relay -m 0750 /var/lib/stratum-secure-relay
+chown -R stratum-relay:stratum-relay /var/lib/stratum-secure-relay
 
 python3 - <<'PY'
 import json
@@ -68,7 +72,6 @@ if [[ -n "$cert_file" || -n "$key_file" ]]; then
 else
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y openssl
-  install -d -m 0700 /etc/stratum-secure-relay
   cert_file=/etc/stratum-secure-relay/server.crt
   key_file=/etc/stratum-secure-relay/server.key
   if [[ ! -f "$cert_file" || ! -f "$key_file" ]]; then
@@ -79,6 +82,21 @@ else
     chmod 0644 "$cert_file"
   fi
 fi
+
+# Copy externally supplied certificates into a directory the dedicated service
+# account can traverse, while keeping the private key unavailable to others.
+managed_cert=/etc/stratum-secure-relay/server.crt
+managed_key=/etc/stratum-secure-relay/server.key
+if [[ "$cert_file" != "$managed_cert" ]]; then
+  install -o root -g stratum-relay -m 0640 "$cert_file" "$managed_cert"
+fi
+if [[ "$key_file" != "$managed_key" ]]; then
+  install -o root -g stratum-relay -m 0640 "$key_file" "$managed_key"
+fi
+cert_file="$managed_cert"
+key_file="$managed_key"
+chown root:stratum-relay "$cert_file" "$key_file"
+chmod 0640 "$cert_file" "$key_file"
 
 install -o root -g root -m 0755 stratum_secure_server.py /opt/stratum-secure-server.py
 install -o root -g root -m 0755 stratum_secure_monitor.py /opt/stratum-secure-monitor.py
@@ -113,6 +131,8 @@ with os.fdopen(fd, "w", encoding="utf-8") as handle:
 os.chmod(temporary, 0o600)
 os.replace(temporary, target)
 PY
+chown root:stratum-relay /etc/stratum-secure-relay.json
+chmod 0640 /etc/stratum-secure-relay.json
 
 cat >/etc/systemd/system/stratum-secure-relay.service <<'EOF'
 [Unit]
@@ -128,12 +148,22 @@ Restart=always
 RestartSec=3
 LimitNOFILE=65536
 Environment=PYTHONUNBUFFERED=1
-User=root
+User=stratum-relay
+Group=stratum-relay
+SupplementaryGroups=stratum-proxy
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
 ProtectHome=true
 ProtectSystem=strict
-ReadOnlyPaths=/etc/stratum-v3.json /etc/stratum-secure-relay.json
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+ReadOnlyPaths=/etc/stratum-v3.json /etc/stratum-secure-relay.json /etc/stratum-secure-relay
 ReadWritePaths=/var/lib/stratum-secure-relay
 
 [Install]
@@ -165,7 +195,6 @@ ReadWritePaths=/var/lib/stratum-secure-relay
 WantedBy=multi-user.target
 EOF
 
-install -d -o root -g root -m 0750 /var/lib/stratum-secure-relay
 systemctl daemon-reload
 systemctl enable stratum-secure-relay.service
 systemctl enable stratum-secure-monitor.service
