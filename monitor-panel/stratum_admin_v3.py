@@ -52,6 +52,18 @@ PANEL_VERSION = "3.1.1"
 CURRENT_CLIENT_VERSION = "2.2.1"
 CURRENT_RELAY_VERSION = "2.2.1"
 
+JOURNAL_SERVICES = {
+    "haproxy": "流量转发",
+    "stratum-inspector-v3": "协议检查器",
+    "stratum-endpoint-monitor": "矿池稳定性监控",
+    "stratum-security-monitor": "安全监控",
+    "stratum-route-switch-monitor": "自动线路切换",
+    "stratum-secure-relay": "加密入口",
+    "stratum-secure-monitor": "矿场在线监控",
+    "stratum-admin": "管理面板",
+    "stratum-vps-watchdog": "自动恢复",
+}
+
 app = Flask(__name__)
 app.secret_key = os.environ.get("PANEL_SECRET_KEY", secrets.token_hex(32))
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict", MAX_CONTENT_LENGTH=65536)
@@ -157,16 +169,124 @@ def server_metrics():
     return result
 
 
+def explain_log(message, priority=6):
+    """Turn a technical service message into an administrator-facing diagnosis."""
+    text = str(message or "").strip()
+    lowered = text.lower()
+    rules = [
+        (("recovered", "recovery complete", "恢复正常", "已经恢复", "已恢复"),
+            "服务已经恢复", "无需处理；继续观察是否再次出现同类问题。", "good"),
+        (("address already in use", "port is already allocated", "端口已被占用"),
+            "端口被其他程序占用", "检查是否仍有旧版中转服务在运行；停止重复服务后再重启当前服务。", "bad"),
+        (("certificate", "ssl", "tls", "证书"),
+            "TLS 证书异常", "检查证书是否过期、证书文件路径是否正确，并确认私钥与证书匹配。", "bad"),
+        (("permission denied", "read-only file system", "cannot persist", "权限不足", "只读文件系统"),
+            "服务没有所需的文件权限", "检查服务账户和目录权限；重点确认配置目录及状态目录是否允许该服务读写。", "bad"),
+        (("no space left", "disk full", "磁盘已满", "空间不足"),
+            "VPS 磁盘空间不足", "清理旧日志或扩容磁盘，然后重启受影响的服务。", "bad"),
+        (("jsondecode", "invalid config", "configuration error", "haproxy config", "配置错误", "配置不合法"),
+            "配置文件存在错误", "先查看下方技术详情定位文件和字段；必要时从“配置历史与回滚”恢复最近可用版本。", "bad"),
+        (("invalid token", "missing token", "unauthenticated", "authentication failed", "认证失败", "密钥无效"),
+            "客户端认证被拒绝", "核对值守电脑填写的共享密钥是否属于当前 VPS；偶发陌生来源通常是公网扫描。", "warning"),
+        (("connection refused", "network is unreachable", "name or service not known", "temporary failure in name resolution", "无法连接", "网络不可达"),
+            "目标服务或矿池无法连接", "检查 VPS 网络、DNS、云防火墙和目标矿池地址；若主线路异常，可查看备用线路。", "bad"),
+        (("timed out", "timeout", "超时"),
+            "连接响应超时", "检查 VPS 到矿池的网络质量和延迟；持续出现时切换到已验证的备用地址。", "warning"),
+        (("failed", "error", "exception", "traceback", "fatal", "失败", "异常", "错误"),
+            "服务报告运行错误", "展开技术详情查看具体原因；若问题持续，先查看服务状态和最近配置变更。", "bad"),
+        (("warning", "warn", "retry", "reconnect", "closed", "stale", "重试", "重连", "断开", "离线"),
+            "服务出现需要关注的情况", "观察是否自动恢复；若反复出现，请结合发生时间检查网络和对应服务状态。", "warning"),
+    ]
+    for needles, title, advice, level in rules:
+        if any(needle in lowered for needle in needles):
+            return {"level": level, "title": title, "advice": advice}
+    if int(priority) <= 3:
+        return {"level": "bad", "title": "服务报告严重错误",
+            "advice": "展开技术详情查看原始信息；若服务已经停止，请优先恢复该服务。"}
+    if int(priority) == 4:
+        return {"level": "warning", "title": "服务发出警告",
+            "advice": "观察是否自动恢复；持续出现时联系维护人员并提供下方技术详情。"}
+    return {"level": "normal", "title": "正常运行记录", "advice": "无需处理。"}
+
+
+def parse_journal(raw):
+    entries = []
+    for line in str(raw or "").splitlines():
+        try:
+            record = json.loads(line)
+        except (TypeError, ValueError):
+            record = {"MESSAGE": line, "PRIORITY": 6}
+        message = str(record.get("MESSAGE", "")).strip()
+        if not message:
+            continue
+        unit = str(record.get("_SYSTEMD_UNIT") or record.get("UNIT") or record.get("SYSLOG_IDENTIFIER") or "VPS")
+        unit = unit.removesuffix(".service")
+        try:
+            priority = int(record.get("PRIORITY", 6))
+        except (TypeError, ValueError):
+            priority = 6
+        try:
+            timestamp = int(record.get("__REALTIME_TIMESTAMP", 0)) / 1_000_000
+        except (TypeError, ValueError):
+            timestamp = 0
+        diagnosis = explain_log(message, priority)
+        entries.append({"service": JOURNAL_SERVICES.get(unit, unit), "unit": unit, "timestamp": timestamp,
+            "message": message[:2000], "display_time": beijing_time(timestamp) if timestamp else "时间未知",
+            **diagnosis})
+    return entries
+
+
 def recent_logs():
-    command = ["journalctl", "-u", "haproxy", "-u", "stratum-inspector-v3", "-u", "stratum-endpoint-monitor", "-u", "stratum-security-monitor", "-n", "100", "--no-pager"]
+    command = ["journalctl"]
+    for unit in JOURNAL_SERVICES:
+        command.extend(["-u", unit])
+    command.extend(["--since", "-24 hours", "-n", "300", "--no-pager", "--output=json", "--utc"])
     try:
-        journal = subprocess.run(command, capture_output=True, text=True, timeout=6, check=False).stdout.strip()
+        result = subprocess.run(command, capture_output=True, text=True, timeout=8, check=False)
+        journal = result.stdout.strip()
     except (OSError, subprocess.SubprocessError):
-        journal = "日志暂不可用"
+        journal = ""
+    entries = parse_journal(journal)
+    attention, recovered = [], set()
+    for entry in reversed(entries):
+        if entry["level"] == "good" and entry["title"] == "服务已经恢复":
+            recovered.add(entry["service"])
+        elif entry["level"] in {"bad", "warning"} and entry["service"] not in recovered:
+            attention.append(entry)
     events = []
     if ENDPOINT_EVENT_FILE.exists():
         events = ENDPOINT_EVENT_FILE.read_text(encoding="utf-8", errors="replace").splitlines()[-30:]
-    return {"journal": journal or "暂无服务日志", "events": "\n".join(events) or "暂无报警事件"}
+    readable = "\n".join(f"{entry['display_time']}  {entry['service']}  {entry['message']}" for entry in reversed(entries))
+    return {"journal": readable or "暂时没有读取到 VPS 服务日志", "entries": entries,
+        "attention": attention[:30], "events": "\n".join(events) or "暂无报警事件"}
+
+
+def maintenance_center(services, logs):
+    issues = []
+    for name, state in services.items():
+        if state != "active":
+            issues.append({"service": name, "display_time": "当前状态", "level": "bad",
+                "title": f"{name}没有正常运行", "message": f"systemd 当前状态：{state}",
+                "advice": "先检查该服务的技术详情；确认配置无误后重启服务。"})
+    seen = {(item["service"], item["title"]) for item in issues}
+    for entry in logs.get("attention", []):
+        fingerprint = (entry["service"], entry["title"])
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        issues.append(entry)
+        if len(issues) >= 20:
+            break
+    bad = sum(1 for item in issues if item["level"] == "bad")
+    warning = sum(1 for item in issues if item["level"] == "warning")
+    if bad:
+        level, headline = "danger", f"发现 {bad} 个需要尽快处理的问题"
+    elif warning:
+        level, headline = "warning", f"发现 {warning} 个需要关注的情况"
+    else:
+        level, headline = "good", "当前没有发现需要处理的 VPS 问题"
+    return {"level": level, "headline": headline, "bad": bad, "warning": warning,
+        "issues": issues, "checked": "最近24小时日志和当前服务状态"}
 
 
 def parse_custom_target(value):
@@ -959,6 +1079,7 @@ def build_page_context(page):
     services = {"HAProxy": service_state("haproxy"), "协议检查器": service_state("stratum-inspector-v3"),
         "稳定性监控": service_state("stratum-endpoint-monitor"), "自动切换": service_state("stratum-route-switch-monitor"),
         "安全监控": service_state("stratum-security-monitor"), "加密入口": service_state("stratum-secure-relay"),
+        "矿场在线监控": service_state("stratum-secure-monitor"), "管理面板": service_state("stratum-admin"),
         "自动恢复": service_state("stratum-vps-watchdog.timer")}
     sites = site_overview_rows()
     relay_config = load_json(SECURE_RELAY_CONFIG, {})
@@ -974,9 +1095,10 @@ def build_page_context(page):
     peer_settings = load_peer_settings()
     peer_outbox = load_json(PEER_OUTBOX_FILE, {"items": []})
     access = client_access_context(config) if page == "access" else None
+    logs = recent_logs() if page == "logs" else {"journal": "", "entries": [], "attention": [], "events": ""}
     return dict(page=page, config=config, endpoint_map=endpoint_map, endpoint_rows=rows,
         online=sum(1 for row in rows if row["ok"]), alerting=sum(1 for value in state.get("endpoints", {}).values() if value.get("alerting")),
-        services=services, server=server_metrics(), pools=pools, overview=overview, logs=recent_logs(),
+        services=services, server=server_metrics(), pools=pools, overview=overview, logs=logs,
         alert_settings=alert_settings, wechat_configured=read_env().get("WECHAT_WEBHOOK", "").startswith("https://"),
         legacy_enabled=monitor_enabled(), history=store.history(), audit=audit_rows(),
         disconnect_history=disconnect_history_rows(),
@@ -994,6 +1116,7 @@ def build_page_context(page):
             "route_sync_received": "已接收VPS同步"},
         algorithms={"scrypt": "Scrypt", "sha256d": "SHA-256", "other": "其他/自定义", "unknown": "算法待确认"},
         security=security, sites=sites, reminders=reminders, admin_brief=administrator_brief(overview, services, sites, len([value for value in state.get("endpoints", {}).values() if value.get("alerting")]), reminders),
+        maintenance=maintenance_center(services, logs),
         operation_timeline=operation_timeline(security), panel_version=PANEL_VERSION,
         current_client_version=CURRENT_CLIENT_VERSION, current_relay_version=CURRENT_RELAY_VERSION,
         relay_server_version=(sites[0]["server_version"] if sites else load_json(SECURE_RELAY_STATE, {}).get("server_version", "未上报")),

@@ -199,6 +199,41 @@ class AdminV3Test(unittest.TestCase):
             response = self.client.get("/" + page)
             self.assertEqual(response.status_code, 200, page)
 
+    def test_vps_logs_are_explained_for_nontechnical_administrators(self):
+        raw = json.dumps({"_SYSTEMD_UNIT": "stratum-secure-relay.service", "PRIORITY": "3",
+            "__REALTIME_TIMESTAMP": "1789000000000000", "MESSAGE": "Permission denied while writing state"})
+        with patch.object(admin.subprocess, "run") as run, \
+                patch.object(admin, "service_state", return_value="active"), \
+                patch.object(admin, "detect_relay_public_ip", return_value={"ok": True,
+                    "host": "93.184.216.34", "source": "test", "message": ""}):
+            run.return_value.stdout = raw
+            response = self.client.get("/logs")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("运维问题中心".encode(), response.data)
+        self.assertIn("服务没有所需的文件权限".encode(), response.data)
+        self.assertIn("检查服务账户和目录权限".encode(), response.data)
+        self.assertIn(b"Permission denied while writing state", response.data)
+        command = run.call_args.args[0]
+        self.assertIn("stratum-secure-relay", command)
+        self.assertIn("stratum-vps-watchdog", command)
+
+    def test_maintenance_center_prioritizes_stopped_services(self):
+        center = admin.maintenance_center({"加密入口": "failed", "流量转发": "active"},
+            {"attention": []})
+        self.assertEqual(center["level"], "danger")
+        self.assertEqual(center["bad"], 1)
+        self.assertIn("加密入口没有正常运行", center["issues"][0]["title"])
+
+    def test_recovered_service_does_not_leave_an_old_problem_open(self):
+        records = [
+            {"_SYSTEMD_UNIT": "haproxy.service", "PRIORITY": "3", "MESSAGE": "Connection failed"},
+            {"_SYSTEMD_UNIT": "haproxy.service", "PRIORITY": "5", "MESSAGE": "Service recovered"},
+        ]
+        with patch.object(admin.subprocess, "run") as run:
+            run.return_value.stdout = "\n".join(json.dumps(record) for record in records)
+            logs = admin.recent_logs()
+        self.assertEqual(logs["attention"], [])
+
     def test_administrator_overview_groups_sites_versions_and_expiry(self):
         admin.SECURE_RELAY_CONFIG.write_text(json.dumps({"listen_port": 452, "certificate": "",
             "clients": [{"id": "mine-a", "name": "一号矿场", "token": "a" * 64, "enabled": True}],

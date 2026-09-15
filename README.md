@@ -147,6 +147,8 @@ https://your-vps-name.xxxxx.ts.net/
 
 通过 Tailscale 进入面板后，可以打开“设置 → 客户端接入资料”。这里会显示 Windows 木林森中转需要填写的 VPS 地址、TLS 端口、证书 SHA-256 指纹和各客户端共享密钥。共享密钥默认隐藏，查看或复制都会写入审计日志；证书私钥只留在 VPS，网页不会显示或下载。这个页面要求当前访问本身来自 Tailscale，通过应急密码或 SSH 隧道登录也无法打开。
 
+面板的“日志”页是面向非技术管理员的“运维问题中心”。它会检查当前服务状态和最近 24 小时 VPS 日志，把端口占用、证书、权限、磁盘、配置、网络、超时和认证问题转换成中文处理建议。已经明确恢复的问题不会继续列为待处理；需要技术人员协助时，可以展开并复制原始日志。
+
 ### 5.3 Tailscale 暂时不可用时
 
 可以从 Windows 建立 SSH 隧道：
@@ -451,5 +453,6 @@ GitHub 保存的是程序和部署方法，不保存每台服务器的秘密配�
 ## 详细功能说明
 
 - [V3 管理面板说明](monitor-panel/README.md)
+- [代码审查后的改进路线](docs/improvement-roadmap.md)
 - [木林森 Windows 客户端与 TLS 服务说明](secure-relay/README.md)
 - [域名与 Cloudflare 新手说明](docs/cloudflare-domain-guide.md)
