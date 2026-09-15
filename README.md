@@ -2,6 +2,8 @@
 
 本仓库包含一套可从零部署的矿场 Stratum 中转系统：矿机先连接矿场内的 Windows 值守电脑，电脑再通过 TLS 加密连接 VPS，VPS 最后把流量转发到矿池。
 
+安全漏洞请按 [SECURITY.md](SECURITY.md) 私密报告，不要在公开 Issue 粘贴密钥、真实 IP、证书私钥或日志。
+
 ```text
 矿机
   │  局域网内普通 Stratum
