@@ -1,0 +1,53 @@
+name: Release Windows client
+
+on:
+  push:
+    tags: ["client-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  signed-client:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate release tag and version manifest
+        shell: pwsh
+        run: python scripts/check-version.py $env:GITHUB_REF_NAME
+      - name: Require signing secrets
+        shell: pwsh
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+        run: |
+          if (-not $env:SIGNING_PFX_BASE64 -or -not $env:SIGNING_PFX_PASSWORD) {
+            throw 'Repository signing secrets are not configured; refusing to publish an unsigned client.'
+          }
+      - name: Import signing certificate and build
+        shell: pwsh
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
+          $password = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          $env:WINDOWS_SIGNING_THUMBPRINT = $certificate.Thumbprint
+          ./secure-relay/client/test-client.ps1
+          ./secure-relay/client/build.ps1 -Sign -SigningThumbprint $certificate.Thumbprint
+          $version = (Get-Content version.json -Raw | ConvertFrom-Json).windows_client
+          $file = "secure-relay/client/木林森中转${version}正式版.exe"
+          if ((Get-AuthenticodeSignature -LiteralPath $file).Status -ne 'Valid') { throw 'Authenticode signature validation failed.' }
+          $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $file
+          "{0}  {1}" -f $hash.Hash.ToLowerInvariant(), (Split-Path $file -Leaf) | Set-Content SHA256SUMS.txt -Encoding ascii
+          "RELEASE_FILE=$file" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:GITHUB_REF_NAME $env:RELEASE_FILE SHA256SUMS.txt --verify-tag --generate-notes --title "木林森中转 $env:GITHUB_REF_NAME"

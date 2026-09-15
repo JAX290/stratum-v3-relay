@@ -28,9 +28,6 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Stratum V3 TLS client for mine-site LAN relaying")]
 [assembly: AssemblyCompany("Stratum V3 Relay")]
 [assembly: AssemblyProduct("木林森中转")]
-[assembly: AssemblyVersion("2.2.1.0")]
-[assembly: AssemblyFileVersion("2.2.1.0")]
-
 public static class AppBrand
 {
     public const string Name = "木林森中转";

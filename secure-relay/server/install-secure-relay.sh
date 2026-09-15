@@ -10,6 +10,8 @@ cd "$(dirname "$0")"
 for file in stratum_secure_server.py stratum_secure_monitor.py secure_relay_clients.py; do
   test -f "$file" || { echo "Missing $file" >&2; exit 1; }
 done
+test -f ../../version.json || { echo "Missing repository version.json." >&2; exit 1; }
+test -f ../../monitor-panel/version_info.py || { echo "Missing version_info.py." >&2; exit 1; }
 test -f /etc/stratum-v3.json || { echo "Deploy Stratum V3 first: /etc/stratum-v3.json is missing." >&2; exit 1; }
 test -f /etc/stratum-inspector.json || { echo "Deploy Stratum V3 first: /etc/stratum-inspector.json is missing." >&2; exit 1; }
 id stratum-relay >/dev/null 2>&1 || useradd --system --home /nonexistent --shell /usr/sbin/nologin stratum-relay
@@ -99,6 +101,8 @@ chown root:stratum-relay "$cert_file" "$key_file"
 chmod 0640 "$cert_file" "$key_file"
 
 install -o root -g root -m 0755 stratum_secure_server.py /opt/stratum-secure-server.py
+install -o root -g root -m 0755 ../../monitor-panel/version_info.py /opt/version_info.py
+install -o root -g root -m 0644 ../../version.json /etc/stratum-version.json
 install -o root -g root -m 0755 stratum_secure_monitor.py /opt/stratum-secure-monitor.py
 install -o root -g root -m 0755 secure_relay_clients.py /usr/local/sbin/stratum-relay-client
 token=$(openssl rand -hex 32)
@@ -163,7 +167,7 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 LockPersonality=true
-ReadOnlyPaths=/etc/stratum-v3.json /etc/stratum-secure-relay.json /etc/stratum-secure-relay
+ReadOnlyPaths=/etc/stratum-v3.json /etc/stratum-version.json /etc/stratum-secure-relay.json /etc/stratum-secure-relay
 ReadWritePaths=/var/lib/stratum-secure-relay
 
 [Install]

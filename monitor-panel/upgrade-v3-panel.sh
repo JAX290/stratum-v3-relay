@@ -6,13 +6,14 @@ if [[ $(id -u) -ne 0 ]]; then
   exit 1
 fi
 cd "$(dirname "$0")"
-for file in stratum_admin_v3.py stratum_public_status.py stratum_inspector.py endpoint_monitor.py security_monitor.py v3_manager.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh install-public-status.sh; do
+for file in stratum_admin_v3.py stratum_public_status.py stratum_inspector.py endpoint_monitor.py security_monitor.py v3_manager.py version_info.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh install-public-status.sh; do
   test -f "./$file"
 done
 test -f ./templates/v3_dashboard.html
 test -f ./templates/public_status.html
 test -f ./static/v3.css
 test -f ./static/public.css
+test -f ../version.json
 secure_server="../secure-relay/server/stratum_secure_server.py"
 secure_monitor="../secure-relay/server/stratum_secure_monitor.py"
 test -f "$secure_server" || { echo "Missing $secure_server; update the complete Git repository first." >&2; exit 1; }
@@ -38,14 +39,16 @@ if [[ -f /etc/stratum-v3-peer.json ]]; then cp -a /etc/stratum-v3-peer.json "$ba
 if [[ -f /etc/systemd/system/stratum-vps-watchdog.service ]]; then cp -a /etc/systemd/system/stratum-vps-watchdog.service "$backup/"; fi
 if [[ -f /etc/systemd/system/stratum-vps-watchdog.timer ]]; then cp -a /etc/systemd/system/stratum-vps-watchdog.timer "$backup/"; fi
 
-python3 -m py_compile ./stratum_admin_v3.py ./stratum_public_status.py ./stratum_inspector.py ./endpoint_monitor.py ./security_monitor.py ./v3_manager.py ./route_switch_monitor.py ./vps_watchdog.py "$secure_server" "$secure_monitor"
+python3 -m py_compile ./stratum_admin_v3.py ./stratum_public_status.py ./stratum_inspector.py ./endpoint_monitor.py ./security_monitor.py ./v3_manager.py ./version_info.py ./route_switch_monitor.py ./vps_watchdog.py "$secure_server" "$secure_monitor"
 systemctl stop stratum-security-monitor.service
 systemctl stop stratum-route-switch-monitor.service 2>/dev/null || true
 systemctl stop stratum-vps-watchdog.timer 2>/dev/null || true
 systemctl stop stratum-secure-relay.service
 trap 'systemctl start stratum-secure-relay.service >/dev/null 2>&1 || true; systemctl start stratum-route-switch-monitor.service >/dev/null 2>&1 || true; systemctl start stratum-security-monitor.service >/dev/null 2>&1 || true; systemctl start stratum-vps-watchdog.timer >/dev/null 2>&1 || true' EXIT
 DEBIAN_FRONTEND=noninteractive apt-get install -y gunicorn
-install -m 0755 ./stratum_admin_v3.py ./stratum_public_status.py ./stratum_inspector.py ./endpoint_monitor.py ./security_monitor.py ./v3_manager.py ./route_switch_monitor.py ./vps_watchdog.py ./reset-panel-password.sh ./install-public-status.sh /opt/stratum-admin/
+install -m 0755 ./stratum_admin_v3.py ./stratum_public_status.py ./stratum_inspector.py ./endpoint_monitor.py ./security_monitor.py ./v3_manager.py ./version_info.py ./route_switch_monitor.py ./vps_watchdog.py ./reset-panel-password.sh ./install-public-status.sh /opt/stratum-admin/
+install -o root -g root -m 0755 ./version_info.py /opt/version_info.py
+install -o root -g root -m 0644 ../version.json /etc/stratum-version.json
 if ! grep -q '^TAILSCALE_AUTO_LOGIN=' /etc/stratum-admin.env; then echo 'TAILSCALE_AUTO_LOGIN=1' >>/etc/stratum-admin.env; fi
 install -d -m 0755 /opt/stratum-admin/templates /opt/stratum-admin/static
 install -m 0644 ./templates/v3_dashboard.html /opt/stratum-admin/templates/v3_dashboard.html
@@ -110,7 +113,7 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 LockPersonality=true
-ReadOnlyPaths=/etc/stratum-v3.json /etc/stratum-secure-relay.json /etc/stratum-secure-relay
+ReadOnlyPaths=/etc/stratum-v3.json /etc/stratum-version.json /etc/stratum-secure-relay.json /etc/stratum-secure-relay
 ReadWritePaths=/var/lib/stratum-secure-relay
 
 [Install]
@@ -170,7 +173,7 @@ PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadOnlyPaths=/etc/stratum-v3.json /var/lib/stratum-inspector /var/lib/stratum-monitor
+ReadOnlyPaths=/etc/stratum-v3.json /etc/stratum-version.json /var/lib/stratum-inspector /var/lib/stratum-monitor
 
 [Install]
 WantedBy=multi-user.target
@@ -248,7 +251,7 @@ systemctl restart stratum-secure-monitor.service
 systemctl start stratum-route-switch-monitor.service
 systemctl start stratum-vps-watchdog.timer
 
-PYTHONPATH=/opt/stratum-admin python3 -c "from security_monitor import BASELINE_FILE,atomic_write,load,snapshot; p=['/opt/stratum-admin/stratum_admin_v3.py','/opt/stratum-admin/stratum_public_status.py','/opt/stratum-admin/stratum_inspector.py','/opt/stratum-admin/endpoint_monitor.py','/opt/stratum-admin/security_monitor.py','/opt/stratum-admin/route_switch_monitor.py','/opt/stratum-admin/vps_watchdog.py','/opt/stratum-admin/reset-panel-password.sh','/opt/stratum-admin/install-public-status.sh','/opt/stratum-admin/templates/v3_dashboard.html','/opt/stratum-admin/templates/public_status.html','/opt/stratum-admin/static/v3.css','/opt/stratum-admin/static/public.css','/opt/stratum-secure-server.py','/opt/stratum-secure-monitor.py','/etc/systemd/system/stratum-public-status.service','/etc/systemd/system/stratum-route-switch-monitor.service','/etc/systemd/system/stratum-vps-watchdog.service','/etc/systemd/system/stratum-vps-watchdog.timer','/etc/stratum-v3-peer.json','/etc/stratum-inspector.json','/etc/haproxy/haproxy.cfg']; b=load(BASELINE_FILE,{}); b.update(snapshot(p)); atomic_write(BASELINE_FILE,b)"
+PYTHONPATH=/opt/stratum-admin python3 -c "from security_monitor import BASELINE_FILE,atomic_write,load,snapshot; p=['/opt/stratum-admin/stratum_admin_v3.py','/opt/stratum-admin/stratum_public_status.py','/opt/stratum-admin/stratum_inspector.py','/opt/stratum-admin/endpoint_monitor.py','/opt/stratum-admin/security_monitor.py','/opt/stratum-admin/version_info.py','/opt/stratum-admin/route_switch_monitor.py','/opt/stratum-admin/vps_watchdog.py','/opt/stratum-admin/reset-panel-password.sh','/opt/stratum-admin/install-public-status.sh','/opt/stratum-admin/templates/v3_dashboard.html','/opt/stratum-admin/templates/public_status.html','/opt/stratum-admin/static/v3.css','/opt/stratum-admin/static/public.css','/opt/stratum-secure-server.py','/opt/version_info.py','/opt/stratum-secure-monitor.py','/etc/stratum-version.json','/etc/systemd/system/stratum-public-status.service','/etc/systemd/system/stratum-route-switch-monitor.service','/etc/systemd/system/stratum-vps-watchdog.service','/etc/systemd/system/stratum-vps-watchdog.timer','/etc/stratum-v3-peer.json','/etc/stratum-inspector.json','/etc/haproxy/haproxy.cfg']; b=load(BASELINE_FILE,{}); b.update(snapshot(p)); atomic_write(BASELINE_FILE,b)"
 rm -f "$candidate_inspector" "$candidate_haproxy"
 systemctl start stratum-security-monitor.service
 trap - EXIT

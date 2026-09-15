@@ -18,6 +18,13 @@ import tempfile
 import time
 from pathlib import Path
 
+try:
+    from version_info import load_versions
+except ModuleNotFoundError:
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "monitor-panel"))
+    from version_info import load_versions
+
 
 CONFIG_FILE = Path(os.getenv("SECURE_RELAY_CONFIG", "/etc/stratum-secure-relay.json"))
 V3_CONFIG_FILE = Path(os.getenv("V3_CONFIG_FILE", "/etc/stratum-v3.json"))
@@ -25,7 +32,7 @@ MAX_HEADER = 8192
 DRAIN_TIMEOUT = 120
 INTERNAL_START = 20000
 DEFAULT_STATE_FILE = Path("/var/lib/stratum-secure-relay/sites.json")
-SERVER_VERSION = "2.2.1"
+SERVER_VERSION = load_versions()["secure_relay"]
 CONTROL_FILE = Path(os.getenv("SECURE_RELAY_CONTROL", "/var/lib/stratum-secure-relay/control.json"))
 _v3_cache_key = None
 _v3_cache_value = None

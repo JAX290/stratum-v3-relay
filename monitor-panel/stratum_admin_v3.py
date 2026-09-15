@@ -24,6 +24,7 @@ from werkzeug.security import check_password_hash
 from endpoint_monitor import Notifier, beijing_time, probe_stratum
 from security_monitor import atomic_write as write_integrity, load as load_integrity, snapshot
 from v3_manager import ConfigError, ConfigStore, append_bounded_jsonl, file_lock, render_haproxy_config, render_inspector_config, route_map, validate_config
+from version_info import load_versions
 
 
 CONFIG_FILE = Path(os.getenv("V3_CONFIG_FILE", "/etc/stratum-v3.json"))
@@ -48,9 +49,10 @@ SECURE_RELAY_CONFIG = Path(os.getenv("SECURE_RELAY_CONFIG", "/etc/stratum-secure
 SECURE_RELAY_STATE = Path(os.getenv("SECURE_RELAY_STATE", "/var/lib/stratum-secure-relay/sites.json"))
 SECURE_RELAY_MONITOR_STATE = Path(os.getenv("SECURE_RELAY_MONITOR_STATE", "/var/lib/stratum-secure-relay/monitor.json"))
 SECURE_RELAY_EVENT_FILE = Path(os.getenv("SECURE_RELAY_EVENT_FILE", "/var/lib/stratum-secure-relay/events.jsonl"))
-PANEL_VERSION = "3.1.1"
-CURRENT_CLIENT_VERSION = "2.2.1"
-CURRENT_RELAY_VERSION = "2.2.1"
+VERSIONS = load_versions()
+PANEL_VERSION = VERSIONS["panel"]
+CURRENT_CLIENT_VERSION = VERSIONS["windows_client"]
+CURRENT_RELAY_VERSION = VERSIONS["secure_relay"]
 
 JOURNAL_SERVICES = {
     "haproxy": "流量转发",

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 
 public static class ClientCoreTests
 {
@@ -7,7 +8,7 @@ public static class ClientCoreTests
     private static void Check(bool condition,string name){if(condition)Console.WriteLine("PASS "+name);else{Console.WriteLine("FAIL "+name);failures++;}}
     public static int Main()
     {
-        Check(AppBrand.Version=="2.2.1"&&AppBrand.Title=="木林森中转 v2.2.1","visible application version");
+        Check(Regex.IsMatch(AppBrand.Version,@"^\d+\.\d+\.\d+$")&&AppBrand.Title=="木林森中转 v"+AppBrand.Version,"visible application version");
         List<PortRoute> routes=PortRoute.Parse("9999, 10041=10001");
         Check(routes.Count==2,"route count");
         Check(routes[0].LocalPort==9999&&routes[0].RemotePort==9999,"same-port route");

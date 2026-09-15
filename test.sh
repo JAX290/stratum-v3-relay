@@ -4,6 +4,7 @@ cd "$(dirname "$0")"
 
 python3 -m unittest discover -s monitor-panel -p 'test_*.py'
 python3 -m unittest discover -s secure-relay/server -p 'test_*.py'
+python3 scripts/check-version.py
 
 temporary=$(mktemp -d)
 trap 'rm -rf "$temporary"' EXIT

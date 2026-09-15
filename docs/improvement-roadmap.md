@@ -56,16 +56,17 @@ Python 测试现在可以从仓库根目录启动，不再依赖当前工作目�
 - GitHub Actions 自动运行 Python 测试、Linux 配置渲染与脚本检查、Windows C# 编译和客户端核心测试。
 - CI 基线为 Ubuntu 24.04 / Python 3.12 与 Windows Server 2022 / .NET Framework，Python 开发依赖使用有上限的版本范围。
 
-### 改进版本和发布流程
+### 改进版本和发布流程（已完成）
 
 客户端版本目前同时出现在 C#、Python、测试和文档中，历史 EXE 也直接保存在 Git 历史里。
 
-建议：
+实现：
 
-- 使用单一版本来源生成各组件显示版本。
-- 将二进制放入 GitHub Releases，由自动流程构建、签名并生成 SHA-256。
-- 发布前验证签名、版本、测试结果和升级回滚步骤。
-- 在安装内部代码签名证书前，清楚提示它会修改 Windows 系统级信任存储。
+- 根目录 `version.json` 是面板、TLS 服务和 Windows 客户端的唯一版本来源。
+- `client-vX.Y.Z` 标签触发发布工作流；流程会测试、构建、签名、验证 Authenticode、生成 SHA-256 并创建 GitHub Release。
+- 缺少签名凭据、版本标签不一致、测试或签名失败时拒绝发布。
+- 内部证书安装脚本会先说明它将修改 Windows 系统级信任存储，并要求明确输入 `INSTALL`。
+- 具体操作和 CI 签名证书要求见 `docs/releasing.md`。
 
 ## P3：安全和维护性
 

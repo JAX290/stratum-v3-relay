@@ -6,7 +6,7 @@ if [[ $(id -u) -ne 0 ]]; then
   exit 1
 fi
 
-required=(v3-config.json v3_manager.py endpoint_monitor.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh install-public-status.sh)
+required=(v3-config.json v3_manager.py version_info.py endpoint_monitor.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh install-public-status.sh)
 for file in "${required[@]}"; do
   test -f "./$file" || { echo "Missing $file" >&2; exit 1; }
 done
@@ -14,6 +14,7 @@ test -f ./templates/v3_dashboard.html
 test -f ./templates/public_status.html
 test -f ./static/v3.css
 test -f ./static/public.css
+test -f ../version.json
 
 stamp=$(date +%Y%m%d-%H%M%S)
 backup="/root/stratum-v3-backup-$stamp"
@@ -31,7 +32,8 @@ install -d -m 0755 /opt/stratum-admin/templates /opt/stratum-admin/static
 install -d -o stratum-proxy -g stratum-proxy -m 0750 /var/lib/stratum-inspector
 install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor
 install -d -m 0750 /var/lib/stratum-monitor/history
-install -m 0755 v3_manager.py endpoint_monitor.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh install-public-status.sh /opt/stratum-admin/
+install -m 0755 v3_manager.py version_info.py endpoint_monitor.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh install-public-status.sh /opt/stratum-admin/
+install -o root -g root -m 0644 ../version.json /etc/stratum-version.json
 install -m 0644 templates/v3_dashboard.html /opt/stratum-admin/templates/v3_dashboard.html
 install -m 0644 templates/public_status.html /opt/stratum-admin/templates/public_status.html
 install -m 0644 static/v3.css /opt/stratum-admin/static/v3.css
@@ -225,7 +227,7 @@ PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadOnlyPaths=/etc/stratum-v3.json /var/lib/stratum-inspector /var/lib/stratum-monitor
+ReadOnlyPaths=/etc/stratum-v3.json /etc/stratum-version.json /var/lib/stratum-inspector /var/lib/stratum-monitor
 
 [Install]
 WantedBy=multi-user.target

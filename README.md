@@ -489,5 +489,6 @@ GitHub 保存的是程序和部署方法，不保存每台服务器的秘密配�
 
 - [V3 管理面板说明](monitor-panel/README.md)
 - [代码审查后的改进路线](docs/improvement-roadmap.md)
+- [版本与 GitHub Release 发布流程](docs/releasing.md)
 - [木林森 Windows 客户端与 TLS 服务说明](secure-relay/README.md)
 - [域名与 Cloudflare 新手说明](docs/cloudflare-domain-guide.md)
