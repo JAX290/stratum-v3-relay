@@ -84,6 +84,11 @@ def evaluate_due(now=None, notifier=None):
 
 def flush_peer_outbox(now=None, opener=None, notifier=None):
     """Deliver queued route changes to peer VPS nodes, retaining failures for retry."""
+    with admin.file_lock(admin.PEER_STATE_FILE.parent / "peer-sync"):
+        return _flush_peer_outbox_locked(now=now, opener=opener, notifier=notifier)
+
+
+def _flush_peer_outbox_locked(now=None, opener=None, notifier=None):
     now = int(now or time.time())
     opener = opener or urllib.request.urlopen
     notifier = notifier or Notifier(os.getenv("WECHAT_WEBHOOK", ""), admin.ENDPOINT_EVENT_FILE)

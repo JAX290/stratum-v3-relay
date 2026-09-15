@@ -23,7 +23,7 @@ from werkzeug.security import check_password_hash
 
 from endpoint_monitor import Notifier, beijing_time, probe_stratum
 from security_monitor import atomic_write as write_integrity, load as load_integrity, snapshot
-from v3_manager import ConfigError, ConfigStore, append_bounded_jsonl, render_haproxy_config, render_inspector_config, route_map, validate_config
+from v3_manager import ConfigError, ConfigStore, append_bounded_jsonl, file_lock, render_haproxy_config, render_inspector_config, route_map, validate_config
 
 
 CONFIG_FILE = Path(os.getenv("V3_CONFIG_FILE", "/etc/stratum-v3.json"))
@@ -954,6 +954,9 @@ def save_and_reload(config, action, actor_value=None):
         finally:
             os.unlink(candidate)
     store.save(config, actor=actor_value or actor(), action=action)
+    # A later service-check failure may restore this exact snapshot. Its
+    # compare token must refer to the generation just written above.
+    previous["_generation_token"] = config.get("_generation_token", previous.get("_generation_token"))
     ConfigStore._atomic_write(INSPECTOR_CONFIG, json.dumps(next_inspector, ensure_ascii=False, indent=2) + "\n")
     ConfigStore._atomic_write(HAPROXY_CONFIG, rendered_haproxy, mode=0o644)
     if os.getenv("V3_RELOAD_SERVICES", "0") == "1":
@@ -1327,6 +1330,11 @@ def validate_peer_url(value):
 
 
 def queue_route_sync(config, port, action):
+    with file_lock(PEER_STATE_FILE.parent / "peer-sync"):
+        return _queue_route_sync_locked(config, port, action)
+
+
+def _queue_route_sync_locked(config, port, action):
     settings = load_peer_settings()
     if not settings["enabled"] or len(settings["token"]) < 32 or not settings["peers"]:
         return 0
@@ -1353,6 +1361,11 @@ def queue_route_sync(config, port, action):
 
 
 def apply_peer_payload(payload):
+    with file_lock(PEER_STATE_FILE.parent / "peer-sync"):
+        return _apply_peer_payload_locked(payload)
+
+
+def _apply_peer_payload_locked(payload):
     if not isinstance(payload, dict) or not isinstance(payload.get("endpoint"), dict):
         raise ConfigError("同步数据格式不正确")
     event_id = str(payload.get("event_id", ""))

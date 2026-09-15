@@ -2,6 +2,7 @@
 """Validation, rendering, audit history and atomic apply helpers for V3."""
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -9,7 +10,9 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from ipaddress import ip_address
 from pathlib import Path
 
@@ -21,24 +24,57 @@ ALGORITHMS = {"scrypt", "sha256d", "other", "unknown"}
 HISTORY_LIMIT = int(os.getenv("V3_HISTORY_LIMIT", "50"))
 AUDIT_MAX_BYTES = int(os.getenv("V3_AUDIT_MAX_BYTES", str(8 * 1024 * 1024)))
 AUDIT_KEEP_LINES = int(os.getenv("V3_AUDIT_KEEP_LINES", "5000"))
+_THREAD_LOCKS = {}
+_THREAD_LOCKS_GUARD = threading.Lock()
 
 
 class ConfigError(ValueError):
     pass
 
 
+@contextmanager
+def file_lock(path):
+    """Serialize a complete read/change/write cycle across processes and threads."""
+    lock_path = Path(str(path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _THREAD_LOCKS_GUARD:
+        thread_lock = _THREAD_LOCKS.setdefault(str(lock_path.resolve()), threading.Lock())
+    with thread_lock:
+        with lock_path.open("a+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                if os.name == "nt":
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def append_bounded_jsonl(path, value, maximum_bytes=AUDIT_MAX_BYTES, keep_lines=AUDIT_KEEP_LINES):
     """Append a record and occasionally trim the file without unbounded reads."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(value, ensure_ascii=False) + "\n")
-    if path.stat().st_size <= maximum_bytes:
-        return
-    with path.open("rb") as handle:
-        handle.seek(max(0, path.stat().st_size - maximum_bytes))
-        tail = handle.read().splitlines()[-keep_lines:]
-    ConfigStore._atomic_write(path, b"\n".join(tail).decode("utf-8", errors="ignore") + "\n")
+    with file_lock(path):
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(value, ensure_ascii=False) + "\n")
+        if path.stat().st_size <= maximum_bytes:
+            return
+        with path.open("rb") as handle:
+            handle.seek(max(0, path.stat().st_size - maximum_bytes))
+            tail = handle.read().splitlines()[-keep_lines:]
+        ConfigStore._atomic_write(path, b"\n".join(tail).decode("utf-8", errors="ignore") + "\n")
 
 
 def _public_literal(host):
@@ -192,7 +228,10 @@ class ConfigStore:
         self.audit_path = Path(audit_path)
 
     def load(self):
-        return json.loads(self.config_path.read_text(encoding="utf-8"))
+        with file_lock(self.config_path):
+            config = json.loads(self.config_path.read_text(encoding="utf-8"))
+            config["_generation_token"] = int(config.get("generation", 0) or 0)
+            return config
 
     @staticmethod
     def _atomic_write(path, text, mode=0o640):
@@ -215,16 +254,29 @@ class ConfigStore:
 
     def save(self, config, actor="panel", action="save"):
         validate_config(config)
-        self.history_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = time.strftime("%Y%m%d-%H%M%S") + f"-{time.time_ns() % 1_000_000_000:09d}"
-        if self.config_path.exists():
-            shutil.copy2(self.config_path, self.history_dir / f"{timestamp}.json")
-            history = sorted(self.history_dir.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
-            for expired in history[HISTORY_LIMIT:]:
-                expired.unlink(missing_ok=True)
-        self._atomic_write(self.config_path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
-        append_bounded_jsonl(self.audit_path,
-            {"time": int(time.time()), "actor": actor, "action": action})
+        with file_lock(self.config_path):
+            current_generation = 0
+            if self.config_path.exists():
+                current = json.loads(self.config_path.read_text(encoding="utf-8"))
+                current_generation = int(current.get("generation", 0) or 0)
+            expected = config.get("_generation_token")
+            if expected is not None and int(expected) != current_generation:
+                raise ConfigError("配置已被另一个操作更新，请刷新页面后重试")
+            output = copy.deepcopy(config)
+            output.pop("_generation_token", None)
+            output["generation"] = current_generation + 1
+            self.history_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d-%H%M%S") + f"-{time.time_ns() % 1_000_000_000:09d}"
+            if self.config_path.exists():
+                shutil.copy2(self.config_path, self.history_dir / f"{timestamp}.json")
+                history = sorted(self.history_dir.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+                for expired in history[HISTORY_LIMIT:]:
+                    expired.unlink(missing_ok=True)
+            self._atomic_write(self.config_path, json.dumps(output, ensure_ascii=False, indent=2) + "\n")
+            if expected is not None:
+                config["generation"] = output["generation"]
+                config["_generation_token"] = output["generation"]
+        append_bounded_jsonl(self.audit_path, {"time": int(time.time()), "actor": actor, "action": action})
 
     def history(self):
         if not self.history_dir.exists():
@@ -236,6 +288,7 @@ class ConfigStore:
             raise ConfigError("历史版本名称不合法")
         source = self.history_dir / name
         config = json.loads(source.read_text(encoding="utf-8"))
+        config["_generation_token"] = self.load()["_generation_token"]
         self.save(config, actor=actor, action=f"rollback:{name}")
         return config
 

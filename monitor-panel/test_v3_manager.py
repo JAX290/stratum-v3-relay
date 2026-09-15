@@ -81,6 +81,20 @@ class V3ManagerTest(unittest.TestCase):
             self.assertLessEqual(len(records), 5)
             self.assertEqual(records[-1]["number"], 19)
 
+    def test_stale_loaded_config_cannot_overwrite_newer_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ConfigStore(root / "config.json", root / "history", root / "audit.jsonl")
+            store.save(self.config)
+            first = store.load()
+            stale = store.load()
+            first["templates"][0]["name"] = "first writer"
+            store.save(first)
+            stale["templates"][0]["name"] = "stale writer"
+            with self.assertRaisesRegex(ConfigError, "另一个操作"):
+                store.save(stale)
+            self.assertEqual(store.load()["templates"][0]["name"], "first writer")
+
 
 if __name__ == "__main__":
     unittest.main()
