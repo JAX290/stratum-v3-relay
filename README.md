@@ -104,9 +104,10 @@ chmod +x bootstrap-vps.sh
 
 ```bash
 systemctl is-active haproxy stratum-inspector-v3 stratum-endpoint-monitor stratum-route-switch-monitor stratum-security-monitor stratum-admin
+systemctl is-active stratum-vps-watchdog.timer
 ```
 
-正常时每一行都应显示 `active`。
+正常时每一行都应显示 `active`。`stratum-vps-watchdog.timer` 是 VPS 本机看门狗：每分钟检查一次核心服务；进程崩溃仍由 systemd 在几秒内拉起，进程存在但加密入口、矿机状态采集或面板连续三次无响应时，看门狗只重启对应服务。每个服务重启后有 5 分钟冷却，避免故障循环。
 
 ## 五、通过 Tailscale 打开管理面板
 
@@ -369,6 +370,15 @@ chmod +x install-secure-relay.sh
 重复运行加密入口安装脚本会保留现有端口、证书和客户端密钥。若当前使用的不是 `452`，把命令中的端口改为实际端口。
 
 两台 VPS 都要执行升级。升级会重启相关服务，现有矿机连接可能短暂断开并自动重连，建议逐台升级：先升级备用 VPS 并验证，再升级另一台。
+
+升级后可查看最近的本机自恢复记录：
+
+```bash
+cat /var/lib/stratum-monitor/vps-watchdog.json
+systemctl list-timers stratum-vps-watchdog.timer
+```
+
+其中 `restarted` 表示看门狗确认连续异常后执行过恢复，`restart_failed` 表示恢复命令本身失败。看门狗的本地 TLS 探测不会更新矿场心跳，因此不会掩盖真正的值守电脑离线。
 
 ## 十四、常用检查与故障处理
 

@@ -18,10 +18,27 @@ HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0
 RESERVED_PORTS = {10000, 10003}
 SENSITIVE_PORTS = {21, 22, 23, 25, 53, 110, 135, 139, 445, 1433, 2375, 3306, 3389, 5432, 6379, 9200, 11211, 27017}
 ALGORITHMS = {"scrypt", "sha256d", "other", "unknown"}
+HISTORY_LIMIT = int(os.getenv("V3_HISTORY_LIMIT", "50"))
+AUDIT_MAX_BYTES = int(os.getenv("V3_AUDIT_MAX_BYTES", str(8 * 1024 * 1024)))
+AUDIT_KEEP_LINES = int(os.getenv("V3_AUDIT_KEEP_LINES", "5000"))
 
 
 class ConfigError(ValueError):
     pass
+
+
+def append_bounded_jsonl(path, value, maximum_bytes=AUDIT_MAX_BYTES, keep_lines=AUDIT_KEEP_LINES):
+    """Append a record and occasionally trim the file without unbounded reads."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(value, ensure_ascii=False) + "\n")
+    if path.stat().st_size <= maximum_bytes:
+        return
+    with path.open("rb") as handle:
+        handle.seek(max(0, path.stat().st_size - maximum_bytes))
+        tail = handle.read().splitlines()[-keep_lines:]
+    ConfigStore._atomic_write(path, b"\n".join(tail).decode("utf-8", errors="ignore") + "\n")
 
 
 def _public_literal(host):
@@ -202,10 +219,12 @@ class ConfigStore:
         timestamp = time.strftime("%Y%m%d-%H%M%S") + f"-{time.time_ns() % 1_000_000_000:09d}"
         if self.config_path.exists():
             shutil.copy2(self.config_path, self.history_dir / f"{timestamp}.json")
+            history = sorted(self.history_dir.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+            for expired in history[HISTORY_LIMIT:]:
+                expired.unlink(missing_ok=True)
         self._atomic_write(self.config_path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
-        self.audit_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.audit_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"time": int(time.time()), "actor": actor, "action": action}, ensure_ascii=False) + "\n")
+        append_bounded_jsonl(self.audit_path,
+            {"time": int(time.time()), "actor": actor, "action": action})
 
     def history(self):
         if not self.history_dir.exists():

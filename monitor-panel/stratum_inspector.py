@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import time
+import math
 from collections import defaultdict, deque
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,10 @@ WORKER_RETENTION = int(os.getenv("WORKER_RETENTION", "604800"))
 MAX_DISCONNECTED_DETAILS = int(os.getenv("MAX_DISCONNECTED_DETAILS", "20"))
 PENDING_SHARE_RETENTION = int(os.getenv("PENDING_SHARE_RETENTION", "600"))
 MAX_PENDING_SHARES = int(os.getenv("MAX_PENDING_SHARES", "512"))
+DRAIN_TIMEOUT = max(1, int(os.getenv("DRAIN_TIMEOUT", "120")))
+HASHRATE_BUCKET_SECONDS = max(1, int(os.getenv("HASHRATE_BUCKET_SECONDS", "10")))
+MAX_HASHRATE_BUCKETS = max(2, math.ceil(HASHRATE_WINDOW / HASHRATE_BUCKET_SECONDS) + 2)
+MAX_WORKER_SOURCES = max(1, int(os.getenv("MAX_WORKER_SOURCES", "256")))
 DISCONNECT_HISTORY_DIR = Path(os.getenv("DISCONNECT_HISTORY_DIR", "/var/lib/stratum-inspector/history"))
 DISCONNECT_HISTORY_DAYS = int(os.getenv("DISCONNECT_HISTORY_DAYS", "7"))
 DISCONNECT_HISTORY_FILE_BYTES = int(os.getenv("DISCONNECT_HISTORY_FILE_BYTES", str(32 * 1024 * 1024)))
@@ -88,6 +93,17 @@ def error_message(value):
     return str(value or "unknown rejection")[:160]
 
 
+async def close_writer(writer):
+    """Close a TCP/TLS writer without allowing a broken peer to stall cleanup."""
+    if writer is None:
+        return
+    writer.close()
+    try:
+        await asyncio.wait_for(writer.wait_closed(), timeout=5)
+    except (ConnectionError, OSError, asyncio.TimeoutError):
+        pass
+
+
 class Inspector:
     def __init__(self, relay=None):
         self.relay = relay or load_relays()[0]
@@ -122,6 +138,9 @@ class Inspector:
         return self.workers[name]
 
     async def handle(self, client_reader, client_writer):
+        if self.semaphore.locked():
+            await close_writer(client_writer)
+            return
         async with self.semaphore:
             self.connection_counter += 1
             connection_id = str(self.connection_counter)
@@ -132,14 +151,12 @@ class Inspector:
                     header = await asyncio.wait_for(client_reader.readline(), timeout=3)
                     fields = header.decode("ascii", errors="strict").strip().split()
                     if len(fields) != 6 or fields[0] != "PROXY" or fields[1] not in {"TCP4", "TCP6"}:
-                        client_writer.close()
-                        await client_writer.wait_closed()
+                        await close_writer(client_writer)
                         return
                     peer = (fields[2], int(fields[4]))
                     public_port = int(fields[5])
                 except (OSError, ValueError, UnicodeError, asyncio.TimeoutError):
-                    client_writer.close()
-                    await client_writer.wait_closed()
+                    await close_writer(client_writer)
                     return
             connection = {
                 "id": connection_id,
@@ -201,12 +218,8 @@ class Inspector:
                     self.archive_disconnect(connection)
                     self.prune_worker_connections(worker, connection["disconnected_at"])
                 self.connections.pop(connection_id, None)
-                if upstream_writer:
-                    upstream_writer.close()
-                client_writer.close()
-                if upstream_writer:
-                    await upstream_writer.wait_closed()
-                await client_writer.wait_closed()
+                await close_writer(upstream_writer)
+                await close_writer(client_writer)
 
     async def pipe(self, reader, writer, connection, from_miner):
         buffer = b""
@@ -234,7 +247,7 @@ class Inspector:
             if len(buffer) > 1024 * 1024:
                 buffer = b""
             writer.write(data)
-            await writer.drain()
+            await asyncio.wait_for(writer.drain(), timeout=DRAIN_TIMEOUT)
 
     def attach_worker(self, connection, name):
         name = str(name)[:200]
@@ -251,7 +264,10 @@ class Inspector:
             old_worker["connections"].pop(connection["id"], None)
         connection["worker"] = name
         worker = self.worker(name)
-        worker["sources"].add(connection["source_ip"])
+        source_ip = connection["source_ip"]
+        if source_ip not in worker["sources"] and len(worker["sources"]) >= MAX_WORKER_SOURCES:
+            worker["sources"].pop()
+        worker["sources"].add(source_ip)
         worker["active_connections"].add(connection["id"])
         worker["connections"][connection["id"]] = connection
         worker["last_seen"] = time.time()
@@ -404,7 +420,15 @@ class Inspector:
         if accepted:
             worker["accepted"] += 1
             connection["accepted"] += 1
-            self.accepted_events[worker["name"]].append((time.time(), pending["difficulty"]))
+            events = self.accepted_events[worker["name"]]
+            now = time.time()
+            bucket = int(now // HASHRATE_BUCKET_SECONDS) * HASHRATE_BUCKET_SECONDS
+            if events and events[-1][0] == bucket:
+                events[-1] = (bucket, events[-1][1] + pending["difficulty"])
+            else:
+                events.append((bucket, pending["difficulty"]))
+            while len(events) > MAX_HASHRATE_BUCKETS:
+                events.popleft()
         else:
             worker["rejected"] += 1
             worker["last_error"] = error_message(message.get("error"))
@@ -595,9 +619,7 @@ class Inspector:
             self.upstream_ok = False
             self.upstream_latency_ms = None
         finally:
-            if writer:
-                writer.close()
-                await writer.wait_closed()
+            await close_writer(writer)
 
 async def write_state(inspectors):
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -681,6 +703,7 @@ async def main():
             inspector.handle,
             inspector.relay["listen_host"],
             inspector.relay["listen_port"],
+            limit=8192,
         )
         servers.append(server)
     state_task = asyncio.create_task(write_state(inspectors))
@@ -691,13 +714,23 @@ async def main():
         loop.add_signal_handler(sig, stop.set)
     for server in servers:
         await server.start_serving()
-    await stop.wait()
+    stop_task = asyncio.create_task(stop.wait())
+    done, _ = await asyncio.wait(
+        (stop_task, state_task, config_task), return_when=asyncio.FIRST_COMPLETED
+    )
+    failure = None
+    for task in (state_task, config_task):
+        if task in done and not task.cancelled():
+            failure = task.exception() or RuntimeError("critical inspector background task stopped")
+            break
     for server in servers:
         server.close()
     await asyncio.gather(*(server.wait_closed() for server in servers))
-    state_task.cancel()
-    config_task.cancel()
-    await asyncio.gather(state_task, config_task, return_exceptions=True)
+    for task in (stop_task, state_task, config_task):
+        task.cancel()
+    await asyncio.gather(stop_task, state_task, config_task, return_exceptions=True)
+    if failure:
+        raise failure
 
 
 if __name__ == "__main__":

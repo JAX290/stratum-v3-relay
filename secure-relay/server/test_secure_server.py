@@ -30,6 +30,12 @@ class SecureServerTests(unittest.TestCase):
         self.assertIsNone(port)
         self.assertEqual(token, "abcdef")
 
+    def test_only_loopback_watchdog_health_is_excluded_from_site_heartbeat(self):
+        headers = {"x-health-origin": "vps-watchdog"}
+        self.assertTrue(secure.is_local_watchdog(None, headers, ("127.0.0.1", 1234)))
+        self.assertFalse(secure.is_local_watchdog(None, headers, ("198.51.100.1", 1234)))
+        self.assertFalse(secure.is_local_watchdog(9999, headers, ("127.0.0.1", 1234)))
+
     def test_multiple_client_authentication(self):
         config = {"clients": [
             {"id": "mine-a", "name": "矿场A", "token": "a" * 64, "enabled": True},

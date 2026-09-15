@@ -24,6 +24,8 @@ from pathlib import Path
 CONFIG_FILE = Path(os.getenv("V3_CONFIG_FILE", "/etc/stratum-v3.json"))
 STATE_FILE = Path(os.getenv("ENDPOINT_STATE_FILE", "/var/lib/stratum-monitor/endpoints.json"))
 EVENT_FILE = Path(os.getenv("ENDPOINT_EVENT_FILE", "/var/log/stratum-endpoints.jsonl"))
+EVENT_MAX_BYTES = int(os.getenv("ENDPOINT_EVENT_MAX_BYTES", str(8 * 1024 * 1024)))
+EVENT_KEEP_LINES = int(os.getenv("ENDPOINT_EVENT_KEEP_LINES", "5000"))
 BEIJING = ZoneInfo("Asia/Shanghai")
 
 
@@ -351,9 +353,20 @@ class Notifier:
         self.event_path = event_path
 
     def __call__(self, event):
-        self.event_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.event_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+        try:
+            self.event_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.event_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+            if self.event_path.stat().st_size > EVENT_MAX_BYTES:
+                with self.event_path.open("rb") as handle:
+                    handle.seek(max(0, self.event_path.stat().st_size - EVENT_MAX_BYTES))
+                    tail = handle.read().splitlines()[-EVENT_KEEP_LINES:]
+                temporary = self.event_path.with_suffix(".tmp")
+                temporary.write_bytes(b"\n".join(tail) + b"\n")
+                os.replace(temporary, self.event_path)
+        except OSError:
+            # Logging must not take endpoint monitoring or route recovery down.
+            pass
         if not self.webhook.startswith("https://"):
             return
         content = self.format_message(event)

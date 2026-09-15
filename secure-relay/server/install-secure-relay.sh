@@ -119,12 +119,15 @@ cat >/etc/systemd/system/stratum-secure-relay.service <<'EOF'
 Description=Stratum V3 encrypted TLS ingress
 After=network-online.target stratum-inspector-v3.service
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /opt/stratum-secure-server.py
 Restart=always
 RestartSec=3
+LimitNOFILE=65536
+Environment=PYTHONUNBUFFERED=1
 User=root
 NoNewPrivileges=true
 PrivateTmp=true
@@ -142,12 +145,14 @@ cat >/etc/systemd/system/stratum-secure-monitor.service <<'EOF'
 Description=Stratum secure relay mine-site heartbeat monitor
 After=network-online.target stratum-secure-relay.service
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /opt/stratum-secure-monitor.py
 Restart=always
 RestartSec=10
+Environment=PYTHONUNBUFFERED=1
 User=root
 NoNewPrivileges=true
 PrivateTmp=true

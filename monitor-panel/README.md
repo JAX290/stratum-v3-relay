@@ -78,7 +78,8 @@ chmod +x bootstrap-vps.sh
 3. 写入企业微信机器人 Webhook；
 4. 安装 V3 中转、检查器、报警和管理面板服务；
 5. 启用 systemd 自启动；
-6. 初始化受保护文件基线。
+6. 安装每分钟运行一次的 VPS 本机健康看门狗；
+7. 初始化受保护文件基线。
 
 这个脚本只安装 V3 转发和管理面板。需要 Windows 值守电脑通过 TLS 加密接入时，部署完成后还要继续执行根目录说明中的“安装 TLS 加密入口”。
 
@@ -323,7 +324,7 @@ tail -n 50 /var/log/stratum-audit.jsonl
 
 ### VPS 内存持续增长
 
-新版检查器会保留累计 Worker 和 Share 统计，但内存中每个 Worker 最多只保留最近 20 条断线连接明细，由第 21 条挤掉最早一条；未收到矿池响应的 Share 请求也有数量和时间上限。全部断线事件另外按天写入 `/var/lib/stratum-inspector/history/`，最多保留 7 天，可在面板“日志 -> 最近7天断线明细”下载。单个文件达到 32 MB 时自动分段，总容量最多 256 MB，防止异常重连写满磁盘。
+新版检查器会保留累计 Worker 和 Share 统计，但算力估算使用的已接受 Share 按 10 秒汇总，每个 Worker 只保留固定数量的时间桶，不再为每个 Share 长期创建一个内存对象。每个 Worker 最多保留 256 个历史来源 IP 和最近 20 条断线连接明细；未收到矿池响应的 Share 请求也有数量和时间上限。全部断线事件另外按天写入 `/var/lib/stratum-inspector/history/`，最多保留 7 天，可在面板“日志 -> 最近7天断线明细”下载。单个文件达到 32 MB 时自动分段，总容量最多 256 MB，防止异常重连写满磁盘。配置审计和事件文件达到 8 MB 后会自动保留最近 5000 条，配置文件历史最多保留 50 份。
 
 查看各服务当前内存：
 
@@ -335,6 +336,18 @@ du -h /var/lib/stratum-inspector/state.json /var/lib/stratum-monitor/*.json* 2>/
 ```
 
 如果 `stratum-inspector-v3` 持续增长，升级完整仓库后执行 `monitor-panel/upgrade-v3-panel.sh`。脚本会重启检查器并立即释放旧历史内存，矿机会短暂重连。
+
+### 无人值守时的自动恢复
+
+所有核心服务都设置为开机启动并持续自动重启，且不再因短时间连续失败而永久进入停止状态。加密入口和协议检查器的文件句柄上限提高到 65536，可承受上千条 TCP 连接所需的双向套接字。后台状态任务如果意外退出，会让主进程主动退出，随后由 systemd 重启，避免出现服务显示 `active`、状态却不再更新的假运行状态。
+
+`stratum-vps-watchdog.timer` 每分钟执行本机检查。单次失败只记录，连续三次失败才重启对应模块；矿池本身不可达不会触发整个 VPS 重启。查看记录：
+
+```bash
+systemctl status stratum-vps-watchdog.timer
+cat /var/lib/stratum-monitor/vps-watchdog.json
+journalctl -u stratum-vps-watchdog.service -n 50 --no-pager
+```
 
 ## 本地测试
 

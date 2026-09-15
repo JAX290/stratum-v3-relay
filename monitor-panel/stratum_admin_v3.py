@@ -23,7 +23,7 @@ from werkzeug.security import check_password_hash
 
 from endpoint_monitor import Notifier, beijing_time, probe_stratum
 from security_monitor import atomic_write as write_integrity, load as load_integrity, snapshot
-from v3_manager import ConfigError, ConfigStore, render_haproxy_config, render_inspector_config, route_map, validate_config
+from v3_manager import ConfigError, ConfigStore, append_bounded_jsonl, render_haproxy_config, render_inspector_config, route_map, validate_config
 
 
 CONFIG_FILE = Path(os.getenv("V3_CONFIG_FILE", "/etc/stratum-v3.json"))
@@ -48,9 +48,9 @@ SECURE_RELAY_CONFIG = Path(os.getenv("SECURE_RELAY_CONFIG", "/etc/stratum-secure
 SECURE_RELAY_STATE = Path(os.getenv("SECURE_RELAY_STATE", "/var/lib/stratum-secure-relay/sites.json"))
 SECURE_RELAY_MONITOR_STATE = Path(os.getenv("SECURE_RELAY_MONITOR_STATE", "/var/lib/stratum-secure-relay/monitor.json"))
 SECURE_RELAY_EVENT_FILE = Path(os.getenv("SECURE_RELAY_EVENT_FILE", "/var/lib/stratum-secure-relay/events.jsonl"))
-PANEL_VERSION = "3.1.0"
-CURRENT_CLIENT_VERSION = "2.2.0"
-CURRENT_RELAY_VERSION = "2.2.0"
+PANEL_VERSION = "3.1.1"
+CURRENT_CLIENT_VERSION = "2.2.1"
+CURRENT_RELAY_VERSION = "2.2.1"
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("PANEL_SECRET_KEY", secrets.token_hex(32))
@@ -342,9 +342,8 @@ def current_tailscale_admin():
 def append_audit(action):
     """Record a sensitive read without changing or backing up the main config."""
     try:
-        AUDIT_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with AUDIT_FILE.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"time": int(time.time()), "actor": actor(), "action": action}, ensure_ascii=False) + "\n")
+        append_bounded_jsonl(AUDIT_FILE,
+            {"time": int(time.time()), "actor": actor(), "action": action})
     except OSError:
         app.logger.exception("cannot append audit record")
 
@@ -959,7 +958,8 @@ def build_page_context(page):
     overview = overview_summary(pools)
     services = {"HAProxy": service_state("haproxy"), "协议检查器": service_state("stratum-inspector-v3"),
         "稳定性监控": service_state("stratum-endpoint-monitor"), "自动切换": service_state("stratum-route-switch-monitor"),
-        "安全监控": service_state("stratum-security-monitor"), "加密入口": service_state("stratum-secure-relay")}
+        "安全监控": service_state("stratum-security-monitor"), "加密入口": service_state("stratum-secure-relay"),
+        "自动恢复": service_state("stratum-vps-watchdog.timer")}
     sites = site_overview_rows()
     relay_config = load_json(SECURE_RELAY_CONFIG, {})
     certificate = certificate_summary(relay_config.get("certificate", "")) if relay_config else {"available": False, "name": "", "fingerprint": "", "expires": "", "days_left": None}

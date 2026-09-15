@@ -13,6 +13,8 @@ CONFIG_FILE = Path(os.getenv("SECURE_RELAY_CONFIG", "/etc/stratum-secure-relay.j
 STATE_FILE = Path(os.getenv("SECURE_RELAY_STATE", "/var/lib/stratum-secure-relay/sites.json"))
 MONITOR_FILE = Path(os.getenv("SECURE_RELAY_MONITOR_STATE", "/var/lib/stratum-secure-relay/monitor.json"))
 EVENT_FILE = Path(os.getenv("SECURE_RELAY_EVENT_FILE", "/var/lib/stratum-secure-relay/events.jsonl"))
+EVENT_MAX_BYTES = int(os.getenv("SECURE_RELAY_EVENT_MAX_BYTES", str(8 * 1024 * 1024)))
+EVENT_KEEP_LINES = int(os.getenv("SECURE_RELAY_EVENT_KEEP_LINES", "5000"))
 ENV_FILE = Path("/etc/stratum-v3.env")
 
 
@@ -60,6 +62,14 @@ def append_event(kind, client_id, name, message, now, site=None):
         handle.write(json.dumps({"time": int(now), "type": kind, "client_id": client_id,
             "site": name, "message": message, "miner_count": int(site.get("last_miner_count", site.get("miner_count", 0)) or 0),
             "connections": int(site.get("active", 0) or 0)}, ensure_ascii=False) + "\n")
+    if EVENT_FILE.stat().st_size > EVENT_MAX_BYTES:
+        with EVENT_FILE.open("rb") as handle:
+            handle.seek(max(0, EVENT_FILE.stat().st_size - EVENT_MAX_BYTES))
+            tail = handle.read().splitlines()[-EVENT_KEEP_LINES:]
+        temporary = EVENT_FILE.with_suffix(".tmp")
+        temporary.write_bytes(b"\n".join(tail) + b"\n")
+        os.chmod(temporary, 0o640)
+        os.replace(temporary, EVENT_FILE)
 
 
 def check_once(now=None):

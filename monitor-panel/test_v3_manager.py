@@ -2,8 +2,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from v3_manager import ConfigError, ConfigStore, render_haproxy_config, render_inspector_config, route_map, validate_config
+from v3_manager import ConfigError, ConfigStore, append_bounded_jsonl, render_haproxy_config, render_inspector_config, route_map, validate_config
 
 
 class V3ManagerTest(unittest.TestCase):
@@ -62,6 +63,23 @@ class V3ManagerTest(unittest.TestCase):
             self.assertEqual(len(history), 1)
             restored = store.rollback(history[0])
             self.assertEqual(restored["templates"][0]["name"], self.config["templates"][0]["name"])
+
+    def test_history_and_audit_files_are_bounded(self):
+        with tempfile.TemporaryDirectory() as directory, patch("v3_manager.HISTORY_LIMIT", 3):
+            root = Path(directory)
+            store = ConfigStore(root / "config.json", root / "history", root / "audit.jsonl")
+            for number in range(10):
+                config = json.loads(json.dumps(self.config))
+                config["templates"][0]["name"] = f"Changed {number}"
+                store.save(config)
+            self.assertEqual(len(store.history()), 3)
+            log = root / "bounded.jsonl"
+            for number in range(20):
+                append_bounded_jsonl(log, {"number": number, "message": "x" * 40},
+                    maximum_bytes=240, keep_lines=3)
+            records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+            self.assertLessEqual(len(records), 5)
+            self.assertEqual(records[-1]["number"], 19)
 
 
 if __name__ == "__main__":

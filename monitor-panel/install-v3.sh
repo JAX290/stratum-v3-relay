@@ -6,7 +6,7 @@ if [[ $(id -u) -ne 0 ]]; then
   exit 1
 fi
 
-required=(v3-config.json v3_manager.py endpoint_monitor.py security_monitor.py stratum_inspector.py stratum_admin_v3.py route_switch_monitor.py reset-panel-password.sh)
+required=(v3-config.json v3_manager.py endpoint_monitor.py security_monitor.py stratum_inspector.py stratum_admin_v3.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh)
 for file in "${required[@]}"; do
   test -f "./$file" || { echo "Missing $file" >&2; exit 1; }
 done
@@ -29,7 +29,7 @@ install -d -m 0755 /opt/stratum-admin/templates /opt/stratum-admin/static
 install -d -o stratum-proxy -g stratum-proxy -m 0750 /var/lib/stratum-inspector
 install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor
 install -d -m 0750 /var/lib/stratum-monitor/history
-install -m 0755 v3_manager.py endpoint_monitor.py security_monitor.py stratum_inspector.py stratum_admin_v3.py route_switch_monitor.py reset-panel-password.sh /opt/stratum-admin/
+install -m 0755 v3_manager.py endpoint_monitor.py security_monitor.py stratum_inspector.py stratum_admin_v3.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh /opt/stratum-admin/
 install -m 0644 templates/v3_dashboard.html /opt/stratum-admin/templates/v3_dashboard.html
 install -m 0644 static/v3.css /opt/stratum-admin/static/v3.css
 install -m 0640 v3-config.json /etc/stratum-v3.json
@@ -59,6 +59,7 @@ cat >/etc/systemd/system/stratum-inspector-v3.service <<'EOF'
 Description=Stratum V3 transparent protocol inspector
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -69,6 +70,8 @@ Environment=STATE_FILE=/var/lib/stratum-inspector/state.json
 ExecStart=/usr/bin/python3 /opt/stratum-admin/stratum_inspector.py
 Restart=always
 RestartSec=2
+LimitNOFILE=65536
+Environment=PYTHONUNBUFFERED=1
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -85,6 +88,7 @@ cat >/etc/systemd/system/stratum-endpoint-monitor.service <<'EOF'
 Description=Stratum endpoint health and stability monitor
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -97,6 +101,7 @@ Environment=ENDPOINT_EVENT_FILE=/var/lib/stratum-monitor/endpoint-events.jsonl
 ExecStart=/usr/bin/python3 /opt/stratum-admin/endpoint_monitor.py
 Restart=always
 RestartSec=3
+Environment=PYTHONUNBUFFERED=1
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -112,6 +117,7 @@ cat >/etc/systemd/system/stratum-security-monitor.service <<'EOF'
 [Unit]
 Description=Stratum independent integrity monitor
 After=stratum-inspector-v3.service stratum-endpoint-monitor.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -121,6 +127,7 @@ EnvironmentFile=-/etc/stratum-v3.env
 ExecStart=/usr/bin/python3 /opt/stratum-admin/security_monitor.py
 Restart=always
 RestartSec=3
+Environment=PYTHONUNBUFFERED=1
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=read-only
@@ -134,6 +141,7 @@ cat >/etc/systemd/system/stratum-route-switch-monitor.service <<'EOF'
 Description=Stratum timed single-miner route switch monitor
 After=network-online.target stratum-inspector-v3.service stratum-secure-relay.service
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -148,6 +156,7 @@ Environment=V3_RELOAD_SERVICES=1
 ExecStart=/usr/bin/python3 /opt/stratum-admin/route_switch_monitor.py
 Restart=always
 RestartSec=3
+Environment=PYTHONUNBUFFERED=1
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
@@ -163,6 +172,7 @@ cat >/etc/systemd/system/stratum-admin.service <<'EOF'
 Description=Stratum V3 administration panel
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -176,6 +186,7 @@ Environment=V3_RELOAD_SERVICES=1
 ExecStart=/usr/bin/python3 /opt/stratum-admin/stratum_admin_v3.py
 Restart=always
 RestartSec=3
+Environment=PYTHONUNBUFFERED=1
 User=root
 Group=root
 NoNewPrivileges=true
@@ -186,10 +197,44 @@ ProtectHome=read-only
 WantedBy=multi-user.target
 EOF
 
+cat >/etc/systemd/system/stratum-vps-watchdog.service <<'EOF'
+[Unit]
+Description=Stratum VPS local health and recovery watchdog
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/stratum-admin/vps_watchdog.py
+TimeoutStartSec=90
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/stratum-monitor
+EOF
+
+cat >/etc/systemd/system/stratum-vps-watchdog.timer <<'EOF'
+[Unit]
+Description=Run Stratum VPS watchdog every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+RandomizedDelaySec=10
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
 systemctl daemon-reload
 systemctl enable --now stratum-inspector-v3.service
 systemctl enable --now stratum-endpoint-monitor.service
 systemctl enable --now stratum-route-switch-monitor.service
+systemctl enable --now stratum-vps-watchdog.timer
 
 # Existing public listeners are released only after internal V3 listeners pass checks.
 systemctl disable --now stratum-inspector.service 2>/dev/null || true
@@ -200,5 +245,5 @@ systemctl restart stratum-admin.service
 
 python3 /opt/stratum-admin/security_monitor.py --initialize
 systemctl enable --now stratum-security-monitor.service
-systemctl --no-pager --full status stratum-inspector-v3.service stratum-endpoint-monitor.service stratum-route-switch-monitor.service stratum-security-monitor.service stratum-admin.service haproxy
+systemctl --no-pager --full status stratum-inspector-v3.service stratum-endpoint-monitor.service stratum-route-switch-monitor.service stratum-security-monitor.service stratum-admin.service stratum-vps-watchdog.timer haproxy
 echo "V3 installed. Backup: $backup"

@@ -142,6 +142,35 @@ class InspectorProtocolTest(unittest.TestCase):
                     "params": ["owner.pending", "job", "nonce"]})
         self.assertEqual(len(connection["pending"]), 8)
 
+    def test_hashrate_samples_are_aggregated_into_bounded_time_buckets(self):
+        inspector = Inspector()
+        connection = {
+            "id": "shares", "source_ip": "192.0.2.42", "source_port": 52001,
+            "connected_at": 1, "worker": "", "agent": "Miner", "difficulty": 1,
+            "pending": {}, "authorized_worker": "owner.shares", "jobs": set(),
+            "submitted": 0, "accepted": 0, "rejected": 0,
+            "latency_total_ms": 0, "latency_samples": 0,
+        }
+        inspector.attach_worker(connection, "owner.shares")
+        with patch("stratum_inspector.time.time", return_value=1000):
+            for number in range(1000):
+                connection["pending"][json.dumps(number)] = {
+                    "started": 999, "difficulty": 2, "worker": "owner.shares"
+                }
+                inspector.from_pool(connection, {"id": number, "result": True, "error": None})
+        self.assertEqual(len(inspector.accepted_events["owner.shares"]), 1)
+        self.assertEqual(inspector.accepted_events["owner.shares"][0][1], 2000)
+
+    def test_worker_source_history_is_bounded(self):
+        inspector = Inspector()
+        with patch("stratum_inspector.MAX_WORKER_SOURCES", 8):
+            for number in range(40):
+                connection = {"id": str(number), "source_ip": f"192.0.2.{number + 1}",
+                    "source_port": 53000 + number, "connected_at": 1, "worker": "", "agent": "Miner",
+                    "difficulty": 1, "pending": {}, "authorized_worker": "", "jobs": set()}
+                inspector.attach_worker(connection, "owner.sources")
+        self.assertEqual(len(inspector.workers["owner.sources"]["sources"]), 8)
+
     def test_disconnect_history_is_written_without_credentials(self):
         inspector = Inspector()
         with tempfile.TemporaryDirectory() as folder, \

@@ -8,7 +8,7 @@ fi
 
 cd "$(dirname "$0")"
 
-for file in install-v3.sh v3-config.json v3_manager.py endpoint_monitor.py security_monitor.py stratum_inspector.py stratum_admin_v3.py reset-panel-password.sh templates/v3_dashboard.html static/v3.css; do
+for file in install-v3.sh v3-config.json v3_manager.py endpoint_monitor.py security_monitor.py stratum_inspector.py stratum_admin_v3.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh templates/v3_dashboard.html static/v3.css; do
   test -f "./$file" || { echo "Missing $file" >&2; exit 1; }
 done
 
@@ -89,7 +89,8 @@ cat <<'EOF'
 Bootstrap complete.
 
 Next checks:
-  systemctl is-active haproxy stratum-inspector-v3 stratum-endpoint-monitor stratum-security-monitor stratum-admin
+  systemctl is-active haproxy stratum-inspector-v3 stratum-endpoint-monitor stratum-route-switch-monitor stratum-security-monitor stratum-admin
+  systemctl is-active stratum-vps-watchdog.timer
   ss -lnt | grep -E ':(9999|10001|10002|10010|10011|10012|11001|11101|11201|11301)\b'
 
 Panel:

@@ -22,10 +22,13 @@ from pathlib import Path
 CONFIG_FILE = Path(os.getenv("SECURE_RELAY_CONFIG", "/etc/stratum-secure-relay.json"))
 V3_CONFIG_FILE = Path(os.getenv("V3_CONFIG_FILE", "/etc/stratum-v3.json"))
 MAX_HEADER = 8192
+DRAIN_TIMEOUT = 120
 INTERNAL_START = 20000
 DEFAULT_STATE_FILE = Path("/var/lib/stratum-secure-relay/sites.json")
-SERVER_VERSION = "2.2.0"
+SERVER_VERSION = "2.2.1"
 CONTROL_FILE = Path(os.getenv("SECURE_RELAY_CONTROL", "/var/lib/stratum-secure-relay/control.json"))
+_v3_cache_key = None
+_v3_cache_value = None
 
 
 def load_config():
@@ -44,7 +47,13 @@ def load_config():
 
 
 def route_map(miner_ip=None):
-    config = json.loads(V3_CONFIG_FILE.read_text(encoding="utf-8"))
+    global _v3_cache_key, _v3_cache_value
+    stat = V3_CONFIG_FILE.stat()
+    cache_key = (str(V3_CONFIG_FILE), getattr(stat, "st_ino", 0), stat.st_mtime_ns, stat.st_size)
+    if cache_key != _v3_cache_key:
+        _v3_cache_value = json.loads(V3_CONFIG_FILE.read_text(encoding="utf-8"))
+        _v3_cache_key = cache_key
+    config = _v3_cache_value
     internal = {}
     for offset, endpoint in enumerate(config.get("endpoints", [])):
         if endpoint.get("enabled", True):
@@ -70,8 +79,8 @@ async def close_writer(writer):
         return
     writer.close()
     try:
-        await writer.wait_closed()
-    except (ConnectionError, OSError, ssl.SSLError):
+        await asyncio.wait_for(writer.wait_closed(), timeout=5)
+    except (ConnectionError, OSError, ssl.SSLError, asyncio.TimeoutError):
         pass
 
 
@@ -82,7 +91,7 @@ async def pipe(reader, writer):
             if not data:
                 break
             writer.write(data)
-            await writer.drain()
+            await asyncio.wait_for(writer.drain(), timeout=DRAIN_TIMEOUT)
     except (ConnectionError, OSError, asyncio.CancelledError):
         pass
 
@@ -128,6 +137,7 @@ class SiteState:
         self.miner_counts = {}
         self.last_write = 0.0
         self.last_write_error_log = 0.0
+        self.dirty = False
         try:
             self.sites = json.loads(self.path.read_text(encoding="utf-8")).get("sites", {})
         except (OSError, ValueError):
@@ -165,6 +175,7 @@ class SiteState:
             site["miner_count"] = len(counts)
             if active_delta > 0:
                 site["last_miner_count"] = max(int(site.get("last_miner_count", 0) or 0), len(counts))
+        self.dirty = True
         if force or now - self.last_write >= 5:
             self.write()
 
@@ -179,6 +190,7 @@ class SiteState:
             os.chmod(temporary, 0o640)
             os.replace(temporary, self.path)
             self.last_write = time.time()
+            self.dirty = False
             return True
         except OSError as exc:
             # Status persistence is auxiliary. A missing systemd write permission
@@ -217,6 +229,14 @@ def optional_count(headers, name):
         return None
 
 
+def is_local_watchdog(port, headers, peer):
+    try:
+        return (port is None and headers.get("x-health-origin") == "vps-watchdog"
+            and ipaddress.ip_address(str(peer[0])).is_loopback)
+    except ValueError:
+        return False
+
+
 def proxy_header(headers, peer, destination_port):
     source_ip = source_address(headers, peer)
     try:
@@ -235,12 +255,24 @@ class SecureRelay:
         self.state = SiteState(config.get("state_file", str(DEFAULT_STATE_FILE)))
         self.connections = {}
         self.last_control_id = str(load_control().get("id", ""))
+        self.config_mtime = CONFIG_FILE.stat().st_mtime_ns if CONFIG_FILE.exists() else 0
 
     def current_config(self):
         try:
-            return load_config()
+            current_mtime = CONFIG_FILE.stat().st_mtime_ns
+            if current_mtime != self.config_mtime:
+                self.config = load_config()
+                self.config_mtime = current_mtime
+            return self.config
         except (OSError, ValueError):
             return self.config
+
+    async def state_loop(self):
+        """Coalesce reconnect storms into at most one small state write per second."""
+        while True:
+            await asyncio.sleep(1)
+            if self.state.dirty and time.time() - self.state.last_write >= 1:
+                self.state.write()
 
     def disconnect_matching(self, port, miner_ip=""):
         matched = 0
@@ -282,9 +314,11 @@ class SecureRelay:
                 port, supplied_token, headers = parse_request(raw)
                 client = authenticate(self.current_config(), supplied_token)
                 client_version = headers.get("x-client-version", "")
-                self.state.update(client, peer, client_version=client_version,
-                    reported_miner_count=optional_count(headers, "x-miner-count"),
-                    reported_connections=optional_count(headers, "x-active-connections"))
+                local_watchdog = is_local_watchdog(port, headers, peer)
+                if not local_watchdog:
+                    self.state.update(client, peer, client_version=client_version,
+                        reported_miner_count=optional_count(headers, "x-miner-count"),
+                        reported_connections=optional_count(headers, "x-active-connections"))
                 if port is None:
                     writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                     await writer.drain()
@@ -300,7 +334,7 @@ class SecureRelay:
                 await upstream_writer.drain()
                 writer.write(b"HTTP/1.1 200 Connection Established\r\nContent-Length: 0\r\n\r\n")
                 await writer.drain()
-                self.state.update(client, peer, active_delta=1, force=True, miner_ip=miner_ip, client_version=client_version)
+                self.state.update(client, peer, active_delta=1, miner_ip=miner_ip, client_version=client_version)
                 active_counted = True
                 connection_key = id(writer)
                 self.connections[connection_key] = {"writer": writer, "port": port, "miner_ip": miner_ip}
@@ -315,12 +349,13 @@ class SecureRelay:
                 writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
                 await writer.drain()
                 logging.warning("rejected unauthenticated connection source=%s", peer[0])
-            except (ValueError, OSError, ssl.SSLError, asyncio.TimeoutError, asyncio.IncompleteReadError) as exc:
+            except (ValueError, OSError, ssl.SSLError, asyncio.TimeoutError,
+                    asyncio.IncompleteReadError, asyncio.LimitOverrunError) as exc:
                 logging.info("connection closed source=%s reason=%s", peer[0], exc)
             finally:
                 self.connections.pop(id(writer), None)
                 if active_counted and client:
-                    self.state.update(client, peer, active_delta=-1, force=True, miner_ip=miner_ip)
+                    self.state.update(client, peer, active_delta=-1, miner_ip=miner_ip)
                 await close_writer(upstream_writer)
                 await close_writer(writer)
 
@@ -345,19 +380,34 @@ async def main():
         ssl=context,
         backlog=256,
         ssl_handshake_timeout=10,
+        limit=MAX_HEADER,
     )
     addresses = ", ".join(str(sock.getsockname()) for sock in server.sockets)
     logging.info("secure relay listening on %s", addresses)
     control_task = asyncio.create_task(relay.control_loop())
+    state_task = asyncio.create_task(relay.state_loop())
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for name in ("SIGINT", "SIGTERM"):
         if hasattr(signal, name):
             loop.add_signal_handler(getattr(signal, name), stop.set)
+    stop_task = asyncio.create_task(stop.wait())
     async with server:
-        await stop.wait()
-    control_task.cancel()
-    await asyncio.gather(control_task, return_exceptions=True)
+        done, _ = await asyncio.wait(
+            (stop_task, control_task, state_task), return_when=asyncio.FIRST_COMPLETED
+        )
+    failure = None
+    for task in (control_task, state_task):
+        if task in done and not task.cancelled():
+            failure = task.exception() or RuntimeError("critical relay background task stopped")
+            break
+    for task in (stop_task, control_task, state_task):
+        task.cancel()
+    await asyncio.gather(stop_task, control_task, state_task, return_exceptions=True)
+    if relay.state.dirty:
+        relay.state.write()
+    if failure:
+        raise failure
 
 
 if __name__ == "__main__":
