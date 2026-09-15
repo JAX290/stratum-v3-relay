@@ -105,6 +105,18 @@ class RouteSwitchMonitorTest(unittest.TestCase):
         self.assertGreater(item["next_attempt"], 1000)
         self.assertEqual(self.events[0]["type"], "route_sync_failed")
 
+    def test_peer_versions_increment_without_using_system_clock(self):
+        token = "e" * 64
+        admin.PEER_SYNC_FILE.write_text(json.dumps({"enabled": True,
+            "peers": ["https://peer.tail1234.ts.net"], "token": token}), encoding="utf-8")
+        with patch.object(admin.time, "time", return_value=1000), patch.object(admin.time, "time_ns", return_value=1):
+            admin.queue_route_sync(admin.store.load(), 11301, "first")
+            admin.queue_route_sync(admin.store.load(), 11301, "second")
+        items = json.loads(admin.PEER_OUTBOX_FILE.read_text(encoding="utf-8"))["items"]
+        self.assertEqual([item["payload"]["version"]["sequence"] for item in items], [1, 2])
+        self.assertEqual(items[0]["payload"]["version"]["node_id"], items[1]["payload"]["version"]["node_id"])
+        self.assertNotIn("revision", items[0]["payload"])
+
 
 if __name__ == "__main__":
     unittest.main()

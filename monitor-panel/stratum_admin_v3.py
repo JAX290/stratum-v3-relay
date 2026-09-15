@@ -1097,6 +1097,7 @@ def build_page_context(page):
         visible_forwarding = active_forwarding
     peer_settings = load_peer_settings()
     peer_outbox = load_json(PEER_OUTBOX_FILE, {"items": []})
+    peer_status = peer_sync_summary()
     access = client_access_context(config) if page == "access" else None
     logs = recent_logs() if page == "logs" else {"journal": "", "entries": [], "attention": [], "events": ""}
     return dict(page=page, config=config, endpoint_map=endpoint_map, endpoint_rows=rows,
@@ -1110,7 +1111,7 @@ def build_page_context(page):
         endpoint_options=[{**endpoint, "algorithm_value": endpoint_algorithm(config, endpoint)} for endpoint in config["endpoints"]],
         verified_endpoints=[{**endpoint, "algorithm_value": endpoint_algorithm(config, endpoint)} for endpoint in config["endpoints"] if endpoint.get("verified")],
         route_history=route_history_rows(config), route_events=route_event_rows(),
-        peer_settings=peer_settings, peer_pending=len(peer_outbox.get("items", [])),
+        peer_settings=peer_settings, peer_pending=len(peer_outbox.get("items", [])), peer_status=peer_status,
         route_event_labels={"canary_started": "测试已开始", "canary_passed": "测试通过并切换",
             "canary_failed": "测试失败并退回", "canary_stopped": "测试已提前停止",
             "verified_route_applied": "已验证地址切换", "route_restored": "历史线路已恢复",
@@ -1312,6 +1313,15 @@ def load_peer_settings():
         "token": str(value.get("token", ""))}
 
 
+def peer_sync_summary():
+    state = load_json(PEER_STATE_FILE, {})
+    acknowledgements = state.get("acknowledgements", {})
+    conflicts = state.get("conflicts", {})
+    return {"node_id": str(state.get("node_id", "")),
+        "confirmed": len(acknowledgements) if isinstance(acknowledgements, dict) else 0,
+        "conflicts": len(conflicts) if isinstance(conflicts, dict) else 0}
+
+
 def validate_peer_url(value):
     parsed = urlsplit(str(value).strip().rstrip("/"))
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
@@ -1342,9 +1352,17 @@ def _queue_route_sync_locked(config, port, action):
     endpoint = next(item for item in config["endpoints"] if item["id"] == endpoint_id)
     allowed = ("id", "pool", "region", "host", "port", "algorithm", "coins", "transport",
         "source", "enabled", "verified", "verified_at", "verified_test")
-    revision = time.time_ns()
+    state = load_json(PEER_STATE_FILE, {"received": []})
+    node_id = str(state.get("node_id", ""))
+    if not re.fullmatch(r"[a-f0-9]{16,64}", node_id):
+        node_id = secrets.token_hex(16)
+        state["node_id"] = node_id
+    sequences = state.setdefault("local_sequences", {})
+    sequence = int(sequences.get(str(int(port)), 0) or 0) + 1
+    sequences[str(int(port))] = sequence
     source = socket.gethostname()
-    payload = {"event_id": secrets.token_hex(16), "created_at": int(time.time()), "revision": revision,
+    payload = {"event_id": secrets.token_hex(16), "created_at": int(time.time()),
+        "version": {"node_id": node_id, "sequence": sequence},
         "source": source, "port": int(port), "action": str(action)[:80],
         "endpoint": {key: endpoint[key] for key in allowed if key in endpoint}}
     outbox = load_json(PEER_OUTBOX_FILE, {"items": []})
@@ -1352,11 +1370,14 @@ def _queue_route_sync_locked(config, port, action):
     for peer in settings["peers"]:
         items.append({"id": secrets.token_hex(12), "peer": validate_peer_url(peer),
             "payload": payload, "attempts": 0, "next_attempt": 0})
+    version = {"node_id": node_id, "sequence": sequence}
+    row = state.setdefault("route_versions", {}).setdefault(str(int(port)), {"nodes": {}})
+    row.setdefault("nodes", {})[node_id] = sequence
+    row["applied"] = version
+    row["last_queued_at"] = int(time.time())
+    ConfigStore._atomic_write(PEER_STATE_FILE, json.dumps(state, ensure_ascii=False, indent=2) + "\n", mode=0o600)
     ConfigStore._atomic_write(PEER_OUTBOX_FILE,
         json.dumps({"items": items[-100:]}, ensure_ascii=False, indent=2) + "\n", mode=0o600)
-    state = load_json(PEER_STATE_FILE, {"received": []})
-    state.setdefault("route_versions", {})[str(int(port))] = {"revision": revision, "source": source}
-    ConfigStore._atomic_write(PEER_STATE_FILE, json.dumps(state, ensure_ascii=False, indent=2) + "\n", mode=0o600)
     return len(settings["peers"])
 
 
@@ -1374,13 +1395,33 @@ def _apply_peer_payload_locked(payload):
     state = load_json(PEER_STATE_FILE, {"received": []})
     if event_id in state.get("received", []):
         return {"duplicate": True, "changed": False}
-    port = int(payload.get("port", 0))
+    try:
+        port = int(payload.get("port", 0))
+    except (TypeError, ValueError):
+        raise ConfigError("同步端口不合法")
     source = str(payload.get("source", "vps"))[:80]
-    revision = int(payload.get("revision", payload.get("created_at", 0)))
+    supplied_version = payload.get("version")
+    logical = isinstance(supplied_version, dict)
+    if logical:
+        node_id = str(supplied_version.get("node_id", ""))
+        try:
+            sequence = int(supplied_version.get("sequence", 0) or 0)
+        except (TypeError, ValueError):
+            raise ConfigError("同步逻辑版本不合法")
+        if not re.fullmatch(r"[a-f0-9]{16,64}", node_id) or not 1 <= sequence <= 2**63 - 1:
+            raise ConfigError("同步逻辑版本不合法")
+    else:
+        # Accept old peers during a rolling upgrade, but isolate their clock-based
+        # revisions so a large timestamp cannot block logical versions.
+        node_id = "legacy:" + re.sub(r"[^a-zA-Z0-9_.-]", "-", source)[:64]
+        try:
+            sequence = int(payload.get("revision", payload.get("created_at", 0)))
+        except (TypeError, ValueError):
+            raise ConfigError("旧版同步版本不合法")
     current_version = state.get("route_versions", {}).get(str(port), {})
-    incoming_order = (revision, source)
-    current_order = (int(current_version.get("revision", -1)), str(current_version.get("source", "")))
-    if incoming_order <= current_order:
+    nodes = current_version.get("nodes", {}) if isinstance(current_version.get("nodes"), dict) else {}
+    legacy_seen = int(current_version.get("revision", -1)) if node_id.startswith("legacy:") else -1
+    if sequence <= int(nodes.get(node_id, legacy_seen) or 0):
         state["received"] = (list(state.get("received", [])) + [event_id])[-200:]
         ConfigStore._atomic_write(PEER_STATE_FILE, json.dumps(state, ensure_ascii=False, indent=2) + "\n", mode=0o600)
         return {"duplicate": False, "stale": True, "changed": False}
@@ -1409,7 +1450,25 @@ def _apply_peer_payload_locked(payload):
     if changed:
         request_reconnect(port)
     state["received"] = (list(state.get("received", [])) + [event_id])[-200:]
-    state.setdefault("route_versions", {})[str(port)] = {"revision": revision, "source": source}
+    row = state.setdefault("route_versions", {}).setdefault(str(port), {"nodes": {}})
+    row.setdefault("nodes", {})[node_id] = sequence
+    pending_local = any(int(item.get("payload", {}).get("port", 0) or 0) == port and
+        item.get("payload", {}).get("version", {}).get("node_id") != node_id
+        for item in load_json(PEER_OUTBOX_FILE, {"items": []}).get("items", []))
+    previous_applied = row.get("applied", {})
+    row["applied"] = {"node_id": node_id, "sequence": sequence}
+    row["last_received_at"] = int(time.time())
+    try:
+        clock_skew = abs(int(time.time()) - int(payload.get("created_at", 0)))
+    except (TypeError, ValueError):
+        clock_skew = None
+    row["clock_skew_seconds"] = clock_skew if clock_skew is not None and clock_skew > 300 else 0
+    conflicts = state.setdefault("conflicts", {})
+    if pending_local and previous_applied.get("node_id") != node_id:
+        conflicts[str(port)] = {"detected_at": int(time.time()), "local": previous_applied,
+            "incoming": row["applied"]}
+    else:
+        conflicts.pop(str(port), None)
     ConfigStore._atomic_write(PEER_STATE_FILE, json.dumps(state, ensure_ascii=False, indent=2) + "\n", mode=0o600)
     send_route_event("route_sync_received", port, endpoint,
         f"已接收对端VPS的线路设置并{'完成切换' if changed else '确认一致'}。")

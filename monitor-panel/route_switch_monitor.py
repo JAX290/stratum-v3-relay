@@ -99,6 +99,8 @@ def _flush_peer_outbox_locked(now=None, opener=None, notifier=None):
         return {"sent": 0, "pending": len(items)}
     pending = []
     sent = 0
+    state = admin.load_json(admin.PEER_STATE_FILE, {"received": []})
+    acknowledgements = state.setdefault("acknowledgements", {})
     for item in items:
         if int(item.get("next_attempt", 0)) > now:
             pending.append(item)
@@ -116,6 +118,10 @@ def _flush_peer_outbox_locked(now=None, opener=None, notifier=None):
             if not result.get("ok"):
                 raise OSError(result.get("error", "对端拒绝同步"))
             sent += 1
+            version = payload.get("version", {})
+            if version:
+                acknowledgements[f"{peer}|{payload.get('port')}"] = {
+                    "node_id": version.get("node_id"), "sequence": version.get("sequence"), "time": now}
             notifier({"time": now, "type": "route_sync_ok", "port": payload.get("port"),
                 "pool": endpoint.get("pool", "未知矿池"),
                 "endpoint": f"{endpoint.get('host', '')}:{endpoint.get('port', '')}",
@@ -134,6 +140,8 @@ def _flush_peer_outbox_locked(now=None, opener=None, notifier=None):
             pending.append(item)
     admin.ConfigStore._atomic_write(admin.PEER_OUTBOX_FILE,
         json.dumps({"items": pending[-100:]}, ensure_ascii=False, indent=2) + "\n", mode=0o600)
+    admin.ConfigStore._atomic_write(admin.PEER_STATE_FILE,
+        json.dumps(state, ensure_ascii=False, indent=2) + "\n", mode=0o600)
     return {"sent": sent, "pending": len(pending)}
 
 

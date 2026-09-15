@@ -435,6 +435,22 @@ class AdminV3Test(unittest.TestCase):
         self.assertTrue(accepted.get_json()["stale"])
         self.assertEqual(admin.route_endpoint_id(admin.store.load(), 11301), "f2pool-global")
 
+    def test_logical_peer_version_is_not_blocked_by_old_clock_revision(self):
+        admin.PEER_STATE_FILE.write_text(json.dumps({"received": [], "route_versions": {
+            "11301": {"revision": 9999999999999999999, "source": "old-clock"}}}), encoding="utf-8")
+        endpoint = next(item for item in admin.store.load()["endpoints"] if item["id"] == "f2pool-global")
+        payload = {"event_id": "d" * 32, "source": "new-peer", "created_at": 1,
+            "version": {"node_id": "e" * 32, "sequence": 1}, "port": 11301,
+            "action": "test", "endpoint": endpoint}
+        with patch.object(admin, "request_reconnect") as reconnect:
+            result = admin.apply_peer_payload(payload)
+        self.assertTrue(result["changed"])
+        self.assertEqual(admin.route_endpoint_id(admin.store.load(), 11301), "f2pool-global")
+        state = json.loads(admin.PEER_STATE_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(state["route_versions"]["11301"]["nodes"]["e" * 32], 1)
+        self.assertGreater(state["route_versions"]["11301"]["clock_skew_seconds"], 300)
+        reconnect.assert_called_once_with(11301)
+
 
 if __name__ == "__main__":
     unittest.main()
