@@ -1,6 +1,7 @@
 param([switch]$TestBuild,[switch]$Sign,[string]$SigningThumbprint=$env:WINDOWS_SIGNING_THUMBPRINT)
 $ErrorActionPreference = 'Stop'
 $source = Join-Path $PSScriptRoot 'StratumSecureRelay.cs'
+$configSource = Join-Path $PSScriptRoot 'ConfigModels.cs'
 $versionFile = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'version.json'
 if (-not (Test-Path -LiteralPath $versionFile)) { throw "Version file not found: $versionFile" }
 $version = (Get-Content -LiteralPath $versionFile -Raw -Encoding UTF8 | ConvertFrom-Json).windows_client
@@ -21,7 +22,7 @@ try {
   & $compiler /nologo /target:winexe /optimize+ /platform:anycpu /win32icon:$icon /out:$output `
     /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll `
     /reference:System.Windows.Forms.dll /reference:System.Runtime.Serialization.dll `
-    /reference:System.Security.dll /reference:System.Web.Extensions.dll $source $assemblyInfo
+    /reference:System.Security.dll /reference:System.Web.Extensions.dll $source $configSource $assemblyInfo
   if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
 } finally {
   Remove-Item -LiteralPath $assemblyInfo -Force -ErrorAction SilentlyContinue

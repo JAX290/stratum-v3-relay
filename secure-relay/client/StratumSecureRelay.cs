@@ -87,6 +87,7 @@ public static class CrashRecovery
     }
 }
 
+#if LEGACY_MONOLITH
 [DataContract]
 public sealed class ServerProfile
 {
@@ -214,6 +215,8 @@ public static class ConfigStore
         catch { return ""; }
     }
 }
+
+#endif
 
 public sealed class RelayManager
 {

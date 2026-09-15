@@ -74,7 +74,7 @@ Python 测试现在可以从仓库根目录启动，不再依赖当前工作目�
 - [x] HTTPS 访问动态启用 Secure Cookie，并统一增加 CSP、禁止嵌入、MIME 类型、来源信息和 HSTS 保护头；SSH 本地 HTTP 隧道仍可登录。
 - [x] `PANEL_SECRET_KEY` 缺失时拒绝生产启动，避免重启后会话密钥随机变化。
 - [x] 管理面板按职责拆分：认证与限流位于 `admin_auth.py`，配置存储与渲染位于 `v3_manager.py`，后台同步执行位于 `route_switch_monitor.py`，监控由独立 inspector/monitor/watchdog 进程负责，页面使用独立模板和静态文件；主文件保留路由编排与页面上下文。
-- [ ] 按中转核心、状态统计、配置存储和界面拆分 Windows 客户端源码。
+- [ ] 按中转核心、状态统计、配置存储和界面拆分 Windows 客户端源码。（进行中：服务器配置、端口映射、DPAPI 密钥保护和本地配置存储已迁入 `ConfigModels.cs`，构建脚本已支持多源码文件。）
 - [ ] 如果项目供外部人员使用，增加 `LICENSE`、`SECURITY.md` 和漏洞报告方式。
 
 ## 验收原则

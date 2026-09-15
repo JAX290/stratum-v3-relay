@@ -24,6 +24,7 @@ class VersionConsistencyTest(unittest.TestCase):
         build = (ROOT / "secure-relay" / "client" / "build.ps1").read_text(encoding="utf-8")
         self.assertIn("version.json", build)
         self.assertIn("AssemblyFileVersion", build)
+        self.assertIn("ConfigModels.cs", build)
 
 
 if __name__ == "__main__":
