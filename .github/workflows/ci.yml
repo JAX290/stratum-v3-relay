@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, "codex/**"]
+    branches: [main]
   pull_request:
 
 permissions:
@@ -17,6 +17,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: requirements-dev.txt
       - run: python -m pip install -r requirements-dev.txt
       - name: Run Python and configuration tests
         run: ./test.sh
@@ -28,5 +29,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build and run Windows client core tests
-        shell: powershell
+        shell: pwsh
         run: ./secure-relay/client/test-client.ps1
