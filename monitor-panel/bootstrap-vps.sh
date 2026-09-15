@@ -8,12 +8,12 @@ fi
 
 cd "$(dirname "$0")"
 
-for file in install-v3.sh v3-config.json v3_manager.py endpoint_monitor.py security_monitor.py stratum_inspector.py stratum_admin_v3.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh templates/v3_dashboard.html static/v3.css; do
+for file in install-v3.sh install-public-status.sh v3-config.json v3_manager.py endpoint_monitor.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh templates/v3_dashboard.html templates/public_status.html static/v3.css static/public.css; do
   test -f "./$file" || { echo "Missing $file" >&2; exit 1; }
 done
 
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy python3-flask python3-werkzeug
+DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy python3-flask python3-werkzeug gunicorn
 
 if [[ ! -f /etc/stratum-admin.env ]]; then
   while true; do
@@ -89,7 +89,7 @@ cat <<'EOF'
 Bootstrap complete.
 
 Next checks:
-  systemctl is-active haproxy stratum-inspector-v3 stratum-endpoint-monitor stratum-route-switch-monitor stratum-security-monitor stratum-admin
+  systemctl is-active haproxy stratum-inspector-v3 stratum-endpoint-monitor stratum-route-switch-monitor stratum-security-monitor stratum-admin stratum-public-status
   systemctl is-active stratum-vps-watchdog.timer
   ss -lnt | grep -E ':(9999|10001|10002|10010|10011|10012|11001|11101|11201|11301)\b'
 

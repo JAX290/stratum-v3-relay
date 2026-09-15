@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="30">
+  <title>木林森中转 · 运行状态</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='public.css') }}">
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div><p class="eyebrow">只读状态面板</p><h1>木林森中转</h1></div>
+      <p class="updated">更新于 {{ status.updated }}（北京时间）</p>
+    </header>
+    <section class="hero {{ status.level }}">
+      <span class="pulse"></span><div><p>整体状态</p><h2>{{ status.headline }}</h2></div>
+    </section>
+    <section class="metrics">
+      <article><strong>{{ status.totals.connections }}</strong><span>当前连接</span></article>
+      <article><strong>{{ status.totals.workers }}</strong><span>在线矿工</span></article>
+      <article><strong>{{ status.totals.accepted }}</strong><span>接受 Share</span></article>
+      <article><strong>{{ status.totals.reject_percent }}%</strong><span>拒绝率</span></article>
+    </section>
+    <section class="panel">
+      <div class="title"><h2>矿池运行概况</h2><span>不显示矿机名称、IP 和线路地址</span></div>
+      {% if status.pools %}
+      <div class="pool-grid">
+        {% for pool in status.pools %}
+        <article class="pool"><div class="pool-head"><h3>{{ pool.name }}</h3><span class="badge {{ pool.status }}">{{ '正常' if pool.status == 'good' else '需检查' }}</span></div>
+          <dl><div><dt>在线矿工</dt><dd>{{ pool.workers }}</dd></div><div><dt>连接</dt><dd>{{ pool.connections }}</dd></div><div><dt>健康线路</dt><dd>{{ pool.healthy_routes }}/{{ pool.routes }}</dd></div><div><dt>拒绝率</dt><dd>{{ pool.reject_percent }}%</dd></div></dl>
+        </article>
+        {% endfor %}
+      </div>
+      {% else %}<p class="empty">状态数据尚未生成，请稍后刷新。</p>{% endif %}
+    </section>
+    <div class="columns">
+      <section class="panel"><h2>核心服务</h2><ul class="service-list">{% for service in status.services %}<li><span>{{ service.label }}</span><b class="dot {{ 'good' if service.state == 'active' else 'unknown' if service.state == 'unavailable' else 'bad' }}">{{ '运行中' if service.state == 'active' else '待确认' if service.state == 'unavailable' else '异常' }}</b></li>{% endfor %}</ul></section>
+      <section class="panel"><h2>近期事件</h2>{% if status.events %}<ul class="event-list">{% for event in status.events %}<li><span class="event-mark {{ event.level }}"></span><div><b>{{ event.label }}</b><time>{{ event.display_time }}</time></div></li>{% endfor %}</ul>{% else %}<p class="empty">近期没有需要展示的事件。</p>{% endif %}</section>
+    </div>
+    <footer>此页面仅供日常查看。配置、日志和维护操作请通过 Tailscale 管理面板完成。</footer>
+  </main>
+</body>
+</html>

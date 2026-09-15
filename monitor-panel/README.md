@@ -188,6 +188,18 @@ TAILSCALE_ALLOWED_USERS=你的Tailscale登录邮箱
 
 “日志”页会以“运维问题中心”的形式显示 VPS 问题。页面同时检查 HAProxy、协议检查器、矿池监控、线路切换、安全监控、加密入口、矿场在线监控、管理面板和自动恢复服务，并把最近 24 小时的技术日志转换成中文原因和处理建议。同类信息会合并，已经恢复的问题会自动从待处理清单中消失；原始日志仍可展开查看。
 
+### 方式三：HTTPS 域名，只看日常状态
+
+V3 会同时启动独立的只读服务 `stratum-public-status`，它只监听 `127.0.0.1:8790`。为它配置 HTTPS 域名：
+
+```bash
+cd /root/stratum-v3/monitor-panel
+chmod +x install-public-status.sh
+./install-public-status.sh --domain status1.mulinsen.win --email 你的邮箱
+```
+
+运行前先让域名以“仅 DNS”方式指向 VPS，并在安全组放行 TCP `80`、`443`。证书签发并确认网页可打开后，Cloudflare 可以改为“已代理”。公网页面只显示汇总数字和脱敏事件；Worker、IP、上游地址、端口、密钥、证书、原始日志及所有修改功能都不会进入这个服务。`8789` 和 `8790` 都不应在安全组中直接放行。
+
 ### 找回木林森中转的客户端填写资料
 
 只有通过 Tailscale Serve 打开完整管理面板后，“设置”页才会出现“客户端接入资料”入口。里面可以查看：

@@ -6,12 +6,14 @@ if [[ $(id -u) -ne 0 ]]; then
   exit 1
 fi
 
-required=(v3-config.json v3_manager.py endpoint_monitor.py security_monitor.py stratum_inspector.py stratum_admin_v3.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh)
+required=(v3-config.json v3_manager.py endpoint_monitor.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh install-public-status.sh)
 for file in "${required[@]}"; do
   test -f "./$file" || { echo "Missing $file" >&2; exit 1; }
 done
 test -f ./templates/v3_dashboard.html
+test -f ./templates/public_status.html
 test -f ./static/v3.css
+test -f ./static/public.css
 
 stamp=$(date +%Y%m%d-%H%M%S)
 backup="/root/stratum-v3-backup-$stamp"
@@ -22,16 +24,18 @@ done
 printf '%s\n' "$backup" >/root/stratum-v3-last-backup
 
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy python3-flask
+DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy python3-flask gunicorn
 id stratum-proxy >/dev/null 2>&1 || useradd --system --home /nonexistent --shell /usr/sbin/nologin stratum-proxy
 install -d -m 0755 /opt/stratum-admin
 install -d -m 0755 /opt/stratum-admin/templates /opt/stratum-admin/static
 install -d -o stratum-proxy -g stratum-proxy -m 0750 /var/lib/stratum-inspector
 install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor
 install -d -m 0750 /var/lib/stratum-monitor/history
-install -m 0755 v3_manager.py endpoint_monitor.py security_monitor.py stratum_inspector.py stratum_admin_v3.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh /opt/stratum-admin/
+install -m 0755 v3_manager.py endpoint_monitor.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh install-public-status.sh /opt/stratum-admin/
 install -m 0644 templates/v3_dashboard.html /opt/stratum-admin/templates/v3_dashboard.html
+install -m 0644 templates/public_status.html /opt/stratum-admin/templates/public_status.html
 install -m 0644 static/v3.css /opt/stratum-admin/static/v3.css
+install -m 0644 static/public.css /opt/stratum-admin/static/public.css
 install -m 0640 v3-config.json /etc/stratum-v3.json
 chown root:stratum-proxy /etc/stratum-v3.json
 
@@ -197,6 +201,36 @@ ProtectHome=read-only
 WantedBy=multi-user.target
 EOF
 
+cat >/etc/systemd/system/stratum-public-status.service <<'EOF'
+[Unit]
+Description=Stratum public read-only status panel
+After=network-online.target stratum-inspector-v3.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=stratum-proxy
+Group=stratum-proxy
+WorkingDirectory=/opt/stratum-admin
+Environment=V3_CONFIG_FILE=/etc/stratum-v3.json
+Environment=INSPECTOR_STATE_FILE=/var/lib/stratum-inspector/state.json
+Environment=ENDPOINT_EVENT_FILE=/var/lib/stratum-monitor/endpoint-events.jsonl
+ExecStart=/usr/bin/gunicorn --bind 127.0.0.1:8790 --workers 2 --threads 2 --timeout 30 stratum_public_status:app
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/etc/stratum-v3.json /var/lib/stratum-inspector /var/lib/stratum-monitor
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 cat >/etc/systemd/system/stratum-vps-watchdog.service <<'EOF'
 [Unit]
 Description=Stratum VPS local health and recovery watchdog
@@ -234,6 +268,7 @@ systemctl daemon-reload
 systemctl enable --now stratum-inspector-v3.service
 systemctl enable --now stratum-endpoint-monitor.service
 systemctl enable --now stratum-route-switch-monitor.service
+systemctl enable --now stratum-public-status.service
 systemctl enable --now stratum-vps-watchdog.timer
 
 # Existing public listeners are released only after internal V3 listeners pass checks.
@@ -245,5 +280,5 @@ systemctl restart stratum-admin.service
 
 python3 /opt/stratum-admin/security_monitor.py --initialize
 systemctl enable --now stratum-security-monitor.service
-systemctl --no-pager --full status stratum-inspector-v3.service stratum-endpoint-monitor.service stratum-route-switch-monitor.service stratum-security-monitor.service stratum-admin.service stratum-vps-watchdog.timer haproxy
+systemctl --no-pager --full status stratum-inspector-v3.service stratum-endpoint-monitor.service stratum-route-switch-monitor.service stratum-security-monitor.service stratum-admin.service stratum-public-status.service stratum-vps-watchdog.timer haproxy
 echo "V3 installed. Backup: $backup"

@@ -59,7 +59,7 @@ status1.mulinsen.win   已代理（橙色云朵）
 status2.mulinsen.win   已代理（橙色云朵）
 ```
 
-橙色云朵可以隐藏面板源站地址，并提供 HTTPS 和基本的网站防护。但 VPS 必须先部署只读面板；只添加 DNS 记录不会自动产生网页。
+橙色云朵可以隐藏面板源站地址，并提供 HTTPS 和基本的网站防护。仓库已经提供独立只读面板和 HTTPS 安装脚本；只添加 DNS 记录仍不会自动产生网页。
 
 完整管理后台仍建议只通过 Tailscale 打开。公开的 `status1`、`status2` 只展示状态，不允许修改矿池、线路、证书、密钥或系统设置。
 
@@ -92,6 +92,26 @@ status2.mulinsen.win   已代理（橙色云朵）
 | TTL | 自动 |
 
 第二台 VPS 使用 `relay2` 和 `status2`，其余步骤相同，只把 IP 换成第二台 VPS 的公网 IP。
+
+### 在 VPS 安装 HTTPS 只读面板
+
+第一次签发证书时，先把 `status1` 的代理状态设为“仅 DNS”，并在 VPS 安全组放行 TCP `80` 和 `443`。完成 V3 安装后执行：
+
+```bash
+cd /root/stratum-v3/monitor-panel
+chmod +x install-public-status.sh
+./install-public-status.sh --domain status1.mulinsen.win --email 你的邮箱
+```
+
+脚本会安装 Nginx 和 Let's Encrypt 证书，把这个域名唯一转发到 `127.0.0.1:8790` 的只读服务。浏览器确认下面地址正常后，再把 Cloudflare 代理状态改为“已代理（橙色云朵）”：
+
+```text
+https://status1.mulinsen.win/
+```
+
+第二台 VPS 使用 `status2.mulinsen.win` 重复上述步骤。完整管理面板继续通过 Tailscale 访问 `127.0.0.1:8789`。安全组不要直接放行 `8789` 或 `8790`。
+
+公网服务只提供 `/` 和 `/healthz` 两个 GET 入口。它不读取或展示共享密钥、证书私钥、Worker 名称、矿机 IP、上游地址、审计记录和原始日志，页面也没有任何修改按钮。
 
 ## 5. Windows 木林森中转怎样填写
 
@@ -215,7 +235,15 @@ relay-test.mulinsen.win → 新 VPS 公网 IP
 
 ### 浏览器打开 status 域名显示错误
 
-DNS 记录只负责把域名指向 VPS。必须先在 VPS 部署只读面板和 HTTPS 入口。确认服务没有部署前，Cloudflare 显示连接错误属于正常现象。
+DNS 记录只负责把域名指向 VPS。先执行上面的 `install-public-status.sh`，再检查：
+
+```bash
+systemctl status stratum-public-status nginx
+curl -I http://127.0.0.1:8790/
+certbot certificates
+```
+
+如果证书签发失败，确认 `status` 域名已经指向当前 VPS、暂时使用“仅 DNS”，并且安全组和 VPS 防火墙都放行了 TCP `80`。成功后再开启橙色云朵。
 
 ### 修改 IP 后为什么还有矿机连接旧 VPS
 

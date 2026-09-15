@@ -103,7 +103,7 @@ chmod +x bootstrap-vps.sh
 安装后检查：
 
 ```bash
-systemctl is-active haproxy stratum-inspector-v3 stratum-endpoint-monitor stratum-route-switch-monitor stratum-security-monitor stratum-admin
+systemctl is-active haproxy stratum-inspector-v3 stratum-endpoint-monitor stratum-route-switch-monitor stratum-security-monitor stratum-admin stratum-public-status
 systemctl is-active stratum-vps-watchdog.timer
 ```
 
@@ -158,6 +158,25 @@ ssh -N -L 8789:127.0.0.1:8789 -p <SSH端口> root@<VPS公网IP>
 ```
 
 保持这个 PowerShell 窗口不要关闭，然后打开 `http://127.0.0.1:8789`。这种方式需要安装时设置的应急密码。
+
+### 5.4 不使用 Tailscale 的 HTTPS 只读面板
+
+日常只看运行状态时，可以为每台 VPS 配置一个普通 HTTPS 域名，例如 `status1.mulinsen.win`。公网页面和完整管理面板是两个独立服务：
+
+- `127.0.0.1:8790`：公网只读状态，只显示汇总连接数、在线矿工数、Share、矿池线路健康、核心服务和脱敏事件；
+- `127.0.0.1:8789`：完整管理面板，仍只通过 Tailscale 或 SSH 隧道进入。
+
+只读页面没有登录、表单或修改接口，也不会显示 Worker 名称、矿机 IP、上游地址、端口、共享密钥、证书、审计记录或原始日志。安装 V3 后，先在域名服务商添加指向 VPS 的 DNS 记录，并暂时设为“仅 DNS”，然后在 VPS 执行：
+
+```bash
+cd /root/stratum-v3/monitor-panel
+chmod +x install-public-status.sh
+./install-public-status.sh --domain status1.mulinsen.win --email 你的邮箱
+```
+
+脚本安装 Nginx 和 Let's Encrypt 证书，只把该域名转发到只读服务。浏览器确认 `https://status1.mulinsen.win/` 能打开后，可以把 Cloudflare 记录改为“已代理（橙色云朵）”。服务器安全组需要放行 TCP `80` 和 `443`；不要放行 `8789` 或 `8790`。
+
+完整 Cloudflare 操作和换 VPS 步骤见[域名与 Cloudflare 新手说明](docs/cloudflare-domain-guide.md)。
 
 ## 六、安装 TLS 加密入口
 

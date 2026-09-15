@@ -29,6 +29,7 @@ DEFAULT_PATHS = [
     "/etc/systemd/system/stratum-security-monitor.service",
     "/etc/systemd/system/stratum-route-switch-monitor.service",
     "/etc/systemd/system/stratum-admin.service",
+    "/etc/systemd/system/stratum-public-status.service",
     "/etc/systemd/system/stratum-vps-watchdog.service",
     "/etc/systemd/system/stratum-vps-watchdog.timer",
     "/etc/cron.d/stratum-monitor",
@@ -36,11 +37,15 @@ DEFAULT_PATHS = [
     "/opt/stratum-admin/endpoint_monitor.py",
     "/opt/stratum-admin/security_monitor.py",
     "/opt/stratum-admin/stratum_admin_v3.py",
+    "/opt/stratum-admin/stratum_public_status.py",
     "/opt/stratum-admin/route_switch_monitor.py",
     "/opt/stratum-admin/vps_watchdog.py",
     "/opt/stratum-admin/reset-panel-password.sh",
+    "/opt/stratum-admin/install-public-status.sh",
     "/opt/stratum-admin/templates/v3_dashboard.html",
+    "/opt/stratum-admin/templates/public_status.html",
     "/opt/stratum-admin/static/v3.css",
+    "/opt/stratum-admin/static/public.css",
 ]
 
 
