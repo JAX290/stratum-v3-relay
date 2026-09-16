@@ -255,6 +255,30 @@ certbot "${certbot_args[@]}"
 # Installing the named lineage is idempotent and repairs that interrupted state.
 certbot install --cert-name "$domain" --nginx --non-interactive
 
+# Tailscale Serve owns port 443 on tailscale0. Wildcard HTTPS listeners
+# installed by Certbot would also claim that address and prevent startup.
+web_ipv4=$(ip -4 route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')
+[[ -n "$web_ipv4" ]] || { echo "无法识别 VPS 普通网卡地址，停止配置 HTTPS 监听。" >&2; exit 1; }
+WEB_IPV4="$web_ipv4" SITE_PATH="$site" python3 - <<'PY'
+import os
+import re
+from pathlib import Path
+path = Path(os.environ["SITE_PATH"])
+text = path.read_text()
+inserted = False
+def listener(match):
+    global inserted
+    if inserted:
+        return ""
+    inserted = True
+    return "    listen 127.0.0.1:443 ssl;\n    listen " + os.environ["WEB_IPV4"] + ":443 ssl;\n"
+text = re.sub(r"(?m)^\s*listen\s+[^;]*\b443\b[^;]*;[^\n]*\n", listener, text)
+if not inserted:
+    raise SystemExit("证书安装后未找到 HTTPS 监听配置，停止以避免覆盖站点。")
+path.write_text(text)
+PY
+echo "      HTTPS 监听：$web_ipv4:443 和 127.0.0.1:443；保留 Tailscale 的独立 443。"
+
 echo "[6/6] 检查 HTTPS 页面和自动续期……"
 nginx -t
 systemctl enable --now nginx

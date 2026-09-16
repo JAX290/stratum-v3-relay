@@ -48,6 +48,8 @@ class DeploymentSecurityTest(unittest.TestCase):
         self.assertIn("确认无误后继续？", script)
         self.assertIn("--resolve", script)
         self.assertIn('certbot install --cert-name "$domain" --nginx --non-interactive', script)
+        self.assertIn("listen 127.0.0.1:443 ssl", script)
+        self.assertIn("WEB_IPV4", script)
         self.assertIn("HTTPS 证书已经签发，但本机 443 端口", script)
         self.assertIn("PUBLIC_STATUS_PASSWORD_HASH", script)
         self.assertIn("generate_password_hash", script)
