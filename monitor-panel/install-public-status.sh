@@ -253,7 +253,7 @@ certbot "${certbot_args[@]}"
 # If a previous run obtained the certificate but stopped before deployment,
 # Certbot may keep the existing certificate without adding the HTTPS listener.
 # Installing the named lineage is idempotent and repairs that interrupted state.
-certbot install --cert-name "$domain" --non-interactive
+certbot install --cert-name "$domain" --nginx --non-interactive
 
 echo "[6/6] 检查 HTTPS 页面和自动续期……"
 nginx -t
