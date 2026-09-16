@@ -195,10 +195,10 @@ V3 会同时启动独立的只读服务 `stratum-public-status`，它只监听 `
 ```bash
 cd /root/stratum-v3/monitor-panel
 chmod +x install-public-status.sh
-./install-public-status.sh --domain status1.mulinsen.win --email 你的邮箱
+./install-public-status.sh
 ```
 
-运行前先让域名以“仅 DNS”方式指向 VPS，并在安全组放行 TCP `80`、`443`。证书签发并确认网页可打开后，Cloudflare 可以改为“已代理”。公网页面只显示汇总数字和脱敏事件；Worker、IP、上游地址、端口、密钥、证书、原始日志及所有修改功能都不会进入这个服务。`8789` 和 `8790` 都不应在安全组中直接放行。
+脚本使用中文向导询问只读面板域名，并自动检查 DNS、配置 Nginx、申请证书、启用 Certbot 自动续期和验证页面。运行前先让域名以“仅 DNS”方式指向 VPS，并在安全组放行 TCP `80`、`443`。以前使用的 `--email` 只是 Certbot 的旧版证书账户联系邮箱，不是面板账号；Let's Encrypt 已在 2025 年停止到期提醒邮件，因此新版向导不要求邮箱。证书签发并确认网页可打开后，Cloudflare 可以改为“已代理”。公网页面只显示汇总数字和脱敏事件；Worker、IP、上游地址、端口、密钥、证书、原始日志及所有修改功能都不会进入这个服务。`8789` 和 `8790` 都不应在安全组中直接放行。
 
 ### 找回木林森中转的客户端填写资料
 

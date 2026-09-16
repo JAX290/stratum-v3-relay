@@ -168,15 +168,43 @@ ssh -N -L 8789:127.0.0.1:8789 -p <SSH端口> root@<VPS公网IP>
 - `127.0.0.1:8790`：公网只读状态，只显示汇总连接数、在线矿工数、Share、矿池线路健康、核心服务和脱敏事件；
 - `127.0.0.1:8789`：完整管理面板，仍只通过 Tailscale 或 SSH 隧道进入。
 
-只读页面没有登录、表单或修改接口，也不会显示 Worker 名称、矿机 IP、上游地址、端口、共享密钥、证书、审计记录或原始日志。安装 V3 后，先在域名服务商添加指向 VPS 的 DNS 记录，并暂时设为“仅 DNS”，然后在 VPS 执行：
+只读页面没有登录、表单或修改接口，也不会显示 Worker 名称、矿机 IP、上游地址、端口、共享密钥、证书、审计记录或原始日志。
+
+#### 安装前先完成三项准备
+
+1. 在 Cloudflare 的“DNS → 记录”中添加 `A` 记录。名称填写 `status1`，IPv4 地址填写这台 VPS 的公网 IP。
+2. 把该记录的代理状态暂时设为 **仅 DNS（灰色云朵）**。证书安装成功后才改成橙色云朵。
+3. 在 VPS 服务商的安全组中放行 TCP `80` 和 `443`。如果 VPS 启用了 UFW，再执行 `ufw allow 80/tcp` 和 `ufw allow 443/tcp`。
+
+不要在安全组中放行 `8789` 或 `8790`。这两个端口只供 VPS 本机、Tailscale 或 SSH 隧道使用。
+
+#### 在 VPS 运行中文安装向导
+
+完成 V3 安装后执行：
 
 ```bash
 cd /root/stratum-v3/monitor-panel
 chmod +x install-public-status.sh
-./install-public-status.sh --domain status1.mulinsen.win --email 你的邮箱
+./install-public-status.sh
 ```
 
-脚本安装 Nginx 和 Let's Encrypt 证书，只把该域名转发到只读服务。浏览器确认 `https://status1.mulinsen.win/` 能打开后，可以把 Cloudflare 记录改为“已代理（橙色云朵）”。服务器安全组需要放行 TCP `80` 和 `443`；不要放行 `8789` 或 `8790`。
+脚本会询问“只读面板域名”，第一台 VPS 填写 `status1.mulinsen.win`，第二台填写 `status2.mulinsen.win`。只填写域名，不要带 `https://`、端口或结尾斜杠。脚本会自动：
+
+- 检查域名是否已经指向当前 VPS；
+- 安装并配置 Nginx；
+- 申请浏览器信任的 Let's Encrypt HTTPS 证书；
+- 开启证书自动续期；
+- 验证只读页面能否正常响应。
+
+也可以直接指定域名：
+
+```bash
+./install-public-status.sh --domain status1.mulinsen.win
+```
+
+以前命令中的 `--email` 是 Certbot 的旧版证书账户联系邮箱，**不是面板登录账号**，不会显示在网页中，也不会收到本项目的运行告警。Let's Encrypt 已于 2025 年停止发送证书到期提醒邮件，因此新版安装不再要求填写邮箱；公网只读网站的证书由 Certbot 自动续期。
+
+脚本显示“安装成功”后，用浏览器打开 `https://status1.mulinsen.win/`。确认能看到状态页面，再回到 Cloudflare，把 `status1` 改为 **已代理（橙色云朵）**。如果脚本提示域名 IP 不一致，先检查是否填了旧 VPS IP，以及 Cloudflare 是否仍为橙色云朵；修正后重新运行脚本即可。
 
 完整 Cloudflare 操作和换 VPS 步骤见[域名与 Cloudflare 新手说明](docs/cloudflare-domain-guide.md)。
 
