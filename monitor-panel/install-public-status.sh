@@ -9,6 +9,7 @@ usage() {
 
 可选参数：
   --email EMAIL       兼容旧版 Certbot 的注册邮箱参数；不是面板账号
+  --reset-login       重新设置只读面板的值守账号和密码
   --skip-dns-check    跳过“域名必须指向本机公网 IP”的检查
   -h, --help          显示本说明
 
@@ -19,6 +20,7 @@ EOF
 domain=""
 email=""
 skip_dns_check=0
+reset_login=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --domain)
@@ -27,6 +29,7 @@ while [[ $# -gt 0 ]]; do
     --email)
       [[ $# -ge 2 ]] || { echo "--email 后面缺少邮箱。" >&2; usage; exit 2; }
       email="$2"; shift 2 ;;
+    --reset-login) reset_login=1; shift ;;
     --skip-dns-check) skip_dns_check=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "无法识别的参数：$1" >&2; usage; exit 2 ;;
@@ -44,8 +47,9 @@ cat <<'EOF'
   HTTPS 公网只读状态面板安装向导
 ============================================================
 
-这个页面用于在没有 Tailscale 时查看脱敏运行状态。
-它不能修改线路或配置，也不会显示矿机 IP、Worker、密钥和原始日志。
+这个页面用于在没有 Tailscale 时供值守人员查看完整运行状态。
+登录后可以查看矿机 IP、Worker、Share、矿池线路和故障原因，但不能修改
+线路或配置，也不会显示共享密钥、密码、Webhook 和证书私钥。
 
 开始前请完成：
   1. 在 Cloudflare 添加 status 子域名的 A 记录，指向这台 VPS 公网 IP；
@@ -87,12 +91,75 @@ systemctl is-active --quiet stratum-public-status.service || {
 }
 
 echo
-echo "[1/5] 安装网页和证书工具……"
+echo "[1/6] 安装网页和证书工具……"
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y nginx certbot python3-certbot-nginx curl
+DEBIAN_FRONTEND=noninteractive apt-get install -y nginx certbot python3-certbot-nginx curl python3-werkzeug
+
+login_env=/etc/stratum-public-status.env
+if [[ ! -f "$login_env" || $reset_login -eq 1 ]]; then
+  echo "[2/6] 设置只读值守面板登录账号……"
+  if [[ ! -t 0 && ( -z "${PUBLIC_STATUS_USERNAME:-}" || -z "${PUBLIC_STATUS_PASSWORD:-}" ) ]]; then
+    echo "首次安装必须在终端中设置值守账号和密码；请直接运行本脚本，或通过 PUBLIC_STATUS_USERNAME 和 PUBLIC_STATUS_PASSWORD 环境变量提供。" >&2
+    exit 2
+  fi
+  username=${PUBLIC_STATUS_USERNAME:-}
+  while [[ ! "$username" =~ ^[A-Za-z0-9._@-]{3,64}$ ]]; do
+    [[ -z "$username" ]] || echo "账号只能使用 3-64 位英文字母、数字、点、横线、下划线或 @。" >&2
+    read -r -p "请设置值守账号（例如 operator）：" username
+  done
+  password=${PUBLIC_STATUS_PASSWORD:-}
+  if [[ -z "$password" ]]; then
+    while true; do
+      read -r -s -p "请设置登录密码（至少 12 个字符）：" password
+      echo
+      read -r -s -p "请再次输入密码：" password_confirm
+      echo
+      if [[ ${#password} -lt 12 ]]; then
+        echo "密码少于 12 个字符，请重新设置。" >&2
+      elif [[ "$password" != "$password_confirm" ]]; then
+        echo "两次输入不一致，请重新设置。" >&2
+      else
+        break
+      fi
+    done
+  elif [[ ${#password} -lt 12 ]]; then
+    echo "PUBLIC_STATUS_PASSWORD 少于 12 个字符。" >&2
+    exit 2
+  fi
+  password_hash=$(PUBLIC_STATUS_PASSWORD="$password" python3 - <<'PY'
+import os
+from werkzeug.security import generate_password_hash
+print(generate_password_hash(os.environ["PUBLIC_STATUS_PASSWORD"]))
+PY
+)
+  secret_key=$(python3 - <<'PY'
+import secrets
+print(secrets.token_hex(32))
+PY
+)
+  umask 077
+  cat >"$login_env" <<EOF
+PUBLIC_STATUS_USERNAME=$username
+PUBLIC_STATUS_PASSWORD_HASH=$password_hash
+PUBLIC_STATUS_SECRET_KEY=$secret_key
+EOF
+  chmod 0600 "$login_env"
+  unset password password_confirm PUBLIC_STATUS_PASSWORD password_hash secret_key
+  echo "      值守账号已设置：$username"
+else
+  echo "[2/6] 保留现有值守账号和密码。需要修改时使用 --reset-login。"
+fi
+
+install -d -m 0755 /etc/systemd/system/stratum-public-status.service.d
+cat >/etc/systemd/system/stratum-public-status.service.d/20-login.conf <<'EOF'
+[Service]
+EnvironmentFile=/etc/stratum-public-status.env
+EOF
+systemctl daemon-reload
+systemctl restart stratum-public-status.service
 
 if [[ $skip_dns_check -eq 0 ]]; then
-  echo "[2/5] 检查域名是否已经正确指向这台 VPS……"
+  echo "[3/6] 检查域名是否已经正确指向这台 VPS……"
   resolved_ips=$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd ' ' - || true)
   public_ip=$(curl -4 -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)
   if [[ -z "$resolved_ips" ]]; then
@@ -127,10 +194,10 @@ EOF
   fi
   echo "      域名解析正常：$domain → ${public_ip:-$resolved_ips}"
 else
-  echo "[2/5] 已按要求跳过 DNS 检查。"
+  echo "[3/6] 已按要求跳过 DNS 检查。"
 fi
 
-echo "[3/5] 配置只读网站……"
+echo "[4/6] 配置只读网站……"
 site="/etc/nginx/sites-available/stratum-public-status"
 if [[ -f "$site" ]]; then
   cp -a "$site" "${site}.backup-$(date +%Y%m%d-%H%M%S)"
@@ -154,6 +221,7 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Operator-IP \$remote_addr;
         proxy_connect_timeout 3s;
         proxy_read_timeout 15s;
     }
@@ -166,7 +234,7 @@ nginx -t
 systemctl enable --now nginx
 systemctl reload nginx
 
-echo "[4/5] 申请并安装 HTTPS 证书……"
+echo "[5/6] 申请并安装 HTTPS 证书……"
 certbot_args=(--nginx --non-interactive --agree-tos --redirect -d "$domain")
 if [[ -n "$email" ]]; then
   certbot_args+=(--email "$email")
@@ -175,7 +243,7 @@ else
 fi
 certbot "${certbot_args[@]}"
 
-echo "[5/5] 检查 HTTPS 页面和自动续期……"
+echo "[6/6] 检查 HTTPS 页面和自动续期……"
 nginx -t
 systemctl reload nginx
 systemctl enable --now certbot.timer >/dev/null 2>&1 || true

@@ -110,7 +110,7 @@ chmod +x install-public-status.sh
 ./install-public-status.sh
 ```
 
-向导询问域名时，第一台 VPS 输入 `status1.mulinsen.win`，第二台输入 `status2.mulinsen.win`。不要输入 `https://`、端口或斜杠。脚本会先比较域名解析地址和当前 VPS 公网 IP；不一致时会停止并用中文说明应检查的 Cloudflare 设置，避免反复申请失败。
+向导会先要求设置独立的值守账号和至少 12 个字符的登录密码。询问域名时，第一台 VPS 输入 `status1.mulinsen.win`，第二台输入 `status2.mulinsen.win`。不要输入 `https://`、端口或斜杠。脚本会先比较域名解析地址和当前 VPS 公网 IP；不一致时会停止并用中文说明应检查的 Cloudflare 设置，避免反复申请失败。
 
 以前安装命令中的 `--email` 是 Certbot 的旧版证书账户联系邮箱，不是只读面板或管理面板的账号，也不会显示在网页上。Let's Encrypt 已于 2025 年停止发送证书到期提醒邮件，因此新版安装不要求填写邮箱；公网只读网站的证书由 Certbot 自动续期。为了兼容旧的自动部署命令，脚本仍接受 `--email`，但日常安装不需要使用。
 
@@ -122,7 +122,14 @@ https://status1.mulinsen.win/
 
 第二台 VPS 使用 `status2.mulinsen.win` 重复上述步骤。完整管理面板继续通过 Tailscale 访问 `127.0.0.1:8789`。安全组不要直接放行 `8789` 或 `8790`。
 
-公网服务只提供 `/` 和 `/healthz` 两个 GET 入口。它不读取或展示共享密钥、证书私钥、Worker 名称、矿机 IP、上游地址、审计记录和原始日志，页面也没有任何修改按钮。
+公网值守服务需要账号密码登录。登录后显示矿机 IP、Worker、Share、矿池地址、端口、线路健康、服务状态和经过凭据脱敏的事件原因；它不读取或展示共享密钥、密码哈希、Webhook、证书私钥、配置审计和未经脱敏的原始日志，页面没有线路或配置修改按钮。`/healthz` 仅返回是否健康和更新时间，供服务器检查使用，不返回内部信息。
+
+需要更换公网值守账号或密码时运行：
+
+```bash
+cd /root/stratum-v3/monitor-panel
+./install-public-status.sh --domain status1.mulinsen.win --reset-login
+```
 
 ## 5. Windows 木林森中转怎样填写
 

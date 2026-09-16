@@ -34,7 +34,18 @@ class DeploymentSecurityTest(unittest.TestCase):
         self.assertIn("getent ahostsv4", script)
         self.assertIn("api.ipify.org", script)
         self.assertIn("--resolve", script)
+        self.assertIn("PUBLIC_STATUS_PASSWORD_HASH", script)
+        self.assertIn("generate_password_hash", script)
+        self.assertIn("--reset-login", script)
         self.assertIn("不要对公网放行 8789 或 8790", script)
+
+        install = (ROOT / "monitor-panel" / "install-v3.sh").read_text(encoding="utf-8")
+        upgrade = (ROOT / "monitor-panel" / "upgrade-v3-panel.sh").read_text(encoding="utf-8")
+        self.assertIn("EnvironmentFile=-/etc/stratum-public-status.env", install)
+        self.assertIn("EnvironmentFile=-/etc/stratum-public-status.env", upgrade)
+        self.assertIn("SupplementaryGroups=stratum-relay", install)
+        self.assertIn("SupplementaryGroups=stratum-relay", upgrade)
+        self.assertIn("stratum-secure-monitor.service.d/20-state-readers.conf", upgrade)
 
 
 if __name__ == "__main__":

@@ -190,7 +190,7 @@ TAILSCALE_ALLOWED_USERS=你的Tailscale登录邮箱
 
 ### 方式三：HTTPS 域名，只看日常状态
 
-V3 会同时启动独立的只读服务 `stratum-public-status`，它只监听 `127.0.0.1:8790`。为它配置 HTTPS 域名：
+V3 会同时启动独立的登录只读服务 `stratum-public-status`，它只监听 `127.0.0.1:8790`。登录后可查看矿机 IP、Worker、Share、上游地址、端口、线路和故障信息，但不能修改配置，也不会读取或显示共享密钥、密码、Webhook 和证书私钥。为它配置 HTTPS 域名：
 
 ```bash
 cd /root/stratum-v3/monitor-panel
@@ -198,7 +198,7 @@ chmod +x install-public-status.sh
 ./install-public-status.sh
 ```
 
-脚本使用中文向导询问只读面板域名，并自动检查 DNS、配置 Nginx、申请证书、启用 Certbot 自动续期和验证页面。运行前先让域名以“仅 DNS”方式指向 VPS，并在安全组放行 TCP `80`、`443`。以前使用的 `--email` 只是 Certbot 的旧版证书账户联系邮箱，不是面板账号；Let's Encrypt 已在 2025 年停止到期提醒邮件，因此新版向导不要求邮箱。证书签发并确认网页可打开后，Cloudflare 可以改为“已代理”。公网页面只显示汇总数字和脱敏事件；Worker、IP、上游地址、端口、密钥、证书、原始日志及所有修改功能都不会进入这个服务。`8789` 和 `8790` 都不应在安全组中直接放行。
+脚本使用中文向导设置独立值守账号和至少 12 个字符的密码、询问只读面板域名，并自动检查 DNS、配置 Nginx、申请证书、启用 Certbot 自动续期和验证页面。登录连续失败 5 次会冷却 15 分钟，会话 Cookie 只允许 HTTPS 使用。运行前先让域名以“仅 DNS”方式指向 VPS，并在安全组放行 TCP `80`、`443`。以前使用的 `--email` 只是 Certbot 的旧版证书账户联系邮箱，不是面板账号；Let's Encrypt 已在 2025 年停止到期提醒邮件，因此新版向导不要求邮箱。证书签发并确认网页可打开后，Cloudflare 可以改为“已代理”。`8789` 和 `8790` 都不应在安全组中直接放行。更换值守账号或密码时重新运行脚本并增加 `--reset-login`。
 
 ### 找回木林森中转的客户端填写资料
 

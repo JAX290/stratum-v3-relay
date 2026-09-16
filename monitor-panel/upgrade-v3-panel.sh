@@ -11,6 +11,7 @@ for file in stratum_admin_v3.py stratum_public_status.py stratum_inspector.py en
 done
 test -f ./templates/v3_dashboard.html
 test -f ./templates/public_status.html
+test -f ./templates/public_login.html
 test -f ./static/v3.css
 test -f ./static/public.css
 test -f ../version.json
@@ -34,6 +35,7 @@ if [[ -f /opt/stratum-admin/templates/v3_dashboard.html ]]; then cp -a /opt/stra
 if [[ -f /opt/stratum-admin/static/v3.css ]]; then cp -a /opt/stratum-admin/static/v3.css "$backup/"; fi
 if [[ -f /opt/stratum-admin/stratum_public_status.py ]]; then cp -a /opt/stratum-admin/stratum_public_status.py "$backup/"; fi
 if [[ -f /opt/stratum-admin/templates/public_status.html ]]; then cp -a /opt/stratum-admin/templates/public_status.html "$backup/"; fi
+if [[ -f /opt/stratum-admin/templates/public_login.html ]]; then cp -a /opt/stratum-admin/templates/public_login.html "$backup/"; fi
 if [[ -f /opt/stratum-admin/static/public.css ]]; then cp -a /opt/stratum-admin/static/public.css "$backup/"; fi
 if [[ -f /etc/stratum-v3-peer.json ]]; then cp -a /etc/stratum-v3-peer.json "$backup/"; fi
 if [[ -f /etc/systemd/system/stratum-vps-watchdog.service ]]; then cp -a /etc/systemd/system/stratum-vps-watchdog.service "$backup/"; fi
@@ -53,6 +55,7 @@ if ! grep -q '^TAILSCALE_AUTO_LOGIN=' /etc/stratum-admin.env; then echo 'TAILSCA
 install -d -m 0755 /opt/stratum-admin/templates /opt/stratum-admin/static
 install -m 0644 ./templates/v3_dashboard.html /opt/stratum-admin/templates/v3_dashboard.html
 install -m 0644 ./templates/public_status.html /opt/stratum-admin/templates/public_status.html
+install -m 0644 ./templates/public_login.html /opt/stratum-admin/templates/public_login.html
 install -m 0644 ./static/v3.css /opt/stratum-admin/static/v3.css
 install -m 0644 ./static/public.css /opt/stratum-admin/static/public.css
 install -o root -g root -m 0755 "$secure_server" /opt/stratum-secure-server.py
@@ -152,7 +155,7 @@ EOF
 cat >/etc/systemd/system/stratum-public-status.service <<'EOF'
 [Unit]
 Description=Stratum public read-only status panel
-After=network-online.target stratum-inspector-v3.service
+After=network-online.target stratum-inspector-v3.service stratum-secure-relay.service
 Wants=network-online.target
 StartLimitIntervalSec=0
 
@@ -160,10 +163,15 @@ StartLimitIntervalSec=0
 Type=simple
 User=stratum-proxy
 Group=stratum-proxy
+SupplementaryGroups=stratum-relay
 WorkingDirectory=/opt/stratum-admin
 Environment=V3_CONFIG_FILE=/etc/stratum-v3.json
 Environment=INSPECTOR_STATE_FILE=/var/lib/stratum-inspector/state.json
 Environment=ENDPOINT_EVENT_FILE=/var/lib/stratum-monitor/endpoint-events.jsonl
+Environment=SECURE_RELAY_STATE_FILE=/var/lib/stratum-secure-relay/sites.json
+Environment=SECURE_RELAY_MONITOR_FILE=/var/lib/stratum-secure-relay/monitor.json
+Environment=SECURE_RELAY_EVENT_FILE=/var/lib/stratum-secure-relay/events.jsonl
+EnvironmentFile=-/etc/stratum-public-status.env
 ExecStart=/usr/bin/gunicorn --bind 127.0.0.1:8790 --workers 2 --threads 2 --timeout 30 stratum_public_status:app
 Restart=always
 RestartSec=3
@@ -173,10 +181,16 @@ PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadOnlyPaths=/etc/stratum-v3.json /etc/stratum-version.json /var/lib/stratum-inspector /var/lib/stratum-monitor
+ReadOnlyPaths=/etc/stratum-v3.json /etc/stratum-version.json /var/lib/stratum-inspector /var/lib/stratum-monitor -/var/lib/stratum-secure-relay
 
 [Install]
 WantedBy=multi-user.target
+EOF
+
+install -d -m 0755 /etc/systemd/system/stratum-secure-monitor.service.d
+cat >/etc/systemd/system/stratum-secure-monitor.service.d/20-state-readers.conf <<'EOF'
+[Service]
+Group=stratum-relay
 EOF
 
 cat >/etc/systemd/system/stratum-vps-watchdog.service <<'EOF'

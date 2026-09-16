@@ -188,6 +188,7 @@ Restart=always
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
 User=root
+Group=stratum-relay
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true

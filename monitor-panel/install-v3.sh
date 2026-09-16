@@ -12,6 +12,7 @@ for file in "${required[@]}"; do
 done
 test -f ./templates/v3_dashboard.html
 test -f ./templates/public_status.html
+test -f ./templates/public_login.html
 test -f ./static/v3.css
 test -f ./static/public.css
 test -f ../version.json
@@ -27,6 +28,7 @@ printf '%s\n' "$backup" >/root/stratum-v3-last-backup
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy python3-flask gunicorn
 id stratum-proxy >/dev/null 2>&1 || useradd --system --home /nonexistent --shell /usr/sbin/nologin stratum-proxy
+id stratum-relay >/dev/null 2>&1 || useradd --system --home /nonexistent --shell /usr/sbin/nologin stratum-relay
 install -d -m 0755 /opt/stratum-admin
 install -d -m 0755 /opt/stratum-admin/templates /opt/stratum-admin/static
 install -d -o stratum-proxy -g stratum-proxy -m 0750 /var/lib/stratum-inspector
@@ -36,6 +38,7 @@ install -m 0755 v3_manager.py version_info.py admin_auth.py endpoint_monitor.py 
 install -o root -g root -m 0644 ../version.json /etc/stratum-version.json
 install -m 0644 templates/v3_dashboard.html /opt/stratum-admin/templates/v3_dashboard.html
 install -m 0644 templates/public_status.html /opt/stratum-admin/templates/public_status.html
+install -m 0644 templates/public_login.html /opt/stratum-admin/templates/public_login.html
 install -m 0644 static/v3.css /opt/stratum-admin/static/v3.css
 install -m 0644 static/public.css /opt/stratum-admin/static/public.css
 install -m 0640 v3-config.json /etc/stratum-v3.json
@@ -206,7 +209,7 @@ EOF
 cat >/etc/systemd/system/stratum-public-status.service <<'EOF'
 [Unit]
 Description=Stratum public read-only status panel
-After=network-online.target stratum-inspector-v3.service
+After=network-online.target stratum-inspector-v3.service stratum-secure-relay.service
 Wants=network-online.target
 StartLimitIntervalSec=0
 
@@ -214,10 +217,15 @@ StartLimitIntervalSec=0
 Type=simple
 User=stratum-proxy
 Group=stratum-proxy
+SupplementaryGroups=stratum-relay
 WorkingDirectory=/opt/stratum-admin
 Environment=V3_CONFIG_FILE=/etc/stratum-v3.json
 Environment=INSPECTOR_STATE_FILE=/var/lib/stratum-inspector/state.json
 Environment=ENDPOINT_EVENT_FILE=/var/lib/stratum-monitor/endpoint-events.jsonl
+Environment=SECURE_RELAY_STATE_FILE=/var/lib/stratum-secure-relay/sites.json
+Environment=SECURE_RELAY_MONITOR_FILE=/var/lib/stratum-secure-relay/monitor.json
+Environment=SECURE_RELAY_EVENT_FILE=/var/lib/stratum-secure-relay/events.jsonl
+EnvironmentFile=-/etc/stratum-public-status.env
 ExecStart=/usr/bin/gunicorn --bind 127.0.0.1:8790 --workers 2 --threads 2 --timeout 30 stratum_public_status:app
 Restart=always
 RestartSec=3
@@ -227,7 +235,7 @@ PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadOnlyPaths=/etc/stratum-v3.json /etc/stratum-version.json /var/lib/stratum-inspector /var/lib/stratum-monitor
+ReadOnlyPaths=/etc/stratum-v3.json /etc/stratum-version.json /var/lib/stratum-inspector /var/lib/stratum-monitor -/var/lib/stratum-secure-relay
 
 [Install]
 WantedBy=multi-user.target

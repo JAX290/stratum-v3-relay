@@ -4,41 +4,58 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="refresh" content="30">
-  <title>木林森中转 · 运行状态</title>
+  <title>木林森中转 · 值守状态</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='public.css') }}">
 </head>
 <body>
   <main class="shell">
     <header>
-      <div><p class="eyebrow">只读状态面板</p><h1>木林森中转</h1></div>
-      <p class="updated">更新于 {{ status.updated }}（北京时间）</p>
+      <div><p class="eyebrow">登录只读值守面板</p><h1>木林森中转</h1></div>
+      <div class="account"><span>{{ username }} · 更新于 {{ status.updated }}</span><form method="post" action="{{ url_for('logout') }}"><button class="link-button">退出</button></form></div>
     </header>
     <section class="hero {{ status.level }}">
-      <span class="pulse"></span><div><p>整体状态</p><h2>{{ status.headline }}</h2></div>
+      <span class="pulse"></span><div><p>整体状态</p><h2>{{ status.headline }}</h2><small>页面每 30 秒自动刷新{% if status.state_age is not none %} · 状态数据约 {{ status.state_age }} 秒前更新{% endif %}</small></div>
     </section>
     <section class="metrics">
       <article><strong>{{ status.totals.connections }}</strong><span>当前连接</span></article>
-      <article><strong>{{ status.totals.workers }}</strong><span>在线矿工</span></article>
+      <article><strong>{{ status.totals.workers }}</strong><span>在线 Worker</span></article>
       <article><strong>{{ status.totals.accepted }}</strong><span>接受 Share</span></article>
       <article><strong>{{ status.totals.reject_percent }}%</strong><span>拒绝率</span></article>
     </section>
+
     <section class="panel">
-      <div class="title"><h2>矿池运行概况</h2><span>不显示矿机名称、IP 和线路地址</span></div>
-      {% if status.pools %}
-      <div class="pool-grid">
-        {% for pool in status.pools %}
-        <article class="pool"><div class="pool-head"><h3>{{ pool.name }}</h3><span class="badge {{ pool.status }}">{{ '正常' if pool.status == 'good' else '需检查' }}</span></div>
-          <dl><div><dt>在线矿工</dt><dd>{{ pool.workers }}</dd></div><div><dt>连接</dt><dd>{{ pool.connections }}</dd></div><div><dt>健康线路</dt><dd>{{ pool.healthy_routes }}/{{ pool.routes }}</dd></div><div><dt>拒绝率</dt><dd>{{ pool.reject_percent }}%</dd></div></dl>
-        </article>
-        {% endfor %}
-      </div>
-      {% else %}<p class="empty">状态数据尚未生成，请稍后刷新。</p>{% endif %}
+      <div class="title"><div><h2>矿场与值守电脑</h2><span>客户端心跳、版本和影响范围</span></div></div>
+      <div class="table-wrap"><table><thead><tr><th>矿场</th><th>状态</th><th>矿机数</th><th>连接数</th><th>值守电脑公网 IP</th><th>客户端版本</th><th>最近心跳</th></tr></thead><tbody>
+        {% for site in status.sites %}<tr><td><b>{{ site.name }}</b></td><td><span class="badge {{ site.status }}">{{ site.status_text }}</span></td><td>{{ site.miners }}</td><td>{{ site.connections }}</td><td>{{ site.last_ip }}</td><td>{{ site.client_version }}</td><td>{{ site.last_seen }}</td></tr>
+        {% else %}<tr><td colspan="7" class="empty">尚未收到值守电脑心跳</td></tr>{% endfor %}
+      </tbody></table></div>
     </section>
+
+    {% for pool in status.pools %}
+    <section class="panel">
+      <div class="title"><div><h2>{{ pool.name }}</h2><span>矿池和矿机实时状态</span></div><span class="badge {{ pool.status }}">{{ '正常' if pool.status == 'good' else '需要检查' }}</span></div>
+      <div class="mini-metrics">
+        <div><b>{{ pool.summary.connections }}</b><span>连接</span></div><div><b>{{ pool.summary.workers }}</b><span>在线 Worker</span></div>
+        <div><b>{{ pool.summary.accepted }}</b><span>接受</span></div><div><b>{{ pool.summary.rejected }}</b><span>拒绝</span></div>
+        <div><b>{{ pool.summary.reject_percent }}%</b><span>拒绝率</span></div>
+      </div>
+      <h3 class="subhead">当前线路</h3>
+      <div class="table-wrap"><table><thead><tr><th>区域</th><th>对外端口</th><th>上游矿池</th><th>状态</th><th>延迟</th><th>连接</th></tr></thead><tbody>
+        {% for route in pool.routes %}<tr><td>{{ route.region }}</td><td>{{ route.public_ports }}</td><td><code>{{ route.target }}</code></td><td><span class="badge {{ 'good' if route.ok else 'bad' }}">{{ '正常' if route.ok else '不可达' }}</span></td><td>{{ route.latency ~ ' ms' if route.latency is not none else '-' }}</td><td>{{ route.connections }}</td></tr>{% endfor %}
+      </tbody></table></div>
+      <h3 class="subhead">Worker 与矿机</h3>
+      <div class="table-wrap"><table><thead><tr><th>Worker</th><th>矿机 IP</th><th>矿机软件</th><th>状态</th><th>连接</th><th>提交 / 接受 / 拒绝</th><th>拒绝率</th><th>延迟</th><th>估算算力</th><th>最近 Share</th><th>最近错误</th></tr></thead><tbody>
+        {% for worker in pool.workers %}<tr><td><b>{{ worker.name }}</b></td><td>{{ worker.sources|join(', ') or '-' }}</td><td>{{ worker.agent }}</td><td><span class="badge {{ 'good' if worker.status_code in ['online','recent'] else 'bad' }}">{{ worker.status }}</span></td><td>{{ worker.active }}</td><td>{{ worker.submitted }} / {{ worker.accepted }} / {{ worker.rejected }}</td><td>{{ worker.reject_percent }}%</td><td>{{ worker.latency_ms }} ms</td><td>{{ worker.hashrate }}</td><td>{{ worker.last_share }}</td><td>{{ worker.last_error or '-' }}</td></tr>
+        {% else %}<tr><td colspan="11" class="empty">暂时没有 Worker 数据</td></tr>{% endfor %}
+      </tbody></table></div>
+    </section>
+    {% else %}<section class="panel"><p class="empty">状态数据尚未生成，请稍后刷新。</p></section>{% endfor %}
+
     <div class="columns">
       <section class="panel"><h2>核心服务</h2><ul class="service-list">{% for service in status.services %}<li><span>{{ service.label }}</span><b class="dot {{ 'good' if service.state == 'active' else 'unknown' if service.state == 'unavailable' else 'bad' }}">{{ '运行中' if service.state == 'active' else '待确认' if service.state == 'unavailable' else '异常' }}</b></li>{% endfor %}</ul></section>
-      <section class="panel"><h2>近期事件</h2>{% if status.events %}<ul class="event-list">{% for event in status.events %}<li><span class="event-mark {{ event.level }}"></span><div><b>{{ event.label }}</b><time>{{ event.display_time }}</time></div></li>{% endfor %}</ul>{% else %}<p class="empty">近期没有需要展示的事件。</p>{% endif %}</section>
+      <section class="panel"><h2>近期事件</h2>{% if status.events %}<ul class="event-list">{% for event in status.events %}<li><span class="event-mark {{ event.level }}"></span><div><b>{{ event.label }}</b><time>{{ event.display_time }}</time>{% if event.message %}<p>{{ event.message }}</p>{% endif %}</div></li>{% endfor %}</ul>{% else %}<p class="empty">近期没有需要展示的事件。</p>{% endif %}</section>
     </div>
-    <footer>此页面仅供日常查看。配置、日志和维护操作请通过 Tailscale 管理面板完成。</footer>
+    <footer>此页面只能查看。线路切换、配置修改、密钥和维护操作仍只在 Tailscale 管理面板中提供。</footer>
   </main>
 </body>
 </html>

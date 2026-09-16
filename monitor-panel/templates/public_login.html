@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>木林森中转 · 值守登录</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='public.css') }}">
+</head>
+<body class="login-page">
+  <main class="login-card">
+    <p class="eyebrow">只读值守面板</p>
+    <h1>木林森中转</h1>
+    {% if setup_required %}
+      <div class="login-notice bad"><b>尚未设置值守账号</b><span>请在 VPS 中重新运行 install-public-status.sh，按中文向导设置账号和密码。</span></div>
+    {% else %}
+      <p class="login-help">登录后可以查看矿机、Worker、Share、线路和故障信息，但不能修改任何配置。</p>
+      {% if error %}<div class="login-error">{{ error }}</div>{% endif %}
+      <form method="post" autocomplete="on">
+        <label>值守账号<input name="username" autocomplete="username" required autofocus></label>
+        <label>登录密码<input name="password" type="password" autocomplete="current-password" required></label>
+        <button>登录查看状态</button>
+      </form>
+    {% endif %}
+  </main>
+</body>
+</html>
