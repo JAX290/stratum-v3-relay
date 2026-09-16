@@ -53,7 +53,7 @@ cat <<'EOF'
 
 开始前请完成：
   1. 在 Cloudflare 添加 status 子域名的 A 记录，指向这台 VPS 公网 IP；
-  2. 代理状态暂时设为“仅 DNS（灰色云朵）”；
+  2. HTTPS 状态面板可以保持“已代理（橙色云朵）”；
   3. 在云服务商安全组和 VPS 防火墙放行 TCP 80、443；
   4. 确认 V3 面板已经安装完成。
 
@@ -177,22 +177,29 @@ EOF
     exit 1
   fi
   if [[ -n "$public_ip" ]] && [[ " $resolved_ips " != *" $public_ip "* ]]; then
-    cat >&2 <<EOF
+    cat <<EOF
 $domain 当前解析到：$resolved_ips
 这台 VPS 的公网 IPv4 是：$public_ip
-两者不一致，安装已停止，以免证书申请失败。
-
-最常见原因：
-  1. Cloudflare 中填写了旧 VPS 的 IP；
-  2. Cloudflare 仍是“已代理（橙色云朵）”。申请证书前请暂时改为
-     “仅 DNS（灰色云朵）”；网页安装成功后再改回橙色云朵。
-
-如果这台 VPS 使用特殊 NAT 或端口映射，并且你已经确认公网流量能到达
-本机，可以重新运行并加上 --skip-dns-check。
+如果 Cloudflare 使用“已代理（橙色云朵）”，这里显示 Cloudflare 的代理 IP
+而不是 VPS IP，这是正常现象。脚本无法从公网 DNS 核对橙色记录背后的真实 IP。
 EOF
-    exit 1
+    if [[ -t 0 ]]; then
+      read -r -p "请确认 Cloudflare 中该记录的内容是 $public_ip，并且状态为橙色云朵。确认无误后继续？[Y/n] " answer || true
+      if [[ "$answer" =~ ^[Nn]$ ]]; then
+        echo "已停止。请修正 Cloudflare 记录后重新运行同一条命令。" >&2
+        exit 1
+      fi
+      echo "      已由管理员确认 Cloudflare 代理记录指向本机，继续安装。"
+    else
+      cat >&2 <<EOF
+当前不是交互式终端，无法请管理员确认。确认 Cloudflare 记录内容无误后，
+重新运行并加上 --skip-dns-check。
+EOF
+      exit 1
+    fi
+  else
+    echo "      域名解析正常：$domain → ${public_ip:-$resolved_ips}"
   fi
-  echo "      域名解析正常：$domain → ${public_ip:-$resolved_ips}"
 else
   echo "[3/6] 已按要求跳过 DNS 检查。"
 fi
@@ -259,7 +266,7 @@ cat <<EOF
 
 现在请完成最后两步：
   1. 用浏览器打开上面的地址，确认能看到状态页面；
-  2. 确认正常后，可把 Cloudflare 代理状态改为“已代理（橙色云朵）”。
+  2. Cloudflare 可保持“已代理（橙色云朵）”，SSL/TLS 模式建议使用“完全（严格）”。
 
 安全提醒：
   - 安全组只需放行 TCP 80、443；

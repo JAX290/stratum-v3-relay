@@ -52,6 +52,8 @@ chmod +x deploy.sh
 
 两台 VPS 应逐台升级：先升级当前备用的一台，确认正常后，再升级另一台。升级会重启服务，矿机连接可能短暂断开并自动重连。
 
+如果首次部署中途停止，不要再次加 `--install`。修正屏幕提示的问题后进入 `/root/stratum-v3`，直接运行 `./deploy.sh`；脚本会识别已经完成的部分，保留配置并继续安装和验收。
+
 常用选项：
 
 | 选项 | 用途 |
@@ -219,7 +221,7 @@ ssh -N -L 8789:127.0.0.1:8789 -p <SSH端口> root@<VPS公网IP>
 #### 安装前先完成三项准备
 
 1. 在 Cloudflare 的“DNS → 记录”中添加 `A` 记录。名称填写 `status1`，IPv4 地址填写这台 VPS 的公网 IP。
-2. 把该记录的代理状态暂时设为 **仅 DNS（灰色云朵）**。证书安装成功后才改成橙色云朵。
+2. HTTPS 状态面板可以直接使用 **已代理（橙色云朵）**。脚本发现域名返回 Cloudflare 代理 IP 时，会请你核对记录中的 VPS IP 后继续。
 3. 在 VPS 服务商的安全组中放行 TCP `80` 和 `443`。如果 VPS 启用了 UFW，再执行 `ufw allow 80/tcp` 和 `ufw allow 443/tcp`。
 
 不要在安全组中放行 `8789` 或 `8790`。这两个端口只供 VPS 本机、Tailscale 或 SSH 隧道使用。
@@ -256,7 +258,7 @@ chmod +x install-public-status.sh
 
 以前命令中的 `--email` 是 Certbot 的旧版证书账户联系邮箱，**不是面板登录账号**，不会显示在网页中，也不会收到本项目的运行告警。Let's Encrypt 已于 2025 年停止发送证书到期提醒邮件，因此新版安装不再要求填写邮箱；公网只读网站的证书由 Certbot 自动续期。
 
-脚本显示“安装成功”后，用浏览器打开 `https://status1.mulinsen.win/`，输入刚才设置的值守账号和密码。确认能看到状态页面，再回到 Cloudflare，把 `status1` 改为 **已代理（橙色云朵）**。如果脚本提示域名 IP 不一致，先检查是否填了旧 VPS IP，以及 Cloudflare 是否仍为橙色云朵；修正后重新运行脚本即可。
+脚本显示“安装成功”后，用浏览器打开 `https://status1.mulinsen.win/`，输入刚才设置的值守账号和密码。Cloudflare 可以保持 **已代理（橙色云朵）**，SSL/TLS 模式建议使用“完全（严格）”。橙色代理会让域名返回 Cloudflare IP，这是正常现象；安装向导会请你核对 Cloudflare 记录中的 VPS IP，确认后继续申请证书。
 
 完整 Cloudflare 操作和换 VPS 步骤见[域名与 Cloudflare 新手说明](docs/cloudflare-domain-guide.md)。
 

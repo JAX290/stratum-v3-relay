@@ -95,7 +95,7 @@ status2.mulinsen.win   已代理（橙色云朵）
 
 ### 在 VPS 安装 HTTPS 只读面板
 
-第一次签发证书时，先把 `status1` 的代理状态设为“仅 DNS”，并在 VPS 安全组放行 TCP `80` 和 `443`。如果 VPS 启用了 UFW，还要执行：
+`status1` 可以保持“已代理（橙色云朵）”。请确认 Cloudflare 记录内容确实是这台 VPS 的公网 IP，并在 VPS 安全组放行 TCP `80` 和 `443`。如果 VPS 启用了 UFW，还要执行：
 
 ```bash
 ufw allow 80/tcp
@@ -110,11 +110,11 @@ chmod +x install-public-status.sh
 ./install-public-status.sh
 ```
 
-向导会先要求设置独立的值守账号和至少 12 个字符的登录密码。询问域名时，第一台 VPS 输入 `status1.mulinsen.win`，第二台输入 `status2.mulinsen.win`。不要输入 `https://`、端口或斜杠。脚本会先比较域名解析地址和当前 VPS 公网 IP；不一致时会停止并用中文说明应检查的 Cloudflare 设置，避免反复申请失败。
+向导会先要求设置独立的值守账号和至少 12 个字符的登录密码。询问域名时，第一台 VPS 输入 `status1.mulinsen.win`，第二台输入 `status2.mulinsen.win`。不要输入 `https://`、端口或斜杠。橙色代理开启时，域名会返回 Cloudflare 的代理 IP，而不是 VPS IP；向导会说明这一点，并请管理员核对 Cloudflare 记录内容后继续。
 
 以前安装命令中的 `--email` 是 Certbot 的旧版证书账户联系邮箱，不是只读面板或管理面板的账号，也不会显示在网页上。Let's Encrypt 已于 2025 年停止发送证书到期提醒邮件，因此新版安装不要求填写邮箱；公网只读网站的证书由 Certbot 自动续期。为了兼容旧的自动部署命令，脚本仍接受 `--email`，但日常安装不需要使用。
 
-脚本会安装 Nginx 和 Let's Encrypt 证书，把这个域名唯一转发到 `127.0.0.1:8790` 的只读服务，并检查 HTTPS 页面和自动续期服务。显示“安装成功”后，浏览器确认下面地址正常，再把 Cloudflare 代理状态改为“已代理（橙色云朵）”：
+脚本会安装 Nginx 和 Let's Encrypt 证书，把这个域名唯一转发到 `127.0.0.1:8790` 的只读服务，并检查 HTTPS 页面和自动续期服务。显示“安装成功”后，用浏览器确认下面地址正常。Cloudflare 可以继续保持“已代理（橙色云朵）”，SSL/TLS 模式建议使用“完全（严格）”：
 
 ```text
 https://status1.mulinsen.win/
@@ -261,7 +261,7 @@ curl -I http://127.0.0.1:8790/
 certbot certificates
 ```
 
-如果证书签发失败，确认 `status` 域名已经指向当前 VPS、暂时使用“仅 DNS”，并且安全组和 VPS 防火墙都放行了 TCP `80`。成功后再开启橙色云朵。
+如果证书签发失败，先确认 Cloudflare 中 `status` 记录的内容是当前 VPS IP，并检查安全组和 VPS 防火墙是否放行 TCP `80`、`443`。仍然失败时，可以暂时改成“仅 DNS”重试，成功后再恢复橙色云朵。
 
 ### 修改 IP 后为什么还有矿机连接旧 VPS
 

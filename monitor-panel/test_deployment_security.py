@@ -44,6 +44,8 @@ class DeploymentSecurityTest(unittest.TestCase):
         self.assertIn("停止证书到期提醒邮件", script)
         self.assertIn("getent ahostsv4", script)
         self.assertIn("api.ipify.org", script)
+        self.assertIn("Cloudflare 的代理 IP", script)
+        self.assertIn("确认无误后继续？", script)
         self.assertIn("--resolve", script)
         self.assertIn("PUBLIC_STATUS_PASSWORD_HASH", script)
         self.assertIn("generate_password_hash", script)
