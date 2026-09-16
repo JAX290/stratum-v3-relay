@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $(id -u) -ne 0 ]]; then
-  echo "Please run as root." >&2
+  echo "请使用 root 用户运行此脚本。" >&2
   exit 1
 fi
 
@@ -17,7 +17,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy python3-flask python3-
 
 if [[ ! -f /etc/stratum-admin.env ]]; then
   while true; do
-    read -r -s -p "Set emergency panel password (at least 12 characters), or leave empty for Tailscale-only access: " PANEL_PASSWORD
+    read -r -s -p "设置应急管理密码（至少 12 个字符）；只使用 Tailscale 时可直接回车：" PANEL_PASSWORD
     echo
     if [[ -z "$PANEL_PASSWORD" ]]; then
       break
@@ -25,7 +25,7 @@ if [[ ! -f /etc/stratum-admin.env ]]; then
     if [[ ${#PANEL_PASSWORD} -ge 12 ]]; then
       break
     fi
-    echo "Password is too short." >&2
+    echo "密码少于 12 个字符，请重新输入。" >&2
   done
   if [[ -n "$PANEL_PASSWORD" ]]; then
     PASSWORD_HASH=$(PANEL_PASSWORD="$PANEL_PASSWORD" python3 - <<'PY'
@@ -61,7 +61,7 @@ if [[ ! -f /etc/stratum-v3.env ]]; then
 fi
 
 if ! grep -q '^WECHAT_WEBHOOK=' /etc/stratum-v3.env; then
-  read -r -p "Enterprise WeChat webhook URL, leave empty to skip: " WECHAT_WEBHOOK
+  read -r -p "企业微信机器人 Webhook（不需要时直接回车）：" WECHAT_WEBHOOK
   if [[ -n "$WECHAT_WEBHOOK" ]]; then
     printf 'WECHAT_WEBHOOK=%s\n' "$WECHAT_WEBHOOK" >>/etc/stratum-v3.env
   fi
@@ -86,16 +86,16 @@ chmod +x ./install-v3.sh ./rollback-v3.sh
 
 cat <<'EOF'
 
-Bootstrap complete.
+V3 面板和监控组件安装完成。
 
-Next checks:
+检查命令：
   systemctl is-active haproxy stratum-inspector-v3 stratum-endpoint-monitor stratum-route-switch-monitor stratum-security-monitor stratum-admin stratum-public-status
   systemctl is-active stratum-vps-watchdog.timer
   ss -lnt | grep -E ':(9999|10001|10002|10010|10011|10012|11001|11101|11201|11301)\b'
 
-Panel:
-  - Direct local tunnel: ssh -N -L 8789:127.0.0.1:8789 root@<VPS_PUBLIC_IP>
-  - Or expose through Tailscale Serve after Tailscale login:
+管理面板：
+  - SSH 本地隧道：ssh -N -L 8789:127.0.0.1:8789 root@<VPS公网IP>
+  - 或登录 Tailscale 后发布：
       tailscale serve --bg http://127.0.0.1:8789
 
 EOF

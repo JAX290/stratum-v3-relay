@@ -19,6 +19,52 @@ VPS（加密入口 + V3 管理面板）
 
 以后更换 VPS 或重新安装系统时，从本页第一步开始执行即可。第一次部署建议完整读一遍，再逐条复制命令。
 
+## 最简单的安装和升级方式（推荐）
+
+### 新 VPS 一键部署
+
+以 `root` 登录全新的 Ubuntu VPS 后，复制整个命令块执行：
+
+```bash
+apt-get update
+apt-get install -y curl
+curl -fsSL https://raw.githubusercontent.com/JAX290/stratum-v3-relay/main/deploy.sh -o /root/mulinsen-deploy.sh
+chmod +x /root/mulinsen-deploy.sh
+/root/mulinsen-deploy.sh --install
+```
+
+脚本会下载最新版代码并依次完成 V3 转发、监控、管理面板、TLS 加密入口、自动恢复和安装后检查。过程中会说明当前步骤，并询问：
+
+- TLS 端口，直接回车使用推荐值 `452`；
+- Tailscale 管理通道；
+- 是否已经准备好 HTTPS 只读值守面板域名；
+- 相应的管理密码、值守账号和可选企业微信 Webhook。
+
+### 已有 VPS 一键升级
+
+```bash
+cd /root/stratum-v3
+chmod +x deploy.sh
+./deploy.sh
+```
+
+脚本检测到现有配置后会自动进入升级模式：先检查仓库是否有未保存的代码修改，再更新 GitHub `main`、创建配置备份、升级所有服务并逐项验收。已有线路、TLS 端口、证书、客户端共享密钥、Tailscale 设置、面板账号和告警设置都会保留。
+
+两台 VPS 应逐台升级：先升级当前备用的一台，确认正常后，再升级另一台。升级会重启服务，矿机连接可能短暂断开并自动重连。
+
+常用选项：
+
+| 选项 | 用途 |
+| --- | --- |
+| `--install` | 明确执行首次安装 |
+| `--upgrade` | 明确执行保留配置升级 |
+| `--relay-port 452` | 首次安装时指定 TLS 入口端口 |
+| `--public-domain status1.example.com` | 同时配置 HTTPS 只读值守面板 |
+| `--skip-tailscale` | 本次不处理 Tailscale |
+| `--skip-public-status` | 本次不处理公网只读值守面板 |
+
+后面的章节保留每个组件的详细操作，供故障排查或需要单独安装时使用。
+
 ## 一、开始前准备
 
 准备以下内容：
@@ -398,6 +444,15 @@ stratum+tcp://192.168.8.3:11301
 VPS 无法可靠地从 Stratum V1 自动判断所有算法，因此自定义矿池时仍要正确选择算法。最可靠的判断是使用真实矿池账号完成单机测试，并确认产生接受 Share。
 
 ## 十三、升级已有 VPS
+
+推荐直接使用统一入口：
+
+```bash
+cd /root/stratum-v3
+./deploy.sh
+```
+
+以下是需要单独控制每个组件时的手动升级方法。
 
 先进入仓库并拉取指定分支：
 

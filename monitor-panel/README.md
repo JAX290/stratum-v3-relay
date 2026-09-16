@@ -61,6 +61,16 @@
 
 ## 新 VPS 一键部署
 
+推荐从仓库根目录使用统一部署脚本。它会继续安装 TLS 加密入口、可选 Tailscale、公网只读值守面板，并完成服务验收：
+
+```bash
+cd /root/stratum-v3
+chmod +x deploy.sh
+./deploy.sh
+```
+
+下面的 `bootstrap-vps.sh` 适合只安装 V3 面板组件或进行单独排障：
+
 更换 VPS 后，在新 VPS 上 clone 公开仓库，然后执行：
 
 ```bash
@@ -254,6 +264,15 @@ git push
 ```
 
 ## 升级已有 V3 服务器
+
+日常升级推荐执行：
+
+```bash
+cd /root/stratum-v3
+./deploy.sh
+```
+
+统一脚本会先更新代码，再调用下方的组件升级程序并执行安装后验收。需要人工控制组件时再使用以下步骤。
 
 如果 VPS 已经部署过 V3，拉取最新代码后执行：
 

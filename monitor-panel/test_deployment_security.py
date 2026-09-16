@@ -7,6 +7,17 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class DeploymentSecurityTest(unittest.TestCase):
+    def test_one_click_deployer_updates_then_selects_safe_install_or_upgrade(self):
+        script = (ROOT / "deploy.sh").read_text(encoding="utf-8")
+        self.assertIn("git pull --ff-only origin main", script)
+        self.assertIn("git status --porcelain --untracked-files=no", script)
+        self.assertIn("monitor-panel/bootstrap-vps.sh", script)
+        self.assertIn("monitor-panel/upgrade-v3-panel.sh", script)
+        self.assertIn("secure-relay/server/install-secure-relay.sh", script)
+        self.assertIn("install-public-status.sh", script)
+        self.assertIn("systemctl is-active", script)
+        self.assertNotIn("git reset --hard", script)
+
     def test_secure_relay_installer_uses_dedicated_account_and_minimal_capability(self):
         script = (ROOT / "secure-relay" / "server" / "install-secure-relay.sh").read_text(encoding="utf-8")
         service = re.search(r"cat >/etc/systemd/system/stratum-secure-relay\.service <<'EOF'\n(.*?)\nEOF", script, re.S)
