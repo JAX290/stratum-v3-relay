@@ -250,11 +250,27 @@ else
 fi
 certbot "${certbot_args[@]}"
 
+# If a previous run obtained the certificate but stopped before deployment,
+# Certbot may keep the existing certificate without adding the HTTPS listener.
+# Installing the named lineage is idempotent and repairs that interrupted state.
+certbot install --cert-name "$domain" --non-interactive
+
 echo "[6/6] 检查 HTTPS 页面和自动续期……"
 nginx -t
-systemctl reload nginx
+systemctl enable --now nginx
+systemctl restart nginx
 systemctl enable --now certbot.timer >/dev/null 2>&1 || true
-curl -fsS --max-time 15 --resolve "$domain:443:127.0.0.1" "https://$domain/healthz" >/dev/null
+if ! curl -fsS --max-time 15 --resolve "$domain:443:127.0.0.1" "https://$domain/healthz" >/dev/null; then
+  cat >&2 <<EOF
+HTTPS 证书已经签发，但本机 443 端口的页面检查没有通过。
+
+请依次执行下面三条命令查看原因：
+  systemctl status nginx stratum-public-status --no-pager -l
+  grep -R "listen .*443" /etc/nginx/sites-enabled /etc/nginx/sites-available
+  ss -lntp | grep ':443'
+EOF
+  exit 1
+fi
 
 cat <<EOF
 
