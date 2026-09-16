@@ -329,11 +329,54 @@ class AdminV3Test(unittest.TestCase):
             response = self.client.get("/access", headers={"Tailscale-User-Login": "owner@example.com"})
         self.assertEqual(response.status_code, 200)
         self.assertIn("客户端接入资料".encode(), response.data)
+        self.assertIn("新增矿场并生成接入密钥".encode(), response.data)
+        self.assertIn("编辑矿场名称".encode(), response.data)
         self.assertIn(("F" * 64).encode(), response.data)
         self.assertIn(("••••••••••••" + secret[-4:]).encode(), response.data)
         self.assertNotIn(secret.encode(), response.data)
         self.assertNotIn(b"/secret/server.key", response.data)
         self.assertEqual(response.headers["Cache-Control"], "no-store, max-age=0")
+
+    def test_create_and_rename_farm_preserve_legacy_access_and_settings(self):
+        secret = "a" * 64
+        original = {"listen_port": 452, "token": secret, "certificate": "/old/cert", "max_connections": 500}
+        admin.SECURE_RELAY_CONFIG.write_text(json.dumps(original), encoding="utf-8")
+        headers = {"Tailscale-User-Login": "owner@example.com"}
+        response = self.client.post("/client-access/create", data={"csrf": "token", "name": "云南矿场"}, headers=headers)
+        self.assertEqual(response.status_code, 302)
+        updated = json.loads(admin.SECURE_RELAY_CONFIG.read_text(encoding="utf-8"))
+        self.assertEqual(updated["clients"][0]["token"], secret)
+        added = updated["clients"][1]
+        self.assertEqual(added["name"], "云南矿场")
+        self.assertEqual(len(added["token"]), 64)
+        self.assertNotEqual(added["token"], secret)
+        self.assertEqual(updated["listen_port"], 452)
+        self.assertEqual(updated["certificate"], "/old/cert")
+        self.assertEqual(updated["max_connections"], 500)
+        self.assertEqual(json.loads(admin.SECURE_RELAY_CONFIG.with_suffix(".json.backup").read_text()), original)
+        response = self.client.post("/client-access/default/rename", data={"csrf": "token", "name": "原矿场"}, headers=headers)
+        self.assertEqual(response.status_code, 302)
+        renamed = json.loads(admin.SECURE_RELAY_CONFIG.read_text(encoding="utf-8"))
+        self.assertEqual(renamed["clients"][0]["name"], "原矿场")
+        self.assertEqual(renamed["clients"][0]["token"], secret)
+        self.assertEqual(renamed["clients"][1], added)
+        self.assertEqual(admin.site_overview_rows()[0]["name"], "原矿场")
+        audit = admin.AUDIT_FILE.read_text(encoding="utf-8")
+        self.assertIn("新增矿场客户端:", audit)
+        self.assertIn("修改矿场名称:default", audit)
+        self.assertNotIn(added["token"], audit)
+        self.assertNotIn(secret, audit)
+
+    def test_farm_writes_require_current_tailscale_csrf_and_valid_name(self):
+        admin.SECURE_RELAY_CONFIG.write_text(json.dumps({"token": "a" * 64}), encoding="utf-8")
+        original = admin.SECURE_RELAY_CONFIG.read_bytes()
+        headers = {"Tailscale-User-Login": "owner@example.com"}
+        self.assertEqual(self.client.post("/client-access/create", data={"csrf": "token", "name": "矿场"}).status_code, 404)
+        self.assertEqual(self.client.post("/client-access/create", data={"csrf": "wrong", "name": "矿场"}, headers=headers).status_code, 403)
+        for name in ("", "x" * 65, "矿场\n名称"):
+            self.assertEqual(self.client.post("/client-access/create", data={"csrf": "token", "name": name}, headers=headers).status_code, 302)
+        self.assertEqual(self.client.post("/client-access/missing/rename", data={"csrf": "token", "name": "矿场"}, headers=headers).status_code, 404)
+        self.assertEqual(admin.SECURE_RELAY_CONFIG.read_bytes(), original)
 
     def test_client_secret_reveal_and_copy_are_audited(self):
         secret = "b" * 64

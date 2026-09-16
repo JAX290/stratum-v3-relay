@@ -1159,6 +1159,57 @@ def find_relay_client(client_id):
     return next((item for item in clients if str(item.get("id", "")) == client_id), None)
 
 
+@app.route("/client-access/create", methods=["POST"])
+@app.route("/client-access/<client_id>/rename", methods=["POST"])
+def manage_relay_client(client_id=None):
+    if not current_tailscale_admin():
+        return "Not found", 404
+    if not csrf_ok():
+        return "Forbidden", 403
+    name = request.form.get("name", "").strip()
+    if not name or len(name) > 64 or any(ord(char) < 32 or ord(char) == 127 for char in name):
+        flash("请填写 1-64 个字符的矿场名称，不要包含换行等控制字符。", "error")
+        return redirect(url_for("dashboard_page", page="access"))
+    try:
+        with file_lock(SECURE_RELAY_CONFIG):
+            relay = json.loads(SECURE_RELAY_CONFIG.read_text(encoding="utf-8"))
+            clients = relay.get("clients", [])
+            if not isinstance(clients, list):
+                raise ValueError("客户端配置格式不正确")
+            if not clients and relay.get("token"):
+                clients = [{"id": "default", "name": "默认矿场", "token": relay["token"], "enabled": True}]
+            if client_id is None:
+                if len(clients) >= 256:
+                    raise ValueError("客户端数量已达到 256 个，请联系维护人员")
+                existing = {str(item.get("id", "")) for item in clients}
+                client_id = "farm-" + secrets.token_hex(8)
+                while client_id in existing:
+                    client_id = "farm-" + secrets.token_hex(8)
+                clients.append({"id": client_id, "name": name, "token": secrets.token_hex(32), "enabled": True})
+                action = "新增矿场客户端:"
+                message = "矿场已新增。请在下方对应行复制共享密钥，连同 VPS 地址、TLS 端口和证书指纹填写到新电脑的木林森中转中。"
+            else:
+                client = next((item for item in clients if str(item.get("id", "")) == client_id), None)
+                if client is None:
+                    return "Not found", 404
+                client["name"] = name
+                action = "修改矿场名称:"
+                message = "矿场名称已保存，现有共享密钥和连接不变。"
+            relay["clients"] = clients
+            # Preserve the owner/group so the dedicated relay service can read
+            # the replaced file. Keep one private recovery copy before saving.
+            ConfigStore._atomic_write(SECURE_RELAY_CONFIG.with_suffix(".json.backup"),
+                SECURE_RELAY_CONFIG.read_text(encoding="utf-8"), mode=0o600)
+            ConfigStore._atomic_write(SECURE_RELAY_CONFIG,
+                json.dumps(relay, ensure_ascii=False, indent=2) + "\n", mode=0o640)
+        append_audit(action + client_id)
+        flash(message, "success")
+    except (OSError, ValueError, TypeError, AttributeError):
+        app.logger.exception("cannot update relay clients")
+        flash("保存失败，请检查加密入口配置及文件权限；已有连接资料没有被主动删除。", "error")
+    return redirect(url_for("dashboard_page", page="access"))
+
+
 @app.route("/client-access/<client_id>/reveal", methods=["POST"])
 def reveal_client_secret(client_id):
     if not current_tailscale_admin():
