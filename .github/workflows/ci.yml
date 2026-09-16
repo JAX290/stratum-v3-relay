@@ -12,8 +12,8 @@ jobs:
   python-and-deployment:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -22,12 +22,12 @@ jobs:
       - name: Run Python and configuration tests
         run: ./test.sh
       - name: Check deployment script syntax
-        run: bash -n monitor-panel/*.sh secure-relay/server/*.sh
+        run: bash -n deploy.sh monitor-panel/*.sh secure-relay/server/*.sh
 
   windows-client:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build and run Windows client core tests
         shell: pwsh
         run: ./secure-relay/client/test-client.ps1
