@@ -1,6 +1,6 @@
-# 木林森中转 2.1.6
+# 木林森 Windows 客户端与 TLS 中转服务
 
-> 从全新 VPS、备用 VPS、Windows 值守电脑到矿机的完整部署顺序，请按照仓库根目录的 [从零部署说明](../README.md) 操作。本页用于补充 TLS 服务和 Windows 客户端的功能细节。
+> 功能概览和一键安装见[项目首页](../README.md)。从 VPS 到 Windows 值守电脑和矿机的配置顺序见[部署与维护指南](../docs/deployment-guide.md)。本页补充 TLS 服务和 Windows 客户端的功能细节。
 
 这套组件在值守 Windows 电脑和 Stratum V3 VPS 之间建立 TLS 1.2 加密连接。局域网矿机仍使用普通 `stratum+tcp`，但这段明文只存在于矿场局域网内；流量卡网络只能看到电脑到 VPS 的 TLS 连接。
 
