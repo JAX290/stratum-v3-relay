@@ -126,7 +126,7 @@ data = {
 if os.path.exists(target):
     old = json.load(open(target, encoding="utf-8"))
     clients = old.get("clients") or ([{"id": "default", "name": "默认矿场", "token": old["token"], "enabled": True, "alert_enabled": True}] if old.get("token") else [])
-    if clients:
+    if clients or "clients" in old:
         data["clients"] = clients
 fd, temporary = tempfile.mkstemp(prefix="stratum-secure-relay.", dir="/etc")
 with os.fdopen(fd, "w", encoding="utf-8") as handle:

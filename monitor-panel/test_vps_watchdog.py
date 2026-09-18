@@ -1,11 +1,22 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import vps_watchdog as watchdog
 
 
 class WatchdogTests(unittest.TestCase):
+    def test_empty_farm_configuration_checks_tls_without_restart_failure(self):
+        with patch.object(watchdog, "read_json", return_value={"clients": [], "listen_port": 452}), \
+                patch.object(watchdog.socket, "create_connection"), \
+                patch.object(watchdog.ssl, "SSLContext") as context:
+            ok, message = watchdog.relay_health()
+            self.assertTrue(ok)
+            self.assertIn("跳过密钥认证检查", message)
+            context.return_value.wrap_socket.assert_called_once()
+            context.return_value.wrap_socket.return_value.__enter__.return_value.sendall.assert_not_called()
+
     def test_restarts_only_after_three_consecutive_failures(self):
         state = {"services": {}, "events": []}
         restarted = []

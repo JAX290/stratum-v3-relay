@@ -62,7 +62,8 @@ def relay_health(timeout=5):
         clients = [{"token": config["token"], "enabled": True}]
     token = next((str(item.get("token", "")) for item in clients if item.get("enabled", True)), "")
     port = int(config.get("listen_port", 0) or 0)
-    if not token or not port:
+    empty_clients = config.get("clients") == [] and not config.get("token")
+    if (not token and not empty_clients) or not port:
         return False, "加密中转配置缺少端口或可用密钥"
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.check_hostname = False
@@ -71,6 +72,8 @@ def relay_health(timeout=5):
         with socket.create_connection(("127.0.0.1", port), timeout=timeout) as raw:
             with context.wrap_socket(raw, server_hostname="localhost") as connection:
                 connection.settimeout(timeout)
+                if empty_clients:
+                    return True, "尚未配置矿场，TLS 监听检查通过，跳过密钥认证检查"
                 request = (
                     "CONNECT /relay/v2/health HTTP/1.1\r\n"
                     "Host: localhost\r\n"

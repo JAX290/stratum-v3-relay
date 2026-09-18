@@ -11,6 +11,17 @@ import secure_relay_clients as credentials
 
 
 class SecureServerTests(unittest.TestCase):
+    def test_empty_client_list_is_valid_and_authenticates_nobody(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "relay.json"
+            config.write_text(json.dumps({"listen_host": "0.0.0.0", "listen_port": 452,
+                "certificate": "cert", "private_key": "key", "clients": []}))
+            with patch.object(secure, "CONFIG_FILE", config):
+                loaded = secure.load_config()
+            self.assertEqual(loaded["clients"], [])
+            with self.assertRaises(PermissionError):
+                secure.authenticate(loaded, "a" * 64)
+
     def test_parse_authenticated_request(self):
         raw = (
             b"CONNECT /relay/v1/9999 HTTP/1.1\r\n"

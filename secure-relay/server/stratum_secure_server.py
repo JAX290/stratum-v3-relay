@@ -47,7 +47,7 @@ def load_config():
     clients = data.get("clients") or []
     if not clients and data.get("token"):
         clients = [{"id": "default", "name": "默认矿场", "token": data["token"], "enabled": True}]
-    if not clients or any(len(str(item.get("token", ""))) < 32 for item in clients):
+    if (not clients and "clients" not in data) or any(len(str(item.get("token", ""))) < 32 for item in clients):
         raise ValueError("at least one secure relay client token is required")
     data["clients"] = clients
     return data

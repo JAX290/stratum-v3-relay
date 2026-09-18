@@ -378,6 +378,65 @@ class AdminV3Test(unittest.TestCase):
         self.assertEqual(self.client.post("/client-access/missing/rename", data={"csrf": "token", "name": "矿场"}, headers=headers).status_code, 404)
         self.assertEqual(admin.SECURE_RELAY_CONFIG.read_bytes(), original)
 
+    def test_delete_farm_requires_confirmation_and_preserves_other_clients(self):
+        headers = {"Tailscale-User-Login": "owner@example.com"}
+        clients = [{"id": "a", "name": "矿场A", "token": "a" * 64}, {"id": "b", "name": "矿场B", "token": "b" * 64}]
+        admin.SECURE_RELAY_CONFIG.write_text(json.dumps({"clients": clients, "listen_port": 452, "token": "a" * 64}), encoding="utf-8")
+        original = admin.SECURE_RELAY_CONFIG.read_bytes()
+        self.assertEqual(self.client.get("/client-access/a/delete").status_code, 404)
+        self.assertEqual(self.client.post("/client-access/a/delete", data={"csrf": "token"}).status_code, 404)
+        with patch.object(admin, "detect_relay_public_ip", return_value={"host": "198.51.100.1"}):
+            response = self.client.get("/client-access/a/delete", headers=headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("删除可能导致整个矿场中转掉线".encode(), response.data)
+        self.assertNotIn(("a" * 64).encode(), response.data)
+        self.assertEqual(admin.SECURE_RELAY_CONFIG.read_bytes(), original)
+        with self.client.session_transaction() as session:
+            nonce = session["delete_client_confirmation"]["nonce"]
+        data = {"csrf": "token", "confirmation": nonce, "confirm_name": "矿场A", "acknowledge": "yes"}
+        self.assertEqual(self.client.post("/client-access/a/delete", data=dict(data, csrf="wrong"), headers=headers).status_code, 403)
+        for changes in ({"confirm_name": "矿场B"}, {"acknowledge": ""}, {"confirmation": "wrong"}):
+            self.client.post("/client-access/a/delete", data=dict(data, **changes), headers=headers)
+            self.assertEqual(admin.SECURE_RELAY_CONFIG.read_bytes(), original)
+        self.client.post("/client-access/a/delete", data=data, headers=headers)
+        updated = json.loads(admin.SECURE_RELAY_CONFIG.read_text(encoding="utf-8"))
+        self.assertEqual(updated["clients"], [clients[1]])
+        self.assertEqual(updated["listen_port"], 452)
+        self.assertNotIn("token", updated)
+        audit = admin.AUDIT_FILE.read_text(encoding="utf-8")
+        self.assertIn("删除矿场客户端:a", audit)
+        self.assertNotIn("a" * 64, audit)
+        self.client.post("/client-access/a/delete", data=data, headers=headers)
+        self.assertEqual(json.loads(admin.SECURE_RELAY_CONFIG.read_text(encoding="utf-8")), updated)
+
+    def test_delete_confirmation_rejects_stale_or_expired_and_allows_empty_clients(self):
+        headers = {"Tailscale-User-Login": "owner@example.com"}
+        admin.SECURE_RELAY_CONFIG.write_text(json.dumps({"token": "a" * 64}), encoding="utf-8")
+        with patch.object(admin, "detect_relay_public_ip", return_value={"host": "198.51.100.1"}):
+            self.client.get("/client-access/default/delete", headers=headers)
+        with self.client.session_transaction() as session:
+            pending = dict(session["delete_client_confirmation"])
+            session["delete_client_confirmation"] = dict(pending, expires=0)
+        data = {"csrf": "token", "confirmation": pending["nonce"], "confirm_name": pending["name"], "acknowledge": "yes"}
+        self.client.post("/client-access/default/delete", data=data, headers=headers)
+        self.assertTrue(admin.find_relay_client("default"))
+        with self.client.session_transaction() as session:
+            session["delete_client_confirmation"] = pending
+        admin.SECURE_RELAY_CONFIG.write_text(json.dumps({"token": "b" * 64}), encoding="utf-8")
+        self.client.post("/client-access/default/delete", data=data, headers=headers)
+        self.assertTrue(admin.find_relay_client("default"))
+        with patch.object(admin, "detect_relay_public_ip", return_value={"host": "198.51.100.1"}):
+            self.client.get("/client-access/default/delete", headers=headers)
+        with self.client.session_transaction() as session:
+            data["confirmation"] = session["delete_client_confirmation"]["nonce"]
+        self.client.post("/client-access/default/delete", data=data, headers=headers)
+        updated = json.loads(admin.SECURE_RELAY_CONFIG.read_text(encoding="utf-8"))
+        self.assertEqual(updated["clients"], [])
+        self.assertNotIn("token", updated)
+        self.assertEqual(admin.site_overview_rows(), [])
+        self.client.post("/client-access/create", data={"csrf": "token", "name": "新矿场"}, headers=headers)
+        self.assertEqual(len(json.loads(admin.SECURE_RELAY_CONFIG.read_text(encoding="utf-8"))["clients"]), 1)
+
     def test_client_secret_reveal_and_copy_are_audited(self):
         secret = "b" * 64
         admin.SECURE_RELAY_CONFIG.write_text(json.dumps({"listen_port": 452, "certificate": "",

@@ -1225,6 +1225,64 @@ def reveal_client_secret(client_id):
     return redirect(url_for("dashboard_page", page="access"))
 
 
+@app.route("/client-access/<client_id>/delete", methods=["GET", "POST"])
+def delete_relay_client(client_id):
+    if not current_tailscale_admin():
+        return "Not found", 404
+    if request.method == "GET":
+        context = build_page_context("access")
+        client = next((row for row in context["client_access"]["clients"] if row["id"] == client_id), None)
+        configured = find_relay_client(client_id)
+        if not client or not configured:
+            return "Not found", 404
+        nonce = secrets.token_urlsafe(32)
+        session["delete_client_confirmation"] = {"id": client_id, "name": client["name"],
+            "digest": hashlib.sha256(str(configured.get("token", "")).encode()).hexdigest(),
+            "nonce": nonce, "expires": time.time() + 300}
+        context.update(page="access-delete", deleting_client=client, delete_nonce=nonce)
+        return render_template("v3_dashboard.html", **context)
+    if not csrf_ok():
+        return "Forbidden", 403
+    pending = session.get("delete_client_confirmation", {})
+    if (pending.get("id") != client_id or pending.get("expires", 0) < time.time()
+            or not secrets.compare_digest(str(pending.get("nonce", "")), request.form.get("confirmation", ""))
+            or not pending.get("nonce") or request.form.get("confirm_name", "") != pending.get("name")
+            or request.form.get("acknowledge") != "yes"):
+        flash("删除未执行：请重新打开确认页，完整输入矿场名称并确认风险。", "error")
+        return redirect(url_for("dashboard_page", page="access"))
+    try:
+        with file_lock(SECURE_RELAY_CONFIG):
+            relay = json.loads(SECURE_RELAY_CONFIG.read_text(encoding="utf-8"))
+            clients = relay.get("clients", [])
+            if not isinstance(clients, list):
+                raise ValueError("invalid clients")
+            if not clients and relay.get("token"):
+                clients = [{"id": "default", "name": "默认客户端", "token": relay["token"], "enabled": True}]
+            client = next((item for item in clients if str(item.get("id", "")) == client_id), None)
+            if not client:
+                return "Not found", 404
+            name = str(client.get("name") or client_id)
+            digest = hashlib.sha256(str(client.get("token", "")).encode()).hexdigest()
+            if name != pending["name"] or digest != pending["digest"]:
+                flash("删除未执行：矿场名称或密钥已发生变化，请重新核对后确认。", "error")
+                return redirect(url_for("dashboard_page", page="access"))
+            relay["clients"] = [item for item in clients if str(item.get("id", "")) != client_id]
+            relay.pop("token", None)  # Never resurrect a deleted legacy credential.
+            ConfigStore._atomic_write(SECURE_RELAY_CONFIG.with_suffix(".json.backup"),
+                SECURE_RELAY_CONFIG.read_text(encoding="utf-8"), mode=0o600)
+            ConfigStore._atomic_write(SECURE_RELAY_CONFIG, json.dumps(relay, ensure_ascii=False, indent=2) + "\n", mode=0o640)
+        session.pop("delete_client_confirmation", None)
+        if session.get("revealed_client_id") == client_id:
+            session.pop("revealed_client_id", None)
+            session.pop("revealed_client_until", None)
+        append_audit("删除矿场客户端:" + client_id)
+        flash("矿场已删除。原密钥无法用于新连接或重连；其他矿场配置保持不变。重新新增会生成新密钥。", "success")
+    except (OSError, ValueError, TypeError, AttributeError):
+        app.logger.exception("cannot delete relay client")
+        flash("删除保存失败，请检查配置文件权限后重试。", "error")
+    return redirect(url_for("dashboard_page", page="access"))
+
+
 @app.route("/client-access/<client_id>/copy", methods=["POST"])
 def copy_client_secret(client_id):
     if not current_tailscale_admin():
