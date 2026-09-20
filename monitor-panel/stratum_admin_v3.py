@@ -128,6 +128,19 @@ def write_env(updates):
     ConfigStore._atomic_write(ENV_FILE, "\n".join(output) + "\n", mode=0o600)
 
 
+NOTIFICATION_ENV_KEYS = ("WECHAT_WEBHOOK", "DINGTALK_WEBHOOK", "DINGTALK_SECRET",
+    "SMTP_HOST", "SMTP_PORT", "SMTP_SECURITY", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM", "SMTP_TO")
+
+
+def notification_context():
+    values = read_env()
+    return {"wechat": bool(values.get("WECHAT_WEBHOOK")), "dingtalk": bool(values.get("DINGTALK_WEBHOOK")),
+        "email": bool(values.get("SMTP_HOST") and values.get("SMTP_FROM") and values.get("SMTP_TO")),
+        "smtp_host": values.get("SMTP_HOST", ""), "smtp_port": values.get("SMTP_PORT", "465"),
+        "smtp_security": values.get("SMTP_SECURITY", "ssl"), "smtp_username": values.get("SMTP_USERNAME", ""),
+        "smtp_from": values.get("SMTP_FROM", ""), "smtp_to": values.get("SMTP_TO", "")}
+
+
 def clamp_int(value, minimum, maximum):
     number = int(value)
     if not (minimum <= number <= maximum):
@@ -889,7 +902,15 @@ def stratum_pool_rows(config, inspector):
             "offline": [item for item in pool["workers"] if item["status"] == "offline"],
             "invalid": [item for item in pool["workers"] if item["status"] == "invalid"],
         }
+        pool["active_ports"] = sorted({int(port[1:]) for route in pool["routes"] if route["connections"]
+            for port in route["public_ports"].split(", ") if port.startswith(":")})
     return list(pools.values())
+
+
+def prioritize_pools(pools):
+    ordered = sorted(pools, key=lambda item: (not bool(item["summary"]["connections"] or item["summary"]["workers"]), item["name"]))
+    return ([item for item in ordered if item["summary"]["connections"] or item["summary"]["workers"]],
+        [item for item in ordered if not (item["summary"]["connections"] or item["summary"]["workers"])])
 
 
 def format_hashrate_value(value):
@@ -1084,6 +1105,7 @@ def build_page_context(page):
             "jitter": f"{stats['jitter_ms']} ms" if stats.get("jitter_ms") is not None else "-"})
     security = load_json(SECURITY_STATE_FILE, {"events": [], "active": {}})
     pools = stratum_pool_rows(config, inspector)
+    active_pools, inactive_pools = prioritize_pools(pools)
     overview = overview_summary(pools)
     services = {"HAProxy": service_state("haproxy"), "协议检查器": service_state("stratum-inspector-v3"),
         "稳定性监控": service_state("stratum-endpoint-monitor"), "自动切换": service_state("stratum-route-switch-monitor"),
@@ -1108,8 +1130,10 @@ def build_page_context(page):
     logs = recent_logs() if page == "logs" else {"journal": "", "entries": [], "attention": [], "events": ""}
     return dict(page=page, config=config, endpoint_map=endpoint_map, endpoint_rows=rows,
         online=sum(1 for row in rows if row["ok"]), alerting=sum(1 for value in state.get("endpoints", {}).values() if value.get("alerting")),
-        services=services, server=server_metrics(), pools=pools, overview=overview, logs=logs,
+        services=services, server=server_metrics(), pools=pools, active_pools=active_pools,
+        inactive_pools=inactive_pools, overview=overview, logs=logs,
         alert_settings=alert_settings, wechat_configured=read_env().get("WECHAT_WEBHOOK", "").startswith("https://"),
+        notifications_configured=bool(Notifier(settings=read_env()).configured_channels()),
         legacy_enabled=monitor_enabled(), history=store.history(), audit=audit_rows(),
         disconnect_history=disconnect_history_rows(),
         route_groups=route_groups, overview_routes=overview_routes, relay_status=relay_status,
@@ -1126,7 +1150,7 @@ def build_page_context(page):
             "route_sync_received": "已接收VPS同步"},
         algorithms={"scrypt": "Scrypt", "sha256d": "SHA-256", "other": "其他/自定义", "unknown": "算法待确认"},
         security=security, sites=sites, reminders=reminders, admin_brief=administrator_brief(overview, services, sites, len([value for value in state.get("endpoints", {}).values() if value.get("alerting")]), reminders),
-        maintenance=maintenance_center(services, logs),
+        maintenance=maintenance_center(services, logs), notification_settings=notification_context(),
         operation_timeline=operation_timeline(security), panel_version=PANEL_VERSION,
         current_client_version=CURRENT_CLIENT_VERSION, current_relay_version=CURRENT_RELAY_VERSION,
         relay_server_version=(sites[0]["server_version"] if sites else load_json(SECURE_RELAY_STATE, {}).get("server_version", "未上报")),
@@ -1700,7 +1724,7 @@ def start_canary(port):
         request_reconnect(port, source_ip)
         send_route_event("canary_started", port, endpoint_map[target_id],
             f"矿机 {source_ip} 已开始10分钟自动测试。", source_ip=source_ip)
-        flash(f"已让矿机 {source_ip} 在端口 {port} 试运行 {endpoint_map[target_id]['pool']}；10分钟后系统会自动判定、切换或退回，并发送企业微信通知。")
+        flash(f"已让矿机 {source_ip} 在端口 {port} 试运行 {endpoint_map[target_id]['pool']}；10分钟后系统会自动判定、切换或退回，并通过已配置的通知渠道发送结果。")
     except (KeyError, StopIteration, ValueError, ConfigError, OSError) as exc:
         flash(f"无法开始单机试切：{exc}")
     return redirect(url_for("dashboard_page", page="overview"))
@@ -2010,6 +2034,78 @@ def save_administrator_reminders():
         flash("管理员到期提醒已保存。")
     except (ValueError, ConfigError, OSError):
         flash("到期日期格式不正确，设置未保存。")
+    return redirect(url_for("dashboard_page", page="settings"))
+
+
+@app.route("/notification-settings", methods=["POST"])
+def save_notification_settings():
+    if not current_tailscale_admin():
+        return "Not found", 404
+    if not csrf_ok():
+        return "Forbidden", 403
+    current = read_env()
+    updates = {key: current.get(key, "") for key in NOTIFICATION_ENV_KEYS}
+    mapping = {"wechat_webhook": "WECHAT_WEBHOOK", "dingtalk_webhook": "DINGTALK_WEBHOOK",
+        "dingtalk_secret": "DINGTALK_SECRET", "smtp_host": "SMTP_HOST", "smtp_port": "SMTP_PORT",
+        "smtp_security": "SMTP_SECURITY", "smtp_username": "SMTP_USERNAME", "smtp_password": "SMTP_PASSWORD",
+        "smtp_from": "SMTP_FROM", "smtp_to": "SMTP_TO"}
+    try:
+        for field, key in mapping.items():
+            value = request.form.get(field, "").strip()
+            if value:
+                updates[key] = value
+        for prefix, keys in {"wechat": ("WECHAT_WEBHOOK",), "dingtalk": ("DINGTALK_WEBHOOK", "DINGTALK_SECRET"),
+                "email": ("SMTP_HOST", "SMTP_PORT", "SMTP_SECURITY", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM", "SMTP_TO")}.items():
+            if request.form.get("remove_" + prefix) == "1":
+                for key in keys:
+                    updates[key] = ""
+        if any("\n" in value or "\r" in value for value in updates.values()):
+            raise ValueError("配置不能包含换行")
+        for key in ("WECHAT_WEBHOOK", "DINGTALK_WEBHOOK"):
+            if updates[key] and not updates[key].startswith("https://"):
+                raise ValueError("机器人地址必须以 https:// 开头")
+        if updates["SMTP_HOST"] or updates["SMTP_FROM"] or updates["SMTP_TO"]:
+            if not (updates["SMTP_HOST"] and "@" in updates["SMTP_FROM"] and "@" in updates["SMTP_TO"]):
+                raise ValueError("邮箱服务器、发件地址和收件地址需要完整填写")
+            updates["SMTP_PORT"] = str(clamp_int(updates["SMTP_PORT"] or "465", 1, 65535))
+            if updates["SMTP_SECURITY"] not in {"ssl", "starttls", "plain"}:
+                raise ValueError("邮箱加密方式不正确")
+        write_env(updates)
+        os.environ.update(updates)
+        approve_integrity([ENV_FILE])
+        failed_services = []
+        for service in ("stratum-endpoint-monitor", "stratum-security-monitor", "stratum-route-switch-monitor"):
+            result = subprocess.run(["systemctl", "try-restart", service], check=False, timeout=15)
+            if result.returncode:
+                failed_services.append(service)
+        append_audit("更新通知渠道配置")
+        if failed_services:
+            flash("通知渠道已保存，但部分监控服务重新载入失败；请在“日志”页查看服务状态。")
+        else:
+            flash("通知渠道已保存。密码和机器人地址不会在页面中回显，请分别发送测试通知。")
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        flash(f"通知渠道保存失败：{exc}")
+    return redirect(url_for("dashboard_page", page="settings"))
+
+
+@app.route("/notification-settings/test/<channel>", methods=["POST"])
+def test_notification_channel(channel):
+    if not current_tailscale_admin():
+        return "Not found", 404
+    if not csrf_ok():
+        return "Forbidden", 403
+    labels = {"wechat": "企业微信", "dingtalk": "钉钉", "email": "邮箱"}
+    if channel not in labels:
+        return "Not found", 404
+    try:
+        notifier = Notifier(event_path=ENDPOINT_EVENT_FILE, settings=read_env())
+        if channel not in notifier.configured_channels():
+            raise ValueError("该渠道尚未完整配置")
+        notifier.send(f"Stratum 中转测试通知\n时间（北京时间）：{beijing_time(time.time())}", only=channel)
+        append_audit("测试通知渠道:" + channel)
+        flash(labels[channel] + "测试通知发送成功。")
+    except (OSError, ValueError) as exc:
+        flash(labels[channel] + f"测试通知发送失败：{exc}")
     return redirect(url_for("dashboard_page", page="settings"))
 
 

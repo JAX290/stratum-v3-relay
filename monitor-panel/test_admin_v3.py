@@ -203,6 +203,39 @@ class AdminV3Test(unittest.TestCase):
             response = self.client.get("/" + page)
             self.assertEqual(response.status_code, 200, page)
 
+    def test_active_pools_are_prioritized_and_inactive_pools_are_collapsed(self):
+        active, inactive = admin.prioritize_pools([
+            {"name": "空闲矿池", "summary": {"connections": 0, "workers": 0}},
+            {"name": "11301生产矿池", "summary": {"connections": 3, "workers": 1}},
+        ])
+        self.assertEqual([item["name"] for item in active], ["11301生产矿池"])
+        self.assertEqual([item["name"] for item in inactive], ["空闲矿池"])
+        response = self.client.get("/miners")
+        self.assertIn("未使用的矿池".encode(), response.data)
+
+    def test_notification_settings_require_tailscale_preserve_blank_secrets_and_can_be_tested(self):
+        original = "WECHAT_WEBHOOK=https://qyapi.example/private\nDINGTALK_SECRET=SEC-private\nSMTP_PASSWORD=mail-private\n"
+        admin.ENV_FILE.write_text(original, encoding="utf-8")
+        data = {"csrf": "token", "dingtalk_webhook": "https://oapi.example/send?access_token=x",
+            "smtp_host": "smtp.example.com", "smtp_port": "465", "smtp_security": "ssl",
+            "smtp_username": "sender@example.com", "smtp_from": "sender@example.com", "smtp_to": "ops@example.com"}
+        self.assertEqual(self.client.post("/notification-settings", data=data).status_code, 404)
+        headers = {"Tailscale-User-Login": "owner@example.com"}
+        with patch.object(admin.subprocess, "run"), patch.object(admin, "approve_integrity"):
+            response = self.client.post("/notification-settings", data=data, headers=headers)
+        self.assertEqual(response.status_code, 302)
+        values = admin.read_env()
+        self.assertEqual(values["WECHAT_WEBHOOK"], "https://qyapi.example/private")
+        self.assertEqual(values["DINGTALK_SECRET"], "SEC-private")
+        self.assertEqual(values["SMTP_PASSWORD"], "mail-private")
+        self.assertEqual(values["SMTP_TO"], "ops@example.com")
+        with patch.object(admin.Notifier, "send") as send:
+            response = self.client.post("/notification-settings/test/dingtalk", data={"csrf": "token"}, headers=headers)
+        self.assertEqual(response.status_code, 302)
+        send.assert_called_once()
+        page = self.client.get("/settings", headers=headers)
+        self.assertNotIn(b"private", page.data)
+
     def test_vps_logs_are_explained_for_nontechnical_administrators(self):
         raw = json.dumps({"_SYSTEMD_UNIT": "stratum-secure-relay.service", "PRIORITY": "3",
             "__REALTIME_TIMESTAMP": "1789000000000000", "MESSAGE": "Permission denied while writing state"})

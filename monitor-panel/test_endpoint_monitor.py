@@ -103,6 +103,33 @@ class EndpointMonitorTest(unittest.TestCase):
         self.assertIn("时间（北京时间）：1970-01-01 08:00:00", message)
         self.assertIn("不等同于现有矿工连接已经中断", message)
 
+    def test_notification_sends_wechat_and_dingtalk_without_exposing_secrets(self):
+        settings = {"WECHAT_WEBHOOK": "https://qyapi.example/send?key=private",
+            "DINGTALK_WEBHOOK": "https://oapi.example/send?access_token=private", "DINGTALK_SECRET": "SEC-private"}
+        notifier = Notifier(settings=settings)
+        with patch("endpoint_monitor.urllib.request.urlopen") as urlopen:
+            sent, errors = notifier.send("测试")
+        self.assertEqual((sent, errors), (2, []))
+        self.assertEqual(urlopen.call_count, 2)
+        requests = [call.args[0] for call in urlopen.call_args_list]
+        self.assertIn("timestamp=", requests[1].full_url)
+        self.assertIn("sign=", requests[1].full_url)
+        self.assertNotIn("SEC-private", requests[1].full_url)
+
+    def test_notification_sends_email_through_configured_smtp(self):
+        settings = {"SMTP_HOST": "smtp.example.com", "SMTP_PORT": "465", "SMTP_SECURITY": "ssl",
+            "SMTP_USERNAME": "sender@example.com", "SMTP_PASSWORD": "secret",
+            "SMTP_FROM": "sender@example.com", "SMTP_TO": "ops@example.com"}
+        notifier = Notifier(settings=settings)
+        with patch("endpoint_monitor.smtplib.SMTP_SSL") as smtp:
+            sent, errors = notifier.send("邮件测试")
+        self.assertEqual((sent, errors), (1, []))
+        server = smtp.return_value.__enter__.return_value
+        server.login.assert_called_once_with("sender@example.com", "secret")
+        message = server.send_message.call_args.args[0]
+        self.assertEqual(message["To"], "ops@example.com")
+        self.assertIn("邮件测试", message.get_content())
+
     def test_old_batch_derived_alert_is_cleared_on_upgrade(self):
         state = {"version": 1, "endpoints": {"active": {"alerting": True, "consecutive_failures": 8,
             "first_failure": 10, "last_result": {"sample_type": "hourly"}, "samples": []}}}

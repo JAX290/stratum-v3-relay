@@ -7,15 +7,21 @@ pools rate-limit standalone mining.subscribe health checks.
 """
 
 import argparse
+import base64
+import hmac
 import json
 import math
 import os
+import smtplib
 import socket
 import statistics
+import ssl
 import tempfile
 import time
 import urllib.request
+import urllib.parse
 from datetime import datetime
+from email.message import EmailMessage
 from zoneinfo import ZoneInfo
 from ipaddress import ip_address
 from pathlib import Path
@@ -348,9 +354,12 @@ class EndpointMonitor:
 
 
 class Notifier:
-    def __init__(self, webhook="", event_path=EVENT_FILE):
+    def __init__(self, webhook="", event_path=EVENT_FILE, settings=None):
         self.webhook = webhook
         self.event_path = event_path
+        self.settings = dict(os.environ if settings is None else settings)
+        if webhook:
+            self.settings["WECHAT_WEBHOOK"] = webhook
 
     def __call__(self, event):
         try:
@@ -367,15 +376,77 @@ class Notifier:
         except OSError:
             # Logging must not take endpoint monitoring or route recovery down.
             pass
-        if not self.webhook.startswith("https://"):
-            return
         content = self.format_message(event)
-        payload = json.dumps({"msgtype": "text", "text": {"content": content}}, ensure_ascii=False).encode()
-        request = urllib.request.Request(self.webhook, data=payload, headers={"Content-Type": "application/json"})
-        try:
-            urllib.request.urlopen(request, timeout=8).close()
-        except OSError:
-            pass
+        self.send(content)
+
+    def configured_channels(self):
+        result = []
+        if self.settings.get("WECHAT_WEBHOOK", "").startswith("https://"):
+            result.append("wechat")
+        if self.settings.get("DINGTALK_WEBHOOK", "").startswith("https://"):
+            result.append("dingtalk")
+        if self.settings.get("SMTP_HOST") and self.settings.get("SMTP_TO") and self.settings.get("SMTP_FROM"):
+            result.append("email")
+        return result
+
+    def send(self, content, only=None):
+        channels = [only] if only else self.configured_channels()
+        errors = []
+        for channel in channels:
+            try:
+                if channel == "wechat":
+                    self._post_json(self.settings["WECHAT_WEBHOOK"],
+                        {"msgtype": "text", "text": {"content": content}})
+                elif channel == "dingtalk":
+                    url = self.settings["DINGTALK_WEBHOOK"]
+                    secret = self.settings.get("DINGTALK_SECRET", "")
+                    if secret:
+                        timestamp = str(int(time.time() * 1000))
+                        signature = base64.b64encode(hmac.new(secret.encode(),
+                            f"{timestamp}\n{secret}".encode(), digestmod="sha256").digest()).decode()
+                        separator = "&" if "?" in url else "?"
+                        url += separator + urllib.parse.urlencode({"timestamp": timestamp, "sign": signature})
+                    self._post_json(url, {"msgtype": "text", "text": {"content": content}})
+                elif channel == "email":
+                    self._send_email(content)
+                else:
+                    raise ValueError("通知渠道未配置")
+            except (OSError, ValueError, smtplib.SMTPException) as exc:
+                errors.append(f"{channel}: {exc}")
+        if only and errors:
+            raise OSError("；".join(errors))
+        return len(channels) - len(errors), errors
+
+    @staticmethod
+    def _post_json(url, data):
+        payload = json.dumps(data, ensure_ascii=False).encode()
+        request = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        response = urllib.request.urlopen(request, timeout=8)
+        body = response.read()
+        response.close()
+        if isinstance(body, bytes) and body.strip():
+            result = json.loads(body)
+            code = result.get("errcode", result.get("code", 0)) if isinstance(result, dict) else 0
+            if code not in {0, "0", None}:
+                raise ValueError(str(result.get("errmsg", result.get("message", result))))
+
+    def _send_email(self, content):
+        message = EmailMessage()
+        message["Subject"] = "Stratum 中转监控通知"
+        message["From"] = self.settings["SMTP_FROM"]
+        message["To"] = self.settings["SMTP_TO"]
+        message.set_content(content)
+        host = self.settings["SMTP_HOST"]
+        port = int(self.settings.get("SMTP_PORT", "465"))
+        mode = self.settings.get("SMTP_SECURITY", "ssl")
+        factory = smtplib.SMTP_SSL if mode == "ssl" else smtplib.SMTP
+        with factory(host, port, timeout=10, context=ssl.create_default_context()) if mode == "ssl" else factory(host, port, timeout=10) as server:
+            if mode == "starttls":
+                server.starttls(context=ssl.create_default_context())
+            username = self.settings.get("SMTP_USERNAME", "")
+            if username:
+                server.login(username, self.settings.get("SMTP_PASSWORD", ""))
+            server.send_message(message)
 
     @staticmethod
     def format_message(event):
