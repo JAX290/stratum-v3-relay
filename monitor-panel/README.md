@@ -1,6 +1,6 @@
 # Stratum V3 中转管理面板
 
-> 功能概览和一键安装见[项目首页](../README.md)。完整配置步骤见[部署与维护指南](../docs/deployment-guide.md)，日常管理见[管理员操作指南](../docs/administrator-guide.md)。本页补充管理面板的功能和维护细节。
+> 功能概览和一键安装见[项目首页](../README.md)。完整配置步骤见[部署与维护指南](../docs/deployment-guide.md)，页面指标、折叠明细和日常操作见[管理员完整使用说明](../docs/administrator-guide.md)。本页补充管理面板的技术维护细节。
 
 这是用于 VPS 上的 Stratum 中转、端口转发、矿机连接观察和报警管理的一套 V3 面板。
 

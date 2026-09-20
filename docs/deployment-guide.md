@@ -80,7 +80,7 @@ chmod +x bootstrap-vps.sh
 
 安装时会遇到两个输入项：
 
-1. 应急面板密码：应急面板密码，至少 12 个字符。只准备通过 Tailscale 管理时可以直接回车留空。
+1. 应急管理密码：只在 **Tailscale 暂时不可用，但仍能 SSH 登录 VPS** 时使用。管理员先建立 SSH 本地隧道，再用此密码进入完整面板；它不是只读面板密码、VPS 密码、矿池密码或客户端共享密钥。只准备通过 Tailscale 日常管理时直接回车，表示关闭这个备用密码入口。详细场景和操作见[管理员完整使用说明](administrator-guide.md#应急管理密码)。
 2. 企业微信 Webhook：企业微信机器人地址，不需要时直接回车。
 
 这里安装的是 V3 转发和管理面板，加密入口还需要完成第六步。
@@ -142,7 +142,7 @@ https://your-vps-name.xxxxx.ts.net/
 ssh -N -L 8789:127.0.0.1:8789 -p <SSH端口> root@<VPS公网IP>
 ```
 
-保持这个 PowerShell 窗口不要关闭，然后打开 `http://127.0.0.1:8789`。这种方式需要安装时设置的应急密码。
+保持这个 PowerShell 窗口不要关闭，然后打开 `http://127.0.0.1:8789`。这种方式需要安装时设置的应急管理密码；如果安装时留空，应急密码登录处于关闭状态。不要为了使用应急入口而在安全组放行 `8789`。
 
 ### 5.4 不使用 Tailscale 的 HTTPS 只读面板
 
@@ -461,7 +461,7 @@ tail -n 100 /var/lib/stratum-monitor/endpoint-events.jsonl
 tail -n 50 /var/log/stratum-audit.jsonl
 ```
 
-### 忘记应急面板密码
+### 忘记应急管理密码
 
 ```bash
 /opt/stratum-admin/reset-panel-password.sh

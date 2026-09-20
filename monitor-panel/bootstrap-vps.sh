@@ -16,8 +16,16 @@ apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy python3-flask python3-werkzeug gunicorn
 
 if [[ ! -f /etc/stratum-admin.env ]]; then
+  cat <<'EOF'
+
+应急管理密码说明：
+  - 日常通过 Tailscale 管理时不会使用这个密码，可以直接回车关闭备用密码登录。
+  - 只有 Tailscale 暂时不可用、但 SSH 仍可连接 VPS 时，才通过 SSH 本地隧道使用它。
+  - 它不是 VPS 密码、HTTPS 只读面板密码、矿池密码或 Windows 客户端共享密钥。
+  - 不要为了使用应急入口而把管理端口 8789 开放到公网。
+EOF
   while true; do
-    read -r -s -p "设置应急管理密码（至少 12 个字符）；只使用 Tailscale 时可直接回车：" PANEL_PASSWORD
+    read -r -s -p "应急管理密码（至少 12 个字符；直接回车表示关闭此备用入口）：" PANEL_PASSWORD
     echo
     if [[ -z "$PANEL_PASSWORD" ]]; then
       break

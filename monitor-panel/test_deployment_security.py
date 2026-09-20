@@ -63,6 +63,20 @@ class DeploymentSecurityTest(unittest.TestCase):
         self.assertIn("action-toast", template)
         self.assertIn(".action-toast", stylesheet)
 
+    def test_emergency_password_and_administrator_guide_are_self_explanatory(self):
+        bootstrap = (ROOT / "monitor-panel" / "bootstrap-vps.sh").read_text(encoding="utf-8")
+        admin = (ROOT / "monitor-panel" / "stratum_admin_v3.py").read_text(encoding="utf-8")
+        template = (ROOT / "monitor-panel" / "templates" / "v3_dashboard.html").read_text(encoding="utf-8")
+        guide = (ROOT / "docs" / "administrator-guide.md").read_text(encoding="utf-8")
+        self.assertIn("只有 Tailscale 暂时不可用", bootstrap)
+        self.assertIn("SSH 本地隧道", bootstrap)
+        self.assertIn("Stratum V3 应急管理登录", admin)
+        self.assertIn("不是 HTTPS 只读面板密码", admin)
+        self.assertIn("administrator-guide.md", template)
+        self.assertIn("折叠只改变网页显示", guide)
+        self.assertIn("断开不足 15 分钟", guide)
+        self.assertIn("超过 24 小时", guide)
+
     def test_public_status_installer_guides_and_verifies_safe_setup(self):
         script = (ROOT / "monitor-panel" / "install-public-status.sh").read_text(encoding="utf-8")
         self.assertIn("请输入只读面板域名", script)

@@ -1035,8 +1035,8 @@ def approve_integrity(paths):
 
 LOGIN = """
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>中转管理登录</title>
-<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#edf1f3;color:#17232b;font:15px system-ui}.box{width:min(380px,calc(100% - 30px));background:#fff;border:1px solid #d8e0e4;border-radius:8px;padding:26px}h1{font-size:20px;margin:0 0 18px}label{display:block;color:#68757d;margin-bottom:6px}input,button{width:100%;box-sizing:border-box;padding:11px;border-radius:5px;font:inherit}input{border:1px solid #b9c4ca}button{border:0;background:#1268d8;color:#fff;font-weight:700;margin-top:14px}.err{color:#b52f2f;margin-bottom:12px}</style></head>
-<body><form class="box" method="post"><h1>Stratum V3 管理</h1>{% if error %}<div class="err">{{error}}</div>{% endif %}<label>管理密码</label><input name="password" type="password" required autofocus><button>登录</button></form></body></html>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#edf1f3;color:#17232b;font:15px system-ui}.box{width:min(420px,calc(100% - 30px));background:#fff;border:1px solid #d8e0e4;border-radius:8px;padding:26px}h1{font-size:20px;margin:0 0 8px}.note{color:#68757d;font-size:13px;margin:0 0 18px}label{display:block;color:#68757d;margin-bottom:6px}input,button{width:100%;box-sizing:border-box;padding:11px;border-radius:5px;font:inherit}input{border:1px solid #b9c4ca}button{border:0;background:#1268d8;color:#fff;font-weight:700;margin-top:14px}.err{color:#b52f2f;margin-bottom:12px}</style></head>
+<body><form class="box" method="post"><h1>Stratum V3 应急管理登录</h1><p class="note">仅在 Tailscale 暂时不可用时，通过 SSH 本地隧道使用。它不是 HTTPS 只读面板密码。</p>{% if error %}<div class="err">{{error}}</div>{% endif %}<label>应急管理密码</label><input name="password" type="password" required autofocus><button>登录</button></form></body></html>
 """
 
 

@@ -14,7 +14,7 @@
       <nav aria-label="主导航">
         {% for key,label in navigation %}<a class="{{'active' if page==key}}" href="{{url_for('dashboard_page',page=key)}}">{{label}}</a>{% endfor %}
       </nav>
-      <div class="header-actions"><a href="{{url_for('dashboard_page',page=page)}}">刷新</a><a href="{{url_for('logout')}}">退出</a></div>
+      <div class="header-actions"><a href="https://github.com/JAX290/stratum-v3-relay/blob/main/docs/administrator-guide.md" target="_blank" rel="noopener">使用说明</a><a href="{{url_for('dashboard_page',page=page)}}">刷新</a><a href="{{url_for('logout')}}">退出</a></div>
     </div>
   </header>
 
