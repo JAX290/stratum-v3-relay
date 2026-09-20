@@ -38,6 +38,31 @@ class DeploymentSecurityTest(unittest.TestCase):
         self.assertIn("os.chown(temporary", script)
         self.assertIn("ReadWritePaths=/var/lib/stratum-secure-relay", script)
 
+    def test_route_config_is_migrated_into_existing_writable_state_directory(self):
+        install = (ROOT / "monitor-panel" / "install-v3.sh").read_text(encoding="utf-8")
+        upgrade = (ROOT / "monitor-panel" / "upgrade-v3-panel.sh").read_text(encoding="utf-8")
+        manager = (ROOT / "monitor-panel" / "v3_manager.py").read_text(encoding="utf-8")
+        canonical = "/var/lib/stratum-monitor/config/stratum-v3.json"
+        for script in (install, upgrade):
+            self.assertIn(canonical, script)
+            self.assertIn("/var/lib/stratum-monitor/config/stratum-inspector.json", script)
+            self.assertIn("/var/lib/stratum-monitor/config/stratum-audit.jsonl", script)
+            self.assertIn("ln -sfn", script)
+            self.assertIn("ReadWritePaths=/etc/stratum-v3.json /etc/stratum-inspector.json /etc/haproxy /var/lib/stratum-monitor", script)
+            self.assertNotIn("ReadWritePaths=/etc /var/lib/stratum-monitor", script)
+        self.assertIn("Path(config_path).resolve()", manager)
+        self.assertIn("Path(path).resolve()", manager)
+
+    def test_dashboard_posts_update_content_without_losing_scroll_position(self):
+        template = (ROOT / "monitor-panel" / "templates" / "v3_dashboard.html").read_text(encoding="utf-8")
+        stylesheet = (ROOT / "monitor-panel" / "static" / "v3.css").read_text(encoding="utf-8")
+        self.assertIn("data-dashboard-main", template)
+        self.assertIn("new DOMParser()", template)
+        self.assertIn("window.scrollTo(scrollPosition.x, scrollPosition.y)", template)
+        self.assertIn("restoreOpenDetails", template)
+        self.assertIn("action-toast", template)
+        self.assertIn(".action-toast", stylesheet)
+
     def test_public_status_installer_guides_and_verifies_safe_setup(self):
         script = (ROOT / "monitor-panel" / "install-public-status.sh").read_text(encoding="utf-8")
         self.assertIn("请输入只读面板域名", script)

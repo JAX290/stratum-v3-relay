@@ -35,7 +35,7 @@ class ConfigError(ValueError):
 @contextmanager
 def file_lock(path):
     """Serialize a complete read/change/write cycle across processes and threads."""
-    lock_path = Path(str(path) + ".lock")
+    lock_path = Path(str(Path(path).resolve()) + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with _THREAD_LOCKS_GUARD:
         thread_lock = _THREAD_LOCKS.setdefault(str(lock_path.resolve()), threading.Lock())
@@ -223,7 +223,10 @@ def render_haproxy_config(config):
 
 class ConfigStore:
     def __init__(self, config_path, history_dir, audit_path):
-        self.config_path = Path(config_path)
+        # Resolve the compatibility symlink used on Linux before creating the
+        # lock and temporary file.  The canonical config lives in the service
+        # state directory, where the sandboxed route worker may write safely.
+        self.config_path = Path(config_path).resolve()
         self.history_dir = Path(history_dir)
         self.audit_path = Path(audit_path)
 
@@ -235,6 +238,7 @@ class ConfigStore:
 
     @staticmethod
     def _atomic_write(path, text, mode=0o640):
+        path = Path(path).resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         owner = None
         if path.exists():

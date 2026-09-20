@@ -21,7 +21,12 @@ stamp=$(date +%Y%m%d-%H%M%S)
 backup="/root/stratum-v3-backup-$stamp"
 install -d -m 0700 "$backup"
 for path in /etc/haproxy/haproxy.cfg /etc/stratum-inspector.json /etc/stratum-v3.json /etc/systemd/system/stratum-inspector.service /etc/systemd/system/stratum-admin.service; do
-  if [[ -e "$path" ]]; then cp -a "$path" "$backup/"; fi
+  if [[ -e "$path" ]]; then
+    case "$path" in
+      /etc/stratum-inspector.json|/etc/stratum-v3.json) cp -aL "$path" "$backup/" ;;
+      *) cp -a "$path" "$backup/" ;;
+    esac
+  fi
 done
 printf '%s\n' "$backup" >/root/stratum-v3-last-backup
 
@@ -42,6 +47,7 @@ install -d -m 0755 /opt/stratum-admin/templates /opt/stratum-admin/static
 install -d -o stratum-proxy -g stratum-proxy -m 0750 /var/lib/stratum-inspector
 install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor
 install -d -m 0750 /var/lib/stratum-monitor/history
+install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor/config
 install -m 0755 v3_manager.py version_info.py admin_auth.py endpoint_monitor.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh install-public-status.sh /opt/stratum-admin/
 install -o root -g root -m 0644 ../version.json /etc/stratum-version.json
 install -m 0644 templates/v3_dashboard.html /opt/stratum-admin/templates/v3_dashboard.html
@@ -49,8 +55,15 @@ install -m 0644 templates/public_status.html /opt/stratum-admin/templates/public
 install -m 0644 templates/public_login.html /opt/stratum-admin/templates/public_login.html
 install -m 0644 static/v3.css /opt/stratum-admin/static/v3.css
 install -m 0644 static/public.css /opt/stratum-admin/static/public.css
-install -m 0640 v3-config.json /etc/stratum-v3.json
-chown root:stratum-proxy /etc/stratum-v3.json
+install -o root -g stratum-proxy -m 0640 v3-config.json /var/lib/stratum-monitor/config/stratum-v3.json
+ln -sfn /var/lib/stratum-monitor/config/stratum-v3.json /etc/stratum-v3.json
+ln -sfn /var/lib/stratum-monitor/config/stratum-inspector.json /etc/stratum-inspector.json
+if [[ -f /var/log/stratum-audit.jsonl && ! -L /var/log/stratum-audit.jsonl ]]; then
+  install -o root -g stratum-proxy -m 0640 /var/log/stratum-audit.jsonl /var/lib/stratum-monitor/config/stratum-audit.jsonl
+elif [[ ! -f /var/lib/stratum-monitor/config/stratum-audit.jsonl ]]; then
+  install -o root -g stratum-proxy -m 0640 /dev/null /var/lib/stratum-monitor/config/stratum-audit.jsonl
+fi
+ln -sfn /var/lib/stratum-monitor/config/stratum-audit.jsonl /var/log/stratum-audit.jsonl
 
 python3 /opt/stratum-admin/v3_manager.py --config /etc/stratum-v3.json --inspector /etc/stratum-inspector.json --haproxy /etc/haproxy/stratum-v3.cfg --resolve
 chown root:stratum-proxy /etc/stratum-inspector.json

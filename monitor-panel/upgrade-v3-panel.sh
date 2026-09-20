@@ -25,7 +25,10 @@ stamp=$(date +%Y%m%d-%H%M%S)
 backup="/root/stratum-v3-panel-backup-$stamp"
 install -d -m 0700 "$backup"
 cp -a /opt/stratum-admin/stratum_admin_v3.py /opt/stratum-admin/stratum_inspector.py /opt/stratum-admin/endpoint_monitor.py /opt/stratum-admin/security_monitor.py /opt/stratum-admin/v3_manager.py "$backup/"
-cp -a /etc/stratum-inspector.json /etc/haproxy/haproxy.cfg "$backup/"
+cp -aL /etc/stratum-inspector.json "$backup/stratum-inspector.json"
+cp -a /etc/haproxy/haproxy.cfg "$backup/haproxy.cfg"
+cp -aL /etc/stratum-v3.json "$backup/stratum-v3.json"
+if [[ -f /var/log/stratum-audit.jsonl ]]; then cp -aL /var/log/stratum-audit.jsonl "$backup/stratum-audit.jsonl"; fi
 if [[ -f /opt/stratum-secure-server.py ]]; then cp -a /opt/stratum-secure-server.py "$backup/"; fi
 if [[ -f /opt/stratum-secure-monitor.py ]]; then cp -a /opt/stratum-secure-monitor.py "$backup/"; fi
 if [[ -f /opt/stratum-admin/route_switch_monitor.py ]]; then cp -a /opt/stratum-admin/route_switch_monitor.py "$backup/"; fi
@@ -43,10 +46,11 @@ if [[ -f /etc/systemd/system/stratum-vps-watchdog.timer ]]; then cp -a /etc/syst
 
 python3 -m py_compile ./stratum_admin_v3.py ./stratum_public_status.py ./stratum_inspector.py ./endpoint_monitor.py ./security_monitor.py ./v3_manager.py ./version_info.py ./admin_auth.py ./route_switch_monitor.py ./vps_watchdog.py "$secure_server" "$secure_monitor"
 systemctl stop stratum-security-monitor.service
+systemctl stop stratum-admin.service
 systemctl stop stratum-route-switch-monitor.service 2>/dev/null || true
 systemctl stop stratum-vps-watchdog.timer 2>/dev/null || true
 systemctl stop stratum-secure-relay.service
-trap 'systemctl start stratum-secure-relay.service >/dev/null 2>&1 || true; systemctl start stratum-route-switch-monitor.service >/dev/null 2>&1 || true; systemctl start stratum-security-monitor.service >/dev/null 2>&1 || true; systemctl start stratum-vps-watchdog.timer >/dev/null 2>&1 || true' EXIT
+trap 'systemctl start stratum-secure-relay.service >/dev/null 2>&1 || true; systemctl start stratum-admin.service >/dev/null 2>&1 || true; systemctl start stratum-route-switch-monitor.service >/dev/null 2>&1 || true; systemctl start stratum-security-monitor.service >/dev/null 2>&1 || true; systemctl start stratum-vps-watchdog.timer >/dev/null 2>&1 || true' EXIT
 mail_name=$(hostname -f 2>/dev/null || hostname)
 printf 'postfix postfix/mailname string %s\n' "$mail_name" | debconf-set-selections
 printf 'postfix postfix/main_mailer_type select Internet Site\n' | debconf-set-selections
@@ -68,6 +72,33 @@ install -m 0644 ./static/v3.css /opt/stratum-admin/static/v3.css
 install -m 0644 ./static/public.css /opt/stratum-admin/static/public.css
 install -o root -g root -m 0755 "$secure_server" /opt/stratum-secure-server.py
 install -o root -g root -m 0755 "$secure_monitor" /opt/stratum-secure-monitor.py
+
+# Keep /etc/stratum-v3.json as a stable compatibility path, while placing the
+# writable file and its atomic-write temporary files inside the service state
+# directory already granted to the sandboxed route worker.
+canonical_config=/var/lib/stratum-monitor/config/stratum-v3.json
+canonical_inspector=/var/lib/stratum-monitor/config/stratum-inspector.json
+canonical_audit=/var/lib/stratum-monitor/config/stratum-audit.jsonl
+install -d -o root -g stratum-proxy -m 0770 "$(dirname "$canonical_config")"
+current_config=$(readlink -f /etc/stratum-v3.json)
+if [[ "$current_config" != "$canonical_config" ]]; then
+  install -o root -g stratum-proxy -m 0640 "$current_config" "$canonical_config"
+fi
+ln -sfn "$canonical_config" /etc/stratum-v3.json
+current_inspector=$(readlink -f /etc/stratum-inspector.json)
+if [[ "$current_inspector" != "$canonical_inspector" ]]; then
+  install -o root -g stratum-proxy -m 0640 "$current_inspector" "$canonical_inspector"
+fi
+ln -sfn "$canonical_inspector" /etc/stratum-inspector.json
+if [[ -f /var/log/stratum-audit.jsonl ]]; then
+  current_audit=$(readlink -f /var/log/stratum-audit.jsonl)
+  if [[ "$current_audit" != "$canonical_audit" ]]; then
+    install -o root -g stratum-proxy -m 0640 "$current_audit" "$canonical_audit"
+  fi
+elif [[ ! -f "$canonical_audit" ]]; then
+  install -o root -g stratum-proxy -m 0640 /dev/null "$canonical_audit"
+fi
+ln -sfn "$canonical_audit" /var/log/stratum-audit.jsonl
 
 # Migrate the Internet-facing TLS process from root to its dedicated account.
 id stratum-relay >/dev/null 2>&1 || useradd --system --home /nonexistent --shell /usr/sbin/nologin stratum-relay
@@ -259,7 +290,7 @@ candidate_inspector="/root/stratum-inspector-$stamp.json"
 candidate_haproxy="/root/haproxy-$stamp.cfg"
 python3 /opt/stratum-admin/v3_manager.py --config /etc/stratum-v3.json --inspector "$candidate_inspector" --haproxy "$candidate_haproxy"
 haproxy -c -f "$candidate_haproxy"
-install -o root -g stratum-proxy -m 0640 "$candidate_inspector" /etc/stratum-inspector.json
+install -o root -g stratum-proxy -m 0640 "$candidate_inspector" "$canonical_inspector"
 install -o root -g root -m 0644 "$candidate_haproxy" /etc/haproxy/haproxy.cfg
 
 # The inspector restart is brief; miners should reconnect automatically.

@@ -18,7 +18,8 @@
     </div>
   </header>
 
-  <main class="page-shell">
+  <div id="action-toast" class="action-toast" role="status" aria-live="polite" hidden></div>
+  <main class="page-shell" data-dashboard-main>
     {% for message in get_flashed_messages() %}<div class="flash" role="status">{{message}}</div>{% endfor %}
     {% macro worker_table(workers) -%}
       {% if workers %}
@@ -200,20 +201,108 @@
     {% endif %}
   </main>
   <script>
-    document.querySelectorAll('[data-custom-select]').forEach((select) => {
-      const fields = select.closest('form').querySelector('[data-custom-fields]');
-      const update = () => { fields.hidden = select.value !== '__custom__'; };
-      select.addEventListener('change', update);
-      update();
-    });
-    document.addEventListener('submit', (event) => {
-      const button = event.submitter;
-      if (!event.target.matches('[data-immediate-sync]') && !(button && button.matches('[data-immediate-sync]'))) return;
-      const submit = button || event.target.querySelector('button[type="submit"], button:not([type])');
-      if (submit) {
-        submit.setAttribute('aria-disabled', 'true');
-        submit.style.pointerEvents = 'none';
-        submit.textContent = '正在保存并等待对端确认…';
+    const toast = document.getElementById('action-toast');
+    let toastTimer = null;
+
+    function showActionResult(message, isError) {
+      clearTimeout(toastTimer);
+      toast.textContent = message;
+      toast.classList.toggle('danger', Boolean(isError));
+      toast.hidden = false;
+      toastTimer = setTimeout(() => { toast.hidden = true; }, isError ? 9000 : 5000);
+    }
+
+    function initializeDynamicContent(root) {
+      root.querySelectorAll('[data-custom-select]').forEach((select) => {
+        if (select.dataset.dynamicBound === 'yes') return;
+        const form = select.closest('form');
+        const fields = form && form.querySelector('[data-custom-fields]');
+        if (!fields) return;
+        const update = () => { fields.hidden = select.value !== '__custom__'; };
+        select.addEventListener('change', update);
+        select.dataset.dynamicBound = 'yes';
+        update();
+      });
+      root.querySelectorAll('[data-secret-visible]').forEach((value) => {
+        if (value.dataset.hideScheduled === 'yes') return;
+        value.dataset.hideScheduled = 'yes';
+        setTimeout(() => { value.textContent = '已自动隐藏，请重新查看'; }, 60000);
+      });
+    }
+
+    function openDetailIndexes(main) {
+      return Array.from(main.querySelectorAll('details')).flatMap((item, index) => item.open ? [index] : []);
+    }
+
+    function restoreOpenDetails(main, indexes) {
+      const details = Array.from(main.querySelectorAll('details'));
+      indexes.forEach((index) => { if (details[index]) details[index].open = true; });
+    }
+
+    initializeDynamicContent(document);
+
+    document.addEventListener('submit', async (event) => {
+      const form = event.target;
+      if (event.defaultPrevented || !form.matches('form[method="post"]') || form.dataset.fullSubmit === 'yes') return;
+      event.preventDefault();
+      if (form.dataset.ajaxSubmitting === 'yes') return;
+      form.dataset.ajaxSubmitting = 'yes';
+
+      const button = event.submitter || form.querySelector('button[type="submit"], button:not([type])');
+      const originalText = button ? button.textContent : '';
+      const waitsForPeer = form.matches('[data-immediate-sync]') || (button && button.matches('[data-immediate-sync]'));
+      if (button) {
+        button.disabled = true;
+        button.textContent = waitsForPeer ? '正在保存并等待对端确认…' : '正在处理…';
+      }
+
+      const currentMain = document.querySelector('[data-dashboard-main]');
+      const scrollPosition = {x: window.scrollX, y: window.scrollY};
+      const openIndexes = openDetailIndexes(currentMain);
+      const action = button && button.formAction ? button.formAction : form.action;
+      try {
+        const response = await fetch(action, {
+          method: 'POST', body: new FormData(form), credentials: 'same-origin',
+          headers: {'X-Requested-With': 'XMLHttpRequest', 'Accept': 'text/html'}
+        });
+        const html = await response.text();
+        const nextDocument = new DOMParser().parseFromString(html, 'text/html');
+        const nextMain = nextDocument.querySelector('[data-dashboard-main]');
+        if (!response.ok || !nextMain) {
+          if (response.redirected && new URL(response.url).pathname.includes('/login')) {
+            window.location.assign(response.url);
+            return;
+          }
+          throw new Error('服务器没有返回可更新的页面');
+        }
+
+        const messages = Array.from(nextMain.querySelectorAll('.flash')).map((item) => item.textContent.trim()).filter(Boolean);
+        currentMain.replaceWith(nextMain);
+        restoreOpenDetails(nextMain, openIndexes);
+        initializeDynamicContent(nextMain);
+        document.title = nextDocument.title || document.title;
+
+        const nextNavigation = nextDocument.querySelector('.app-header nav');
+        const navigation = document.querySelector('.app-header nav');
+        if (nextNavigation && navigation) navigation.replaceWith(nextNavigation);
+        const nextHeaderActions = nextDocument.querySelector('.header-actions');
+        const headerActions = document.querySelector('.header-actions');
+        if (nextHeaderActions && headerActions) headerActions.replaceWith(nextHeaderActions);
+
+        const targetUrl = new URL(response.url);
+        if (targetUrl.origin === window.location.origin && targetUrl.pathname !== window.location.pathname) {
+          history.replaceState({}, '', targetUrl.pathname + targetUrl.search + targetUrl.hash);
+        }
+        requestAnimationFrame(() => window.scrollTo(scrollPosition.x, scrollPosition.y));
+        const message = messages.join('；') || '操作已经完成，页面数据已更新。';
+        showActionResult(message, /失败|错误|无效|不能|拒绝|未完成/.test(message));
+      } catch (error) {
+        form.dataset.ajaxSubmitting = '';
+        if (button) {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
+        showActionResult('操作没有完成：' + (error.message || '网络连接异常，请稍后重试'), true);
       }
     });
     document.addEventListener('click', async (event) => {
@@ -252,9 +341,6 @@
       button.textContent = '已复制';
       setTimeout(() => { button.textContent = original; }, 1200);
     });
-    setTimeout(() => {
-      document.querySelectorAll('[data-secret-visible]').forEach((value) => { value.textContent = '已自动隐藏，请刷新后重新查看'; });
-    }, 60000);
   </script>
 </body>
 </html>
