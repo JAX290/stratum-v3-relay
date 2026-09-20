@@ -612,9 +612,16 @@ class AdminV3Test(unittest.TestCase):
             "token": token, "peers": "https://peer.tail1234.ts.net"})
         self.assertEqual(response.status_code, 302)
         self.assertEqual(admin.load_peer_settings()["token"], token)
-        response = self.client.post("/peer-sync-all", data={"csrf": "token"})
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(len(json.loads(admin.PEER_OUTBOX_FILE.read_text(encoding="utf-8"))["items"]), 24)
+        def confirm_all(**kwargs):
+            admin.ConfigStore._atomic_write(admin.PEER_OUTBOX_FILE,
+                json.dumps({"items": []}, ensure_ascii=False) + "\n", mode=0o600)
+            return {"sent": len(kwargs.get("only_ids", [])), "pending": 0}
+        with patch("route_switch_monitor.flush_peer_outbox", side_effect=confirm_all):
+            response = self.client.post("/peer-sync-all", data={"csrf": "token"}, follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(admin.PEER_OUTBOX_FILE.read_text(encoding="utf-8"))["items"], [])
+        self.assertIn("双 VPS 同步成功".encode(), response.data)
+        self.assertEqual(admin.peer_sync_summary()["last_status"], "success")
         endpoint = next(item for item in admin.store.load()["endpoints"] if item["id"] == "f2pool-global")
         payload = {"event_id": "b" * 32, "source": "peer-vps", "revision": 9999999999999999999, "port": 11301,
             "action": "test", "endpoint": endpoint}
@@ -632,6 +639,27 @@ class AdminV3Test(unittest.TestCase):
             headers={"Authorization": "Bearer " + token})
         self.assertTrue(accepted.get_json()["stale"])
         self.assertEqual(admin.route_endpoint_id(admin.store.load(), 11301), "f2pool-global")
+
+    def test_immediate_peer_sync_failure_is_reported_and_kept_for_retry(self):
+        token = "f" * 64
+        admin.PEER_SYNC_FILE.write_text(json.dumps({"enabled": True,
+            "peers": ["https://peer.tail1234.ts.net"], "token": token}), encoding="utf-8")
+
+        def leave_failed(**kwargs):
+            outbox = admin.load_json(admin.PEER_OUTBOX_FILE, {"items": []})
+            for item in outbox["items"]:
+                if item["id"] in kwargs.get("only_ids", set()):
+                    item["last_error"] = "连接超时"
+            admin.ConfigStore._atomic_write(admin.PEER_OUTBOX_FILE,
+                json.dumps(outbox, ensure_ascii=False) + "\n", mode=0o600)
+            return {"sent": 0, "pending": len(outbox["items"])}
+
+        with patch("route_switch_monitor.flush_peer_outbox", side_effect=leave_failed):
+            result = admin.sync_routes_immediately(admin.store.load(), [(11301, "test")])
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("连接超时", result["message"])
+        self.assertEqual(result["pending"], 1)
+        self.assertEqual(admin.peer_sync_summary()["last_status"], "failed")
 
     def test_logical_peer_version_is_not_blocked_by_old_clock_revision(self):
         admin.PEER_STATE_FILE.write_text(json.dumps({"received": [], "route_versions": {

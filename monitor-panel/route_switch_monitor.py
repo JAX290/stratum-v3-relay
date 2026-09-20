@@ -82,13 +82,13 @@ def evaluate_due(now=None, notifier=None):
     return completed
 
 
-def flush_peer_outbox(now=None, opener=None, notifier=None):
+def flush_peer_outbox(now=None, opener=None, notifier=None, only_ids=None):
     """Deliver queued route changes to peer VPS nodes, retaining failures for retry."""
     with admin.file_lock(admin.PEER_STATE_FILE.parent / "peer-sync"):
-        return _flush_peer_outbox_locked(now=now, opener=opener, notifier=notifier)
+        return _flush_peer_outbox_locked(now=now, opener=opener, notifier=notifier, only_ids=only_ids)
 
 
-def _flush_peer_outbox_locked(now=None, opener=None, notifier=None):
+def _flush_peer_outbox_locked(now=None, opener=None, notifier=None, only_ids=None):
     now = int(now or time.time())
     opener = opener or urllib.request.urlopen
     notifier = notifier or Notifier(os.getenv("WECHAT_WEBHOOK", ""), admin.ENDPOINT_EVENT_FILE)
@@ -99,15 +99,27 @@ def _flush_peer_outbox_locked(now=None, opener=None, notifier=None):
         return {"sent": 0, "pending": len(items)}
     pending = []
     sent = 0
+    failed = 0
+    last_error = ""
+    selected_ids = set(only_ids) if only_ids is not None else None
+    failed_peers = {}
     state = admin.load_json(admin.PEER_STATE_FILE, {"received": []})
     acknowledgements = state.setdefault("acknowledgements", {})
     for item in items:
+        if selected_ids is not None and item.get("id") not in selected_ids:
+            pending.append(item)
+            continue
         if int(item.get("next_attempt", 0)) > now:
             pending.append(item)
             continue
         payload = item.get("payload", {})
         peer = str(item.get("peer", "")).rstrip("/")
         endpoint = payload.get("endpoint", {})
+        if peer in failed_peers:
+            item["last_error"] = failed_peers[peer]
+            item["next_attempt"] = now + 5
+            pending.append(item)
+            continue
         try:
             request = urllib.request.Request(peer + "/api/v3/route-sync",
                 data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), method="POST",
@@ -127,6 +139,9 @@ def _flush_peer_outbox_locked(now=None, opener=None, notifier=None):
                 "endpoint": f"{endpoint.get('host', '')}:{endpoint.get('port', '')}",
                 "peer": peer, "message": f"线路设置已同步到 {peer}。"})
         except (OSError, ValueError, urllib.error.URLError) as exc:
+            failed_peers[peer] = str(exc)[:300]
+            failed += 1
+            last_error = str(exc)[:300]
             attempts = int(item.get("attempts", 0)) + 1
             item["attempts"] = attempts
             item["next_attempt"] = now + min(300, 5 * (2 ** min(attempts - 1, 6)))
@@ -138,6 +153,16 @@ def _flush_peer_outbox_locked(now=None, opener=None, notifier=None):
                     "peer": peer, "message": f"暂时无法同步到 {peer}，后台会自动重试：{exc}"})
                 item["failure_logged"] = True
             pending.append(item)
+    if sent or failed:
+        if sent and not pending:
+            status = "success"
+            message = f"后台同步已完成，对端确认 {sent} 个线路任务。"
+        else:
+            status = "partial" if sent else "failed"
+            message = (f"后台同步已确认 {sent} 个任务，仍有 {len(pending)} 个等待重试。"
+                + (f"最近原因：{last_error}" if last_error else ""))
+        state["last_sync"] = {"time": now, "status": status, "message": message,
+            "sent": sent, "total": sent + len(pending), "pending": len(pending)}
     admin.ConfigStore._atomic_write(admin.PEER_OUTBOX_FILE,
         json.dumps({"items": pending[-100:]}, ensure_ascii=False, indent=2) + "\n", mode=0o600)
     admin.ConfigStore._atomic_write(admin.PEER_STATE_FILE,

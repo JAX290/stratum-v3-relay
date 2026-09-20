@@ -107,6 +107,24 @@ class RouteSwitchMonitorTest(unittest.TestCase):
         self.assertGreater(item["next_attempt"], 1000)
         self.assertEqual(self.events[0]["type"], "route_sync_failed")
 
+    def test_immediate_flush_only_sends_newly_selected_tasks(self):
+        token = "1" * 64
+        admin.PEER_SYNC_FILE.write_text(json.dumps({"enabled": True,
+            "peers": ["https://peer.tail1234.ts.net"], "token": token}), encoding="utf-8")
+        old_ids = admin.queue_route_sync(admin.store.load(), 11301, "old", return_ids=True)
+        new_ids = admin.queue_route_sync(admin.store.load(), 11301, "new", return_ids=True)
+
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return b'{"ok":true,"changed":true}'
+
+        result = switcher.flush_peer_outbox(now=1000, opener=lambda request, timeout: Response(),
+            notifier=self.events.append, only_ids=set(new_ids))
+        self.assertEqual(result, {"sent": 1, "pending": 1})
+        remaining = json.loads(admin.PEER_OUTBOX_FILE.read_text(encoding="utf-8"))["items"]
+        self.assertEqual([item["id"] for item in remaining], old_ids)
+
     def test_peer_versions_increment_without_using_system_clock(self):
         token = "e" * 64
         admin.PEER_SYNC_FILE.write_text(json.dumps({"enabled": True,

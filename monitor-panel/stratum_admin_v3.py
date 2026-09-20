@@ -1164,7 +1164,7 @@ def build_page_context(page):
         route_event_labels={"canary_started": "测试已开始", "canary_passed": "测试通过并切换",
             "canary_failed": "测试失败并退回", "canary_stopped": "测试已提前停止",
             "verified_route_applied": "已验证地址切换", "route_restored": "历史线路已恢复",
-            "route_sync_queued": "全部线路已加入同步队列",
+            "route_sync_queued": "已发起全部线路同步",
             "route_sync_ok": "备用VPS同步成功", "route_sync_failed": "备用VPS同步失败",
             "route_sync_received": "已接收VPS同步"},
         algorithms={"scrypt": "Scrypt", "sha256d": "SHA-256", "other": "其他/自定义", "unknown": "算法待确认"},
@@ -1390,10 +1390,12 @@ def save_group(group_id):
                 endpoint_ids.append(selected)
             group["endpoint_ids"] = endpoint_ids
         save_and_reload(config, f"update-group:{group_id}")
+        changed_routes = []
         for changed_port, endpoint_id, _, _ in route_map(config):
             if before_routes.get(changed_port) != endpoint_id:
-                queue_route_sync(config, changed_port, f"update-group:{group_id}")
-        flash(f"{group['name']} 已保存；新连接使用新配置，已有连接继续保持。")
+                changed_routes.append((changed_port, f"update-group:{group_id}"))
+        sync_text = (" " + peer_sync_feedback(sync_routes_immediately(config, changed_routes))) if changed_routes else " 没有线路发生变化，无需同步。"
+        flash(f"{group['name']} 已保存；新连接使用新配置，已有连接继续保持。{sync_text}")
     except (KeyError, StopIteration, ConfigError, OSError) as exc:
         flash(f"保存失败：{exc}")
     return redirect(url_for("dashboard_page", page="routes"))
@@ -1481,9 +1483,12 @@ def peer_sync_summary():
     state = load_json(PEER_STATE_FILE, {})
     acknowledgements = state.get("acknowledgements", {})
     conflicts = state.get("conflicts", {})
+    last = state.get("last_sync", {}) if isinstance(state.get("last_sync"), dict) else {}
     return {"node_id": str(state.get("node_id", "")),
         "confirmed": len(acknowledgements) if isinstance(acknowledgements, dict) else 0,
-        "conflicts": len(conflicts) if isinstance(conflicts, dict) else 0}
+        "conflicts": len(conflicts) if isinstance(conflicts, dict) else 0,
+        "last_status": str(last.get("status", "never")), "last_message": str(last.get("message", "")),
+        "last_time": beijing_time(last.get("time", 0)) if last.get("time") else "尚未执行"}
 
 
 def validate_peer_url(value):
@@ -1503,15 +1508,15 @@ def validate_peer_url(value):
     return f"https://{parsed.netloc}"
 
 
-def queue_route_sync(config, port, action):
+def queue_route_sync(config, port, action, return_ids=False):
     with file_lock(PEER_STATE_FILE.parent / "peer-sync"):
-        return _queue_route_sync_locked(config, port, action)
+        return _queue_route_sync_locked(config, port, action, return_ids=return_ids)
 
 
-def _queue_route_sync_locked(config, port, action):
+def _queue_route_sync_locked(config, port, action, return_ids=False):
     settings = load_peer_settings()
     if not settings["enabled"] or len(settings["token"]) < 32 or not settings["peers"]:
-        return 0
+        return [] if return_ids else 0
     endpoint_id = route_endpoint_id(config, port)
     endpoint = next(item for item in config["endpoints"] if item["id"] == endpoint_id)
     allowed = ("id", "pool", "region", "host", "port", "algorithm", "coins", "transport",
@@ -1531,8 +1536,11 @@ def _queue_route_sync_locked(config, port, action):
         "endpoint": {key: endpoint[key] for key in allowed if key in endpoint}}
     outbox = load_json(PEER_OUTBOX_FILE, {"items": []})
     items = list(outbox.get("items", []))
+    task_ids = []
     for peer in settings["peers"]:
-        items.append({"id": secrets.token_hex(12), "peer": validate_peer_url(peer),
+        task_id = secrets.token_hex(12)
+        task_ids.append(task_id)
+        items.append({"id": task_id, "peer": validate_peer_url(peer),
             "payload": payload, "attempts": 0, "next_attempt": 0})
     version = {"node_id": node_id, "sequence": sequence}
     row = state.setdefault("route_versions", {}).setdefault(str(int(port)), {"nodes": {}})
@@ -1542,7 +1550,58 @@ def _queue_route_sync_locked(config, port, action):
     ConfigStore._atomic_write(PEER_STATE_FILE, json.dumps(state, ensure_ascii=False, indent=2) + "\n", mode=0o600)
     ConfigStore._atomic_write(PEER_OUTBOX_FILE,
         json.dumps({"items": items[-100:]}, ensure_ascii=False, indent=2) + "\n", mode=0o600)
-    return len(settings["peers"])
+    return task_ids if return_ids else len(settings["peers"])
+
+
+def record_peer_sync_result(status, message, sent=0, total=0, pending=0):
+    with file_lock(PEER_STATE_FILE.parent / "peer-sync"):
+        state = load_json(PEER_STATE_FILE, {"received": []})
+        state["last_sync"] = {"time": int(time.time()), "status": status, "message": str(message)[:500],
+            "sent": int(sent), "total": int(total), "pending": int(pending)}
+        ConfigStore._atomic_write(PEER_STATE_FILE,
+            json.dumps(state, ensure_ascii=False, indent=2) + "\n", mode=0o600)
+
+
+def sync_routes_immediately(config, routes):
+    """Queue selected route changes, send them now, and retain failures for background retry."""
+    task_ids = []
+    for port, action in routes:
+        task_ids.extend(queue_route_sync(config, port, action, return_ids=True))
+    if not task_ids:
+        return {"status": "disabled", "sent": 0, "total": 0, "pending": 0,
+            "message": "双 VPS 同步未开启，本次修改只在当前 VPS 生效。"}
+    record_peer_sync_result("syncing", f"正在向对端发送 {len(task_ids)} 个线路同步任务。",
+        total=len(task_ids), pending=len(task_ids))
+    try:
+        # Imported here to avoid a startup cycle: the background worker imports this module too.
+        from route_switch_monitor import flush_peer_outbox
+        flush_peer_outbox(only_ids=set(task_ids))
+        remaining = {item.get("id"): item for item in load_json(PEER_OUTBOX_FILE, {"items": []}).get("items", [])
+            if item.get("id") in task_ids}
+        pending = len(remaining)
+        sent = len(task_ids) - pending
+        if not pending:
+            status = "success"
+            message = f"对端 VPS 已确认全部线路修改（{sent}/{len(task_ids)}）。"
+        else:
+            status = "partial" if sent else "failed"
+            first_error = next((str(item.get("last_error", "")) for item in remaining.values()
+                if item.get("last_error")), "对端暂时没有确认")
+            message = (f"已同步 {sent}/{len(task_ids)} 个任务；另有 {pending} 个未完成。"
+                f"原因：{first_error}。系统将在后台自动重试。")
+    except Exception as exc:
+        sent, pending, status = 0, len(task_ids), "failed"
+        message = f"即时同步执行失败：{exc}。任务已经保留，系统将在后台自动重试。"
+    record_peer_sync_result(status, message, sent=sent, total=len(task_ids), pending=pending)
+    return {"status": status, "sent": sent, "total": len(task_ids), "pending": pending, "message": message}
+
+
+def peer_sync_feedback(result):
+    if result["status"] == "success":
+        return "双 VPS 同步成功：" + result["message"]
+    if result["status"] == "disabled":
+        return result["message"]
+    return "双 VPS 同步尚未完成：" + result["message"]
 
 
 def apply_peer_payload(payload):
@@ -1694,8 +1753,9 @@ def apply_route(port):
             save_and_reload(original_config, f"auto-rollback-port:{port}")
             raise ConfigError(f"保存后核验失败：配置目标为 {endpoint_id}，实际HAProxy目标为 {actual or '未找到'}")
         endpoint = next(item for item in config["endpoints"] if item["id"] == endpoint_id)
-        queue_route_sync(config, port, f"update-port:{port}")
-        flash(f"端口 {port} 已应用到 {endpoint['host']}:{endpoint['port']}；现有连接保持原目标，新连接使用新目标。")
+        sync_result = sync_routes_immediately(config, [(port, f"update-port:{port}")])
+        flash(f"端口 {port} 已应用到 {endpoint['host']}:{endpoint['port']}；现有连接保持原目标，新连接使用新目标。 "
+            + peer_sync_feedback(sync_result))
     except (KeyError, StopIteration, ConfigError, OSError) as exc:
         flash(f"端口 {port} 应用失败：{exc}")
     return redirect(url_for("dashboard_page", page="routes"))
@@ -1785,8 +1845,9 @@ def promote_canary(port):
         save_and_reload(config, f"promote-canary:{port}:{previous}->{canary['endpoint_id']}")
         request_reconnect(port)
         endpoint = next(item for item in config["endpoints"] if item["id"] == canary["endpoint_id"])
-        queue_route_sync(config, port, f"promote-canary:{port}")
-        flash(f"端口 {port} 已全量切换到 {endpoint['pool']}；该端口现有矿机正在自动重连，其他端口不受影响。")
+        sync_result = sync_routes_immediately(config, [(port, f"promote-canary:{port}")])
+        flash(f"端口 {port} 已全量切换到 {endpoint['pool']}；该端口现有矿机正在自动重连，其他端口不受影响。 "
+            + peer_sync_feedback(sync_result))
     except (KeyError, StopIteration, ValueError, ConfigError, OSError) as exc:
         flash(f"暂不能全量切换：{exc}")
     return redirect(url_for("dashboard_page", page="overview"))
@@ -1813,8 +1874,9 @@ def restore_route(port):
         request_reconnect(port)
         send_route_event("route_restored", port, endpoint,
             f"端口 {port} 已恢复到历史线路，矿机正在自动重连。")
-        queue_route_sync(config, port, f"restore-port:{port}")
-        flash(f"端口 {port} 已恢复到 {endpoint['pool']}；该端口矿机正在自动重连。")
+        sync_result = sync_routes_immediately(config, [(port, f"restore-port:{port}")])
+        flash(f"端口 {port} 已恢复到 {endpoint['pool']}；该端口矿机正在自动重连。 "
+            + peer_sync_feedback(sync_result))
     except (KeyError, StopIteration, ValueError, ConfigError, OSError) as exc:
         flash(f"恢复失败：{exc}")
     return redirect(url_for("dashboard_page", page="overview"))
@@ -1844,8 +1906,9 @@ def apply_verified_route(port):
         request_reconnect(port)
         send_route_event("verified_route_applied", port, endpoint,
             f"端口 {port} 已从已验证地址库直接切换，矿机正在自动重连。")
-        queue_route_sync(config, port, f"apply-verified:{port}")
-        flash(f"端口 {port} 已直接切换到已验证地址 {endpoint['pool']}；该端口矿机正在自动重连。")
+        sync_result = sync_routes_immediately(config, [(port, f"apply-verified:{port}")])
+        flash(f"端口 {port} 已直接切换到已验证地址 {endpoint['pool']}；该端口矿机正在自动重连。 "
+            + peer_sync_feedback(sync_result))
     except (KeyError, StopIteration, ValueError, ConfigError, OSError) as exc:
         flash(f"直接切换失败：{exc}")
     return redirect(url_for("dashboard_page", page="overview"))
@@ -1888,12 +1951,10 @@ def sync_all_routes():
     try:
         config = store.load()
         routes = route_map(config)
-        queued = sum(queue_route_sync(config, port, "sync-all") for port, _, _, _ in routes)
-        if not queued:
+        result = sync_routes_immediately(config, [(port, "sync-all") for port, _, _, _ in routes])
+        if result["status"] == "disabled":
             raise ConfigError("请先开启VPS双向同步，并填写对端地址和共享同步密钥")
-        send_route_event("route_sync_queued", 0, {},
-            f"本机全部 {len(routes)} 条线路已加入同步队列，共生成 {queued} 个同步任务。")
-        flash(f"本机全部线路已加入同步队列（{queued}个任务），后台会自动发送并重试。")
+        flash(f"已立即发送本机全部 {len(routes)} 条线路。" + peer_sync_feedback(result))
     except (KeyError, StopIteration, ValueError, ConfigError, OSError) as exc:
         flash(f"全部线路同步失败：{exc}")
     return redirect(url_for("dashboard_page", page="settings"))
