@@ -12,6 +12,7 @@ import hmac
 import json
 import math
 import os
+import re
 import smtplib
 import socket
 import statistics
@@ -381,41 +382,79 @@ class Notifier:
 
     def configured_channels(self):
         result = []
-        if self.settings.get("WECHAT_WEBHOOK", "").startswith("https://"):
+        if self._wechat_targets():
             result.append("wechat")
-        if self.settings.get("DINGTALK_WEBHOOK", "").startswith("https://"):
+        if self._dingtalk_targets():
             result.append("dingtalk")
-        if self.settings.get("SMTP_HOST") and self.settings.get("SMTP_TO") and self.settings.get("SMTP_FROM"):
+        recipients = self._email_recipients()
+        delivery = self.settings.get("EMAIL_DELIVERY", "smtp")
+        if recipients and (delivery == "direct" or
+                (self.settings.get("SMTP_HOST") and self.settings.get("SMTP_FROM"))):
             result.append("email")
         return result
+
+    def _indexed_values(self, prefix, legacy_key):
+        indexed = [self.settings.get(f"{prefix}_{number}", "").strip() for number in range(1, 4)]
+        if any(f"{prefix}_{number}" in self.settings for number in range(1, 4)):
+            return [value for value in indexed if value]
+        legacy = self.settings.get(legacy_key, "").strip()
+        return [legacy] if legacy else []
+
+    def _wechat_targets(self):
+        return [value for value in self._indexed_values("WECHAT_WEBHOOK", "WECHAT_WEBHOOK")
+            if value.startswith("https://")]
+
+    def _dingtalk_targets(self):
+        indexed = any(f"DINGTALK_WEBHOOK_{number}" in self.settings for number in range(1, 4))
+        if indexed:
+            return [(url, self.settings.get(f"DINGTALK_SECRET_{number}", "").strip())
+                for number in range(1, 4)
+                if (url := self.settings.get(f"DINGTALK_WEBHOOK_{number}", "").strip()).startswith("https://")]
+        url = self.settings.get("DINGTALK_WEBHOOK", "").strip()
+        return [(url, self.settings.get("DINGTALK_SECRET", "").strip())] if url.startswith("https://") else []
+
+    def _email_recipients(self):
+        return self._indexed_values("EMAIL_TO", "SMTP_TO")
 
     def send(self, content, only=None):
         channels = [only] if only else self.configured_channels()
         errors = []
         for channel in channels:
-            try:
-                if channel == "wechat":
-                    self._post_json(self.settings["WECHAT_WEBHOOK"],
-                        {"msgtype": "text", "text": {"content": content}})
-                elif channel == "dingtalk":
-                    url = self.settings["DINGTALK_WEBHOOK"]
-                    secret = self.settings.get("DINGTALK_SECRET", "")
-                    if secret:
-                        timestamp = str(int(time.time() * 1000))
-                        signature = base64.b64encode(hmac.new(secret.encode(),
-                            f"{timestamp}\n{secret}".encode(), digestmod="sha256").digest()).decode()
-                        separator = "&" if "?" in url else "?"
-                        url += separator + urllib.parse.urlencode({"timestamp": timestamp, "sign": signature})
-                    self._post_json(url, {"msgtype": "text", "text": {"content": content}})
-                elif channel == "email":
-                    self._send_email(content)
-                else:
-                    raise ValueError("通知渠道未配置")
-            except (OSError, ValueError, smtplib.SMTPException) as exc:
-                errors.append(f"{channel}: {exc}")
+            targets = []
+            if channel == "wechat":
+                targets = self._wechat_targets()
+            elif channel == "dingtalk":
+                targets = self._dingtalk_targets()
+            elif channel == "email":
+                targets = self._email_recipients()
+            if not targets:
+                errors.append(f"{channel}: 通知渠道未配置")
+                continue
+            for position, target in enumerate(targets, 1):
+                try:
+                    if channel == "wechat":
+                        self._post_json(target, {"msgtype": "text", "text": {"content": content}})
+                    elif channel == "dingtalk":
+                        url, secret = target
+                        if secret:
+                            timestamp = str(int(time.time() * 1000))
+                            signature = base64.b64encode(hmac.new(secret.encode(),
+                                f"{timestamp}\n{secret}".encode(), digestmod="sha256").digest()).decode()
+                            separator = "&" if "?" in url else "?"
+                            url += separator + urllib.parse.urlencode({"timestamp": timestamp, "sign": signature})
+                        self._post_json(url, {"msgtype": "text", "text": {"content": content}})
+                    elif channel == "email":
+                        self._send_email(content, target)
+                    else:
+                        raise ValueError("通知渠道未配置")
+                except (OSError, ValueError, smtplib.SMTPException) as exc:
+                    errors.append(f"{channel} 第{position}条: {exc}")
         if only and errors:
             raise OSError("；".join(errors))
-        return len(channels) - len(errors), errors
+        target_count = sum(len(self._wechat_targets()) if channel == "wechat" else
+            len(self._dingtalk_targets()) if channel == "dingtalk" else
+            len(self._email_recipients()) if channel == "email" else 0 for channel in channels)
+        return target_count - len(errors), errors
 
     @staticmethod
     def _post_json(url, data):
@@ -430,12 +469,21 @@ class Notifier:
             if code not in {0, "0", None}:
                 raise ValueError(str(result.get("errmsg", result.get("message", result))))
 
-    def _send_email(self, content):
+    def _send_email(self, content, recipient):
         message = EmailMessage()
         message["Subject"] = "Stratum 中转监控通知"
-        message["From"] = self.settings["SMTP_FROM"]
-        message["To"] = self.settings["SMTP_TO"]
+        direct = self.settings.get("EMAIL_DELIVERY", "smtp") == "direct"
+        hostname = re.sub(r"[^a-zA-Z0-9.-]", "-", socket.getfqdn()).strip(".-") or "localhost"
+        message["From"] = f"stratum-monitor@{hostname}" if direct else self.settings["SMTP_FROM"]
+        message["To"] = recipient
         message.set_content(content)
+        if direct:
+            try:
+                with smtplib.SMTP("127.0.0.1", 25, timeout=10) as server:
+                    server.send_message(message)
+            except (OSError, smtplib.SMTPException) as exc:
+                raise OSError("无法交给本机邮件服务，请重新运行一键升级脚本并检查 Postfix：" + str(exc)) from exc
+            return
         host = self.settings["SMTP_HOST"]
         port = int(self.settings.get("SMTP_PORT", "465"))
         mode = self.settings.get("SMTP_SECURITY", "ssl")

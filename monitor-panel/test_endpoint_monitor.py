@@ -104,17 +104,19 @@ class EndpointMonitorTest(unittest.TestCase):
         self.assertIn("不等同于现有矿工连接已经中断", message)
 
     def test_notification_sends_wechat_and_dingtalk_without_exposing_secrets(self):
-        settings = {"WECHAT_WEBHOOK": "https://qyapi.example/send?key=private",
-            "DINGTALK_WEBHOOK": "https://oapi.example/send?access_token=private", "DINGTALK_SECRET": "SEC-private"}
+        settings = {"WECHAT_WEBHOOK_1": "https://qyapi.example/send?key=private-1",
+            "WECHAT_WEBHOOK_2": "https://qyapi.example/send?key=private-2",
+            "DINGTALK_WEBHOOK_1": "https://oapi.example/send?access_token=private-1", "DINGTALK_SECRET_1": "SEC-private",
+            "DINGTALK_WEBHOOK_2": "https://oapi.example/send?access_token=private-2", "DINGTALK_SECRET_2": ""}
         notifier = Notifier(settings=settings)
         with patch("endpoint_monitor.urllib.request.urlopen") as urlopen:
             sent, errors = notifier.send("测试")
-        self.assertEqual((sent, errors), (2, []))
-        self.assertEqual(urlopen.call_count, 2)
+        self.assertEqual((sent, errors), (4, []))
+        self.assertEqual(urlopen.call_count, 4)
         requests = [call.args[0] for call in urlopen.call_args_list]
-        self.assertIn("timestamp=", requests[1].full_url)
-        self.assertIn("sign=", requests[1].full_url)
-        self.assertNotIn("SEC-private", requests[1].full_url)
+        self.assertIn("timestamp=", requests[2].full_url)
+        self.assertIn("sign=", requests[2].full_url)
+        self.assertNotIn("SEC-private", requests[2].full_url)
 
     def test_notification_sends_email_through_configured_smtp(self):
         settings = {"SMTP_HOST": "smtp.example.com", "SMTP_PORT": "465", "SMTP_SECURITY": "ssl",
@@ -129,6 +131,20 @@ class EndpointMonitorTest(unittest.TestCase):
         message = server.send_message.call_args.args[0]
         self.assertEqual(message["To"], "ops@example.com")
         self.assertIn("邮件测试", message.get_content())
+
+    def test_notification_sends_direct_mail_to_each_recipient_without_sender_setup(self):
+        settings = {"EMAIL_DELIVERY": "direct", "EMAIL_TO_1": "first@example.com",
+            "EMAIL_TO_2": "second@example.com", "EMAIL_TO_3": ""}
+        notifier = Notifier(settings=settings)
+        with patch("endpoint_monitor.smtplib.SMTP") as smtp:
+            sent, errors = notifier.send("直发测试")
+        self.assertEqual((sent, errors), (2, []))
+        server = smtp.return_value.__enter__.return_value
+        self.assertEqual(server.send_message.call_count, 2)
+        messages = [call.args[0] for call in server.send_message.call_args_list]
+        self.assertEqual(messages[0]["To"], "first@example.com")
+        self.assertEqual(messages[1]["To"], "second@example.com")
+        self.assertTrue(messages[0]["From"].startswith("stratum-monitor@"))
 
     def test_old_batch_derived_alert_is_cleared_on_upgrade(self):
         state = {"version": 1, "endpoints": {"active": {"alerting": True, "consecutive_failures": 8,

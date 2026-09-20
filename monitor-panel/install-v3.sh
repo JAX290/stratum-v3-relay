@@ -26,7 +26,15 @@ done
 printf '%s\n' "$backup" >/root/stratum-v3-last-backup
 
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy python3-flask gunicorn
+mail_name=$(hostname -f 2>/dev/null || hostname)
+printf 'postfix postfix/mailname string %s\n' "$mail_name" | debconf-set-selections
+printf 'postfix postfix/main_mailer_type select Internet Site\n' | debconf-set-selections
+DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy python3-flask gunicorn postfix
+postconf -e 'inet_interfaces = loopback-only'
+postconf -e 'mynetworks = 127.0.0.0/8 [::1]/128'
+postconf -e 'smtp_tls_security_level = may'
+systemctl enable postfix
+systemctl restart postfix
 id stratum-proxy >/dev/null 2>&1 || useradd --system --home /nonexistent --shell /usr/sbin/nologin stratum-proxy
 id stratum-relay >/dev/null 2>&1 || useradd --system --home /nonexistent --shell /usr/sbin/nologin stratum-relay
 install -d -m 0755 /opt/stratum-admin

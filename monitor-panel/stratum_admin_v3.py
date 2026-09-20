@@ -128,17 +128,36 @@ def write_env(updates):
     ConfigStore._atomic_write(ENV_FILE, "\n".join(output) + "\n", mode=0o600)
 
 
-NOTIFICATION_ENV_KEYS = ("WECHAT_WEBHOOK", "DINGTALK_WEBHOOK", "DINGTALK_SECRET",
-    "SMTP_HOST", "SMTP_PORT", "SMTP_SECURITY", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM", "SMTP_TO")
+NOTIFICATION_ENV_KEYS = ("WECHAT_WEBHOOK", "DINGTALK_WEBHOOK", "DINGTALK_SECRET", "SMTP_TO",
+    "EMAIL_DELIVERY", "SMTP_HOST", "SMTP_PORT", "SMTP_SECURITY", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM") + tuple(
+        f"{prefix}_{number}" for prefix in ("WECHAT_WEBHOOK", "DINGTALK_WEBHOOK", "DINGTALK_SECRET", "EMAIL_TO")
+        for number in range(1, 4))
+
+
+def indexed_notification_values(values, prefix, legacy):
+    if any(f"{prefix}_{number}" in values for number in range(1, 4)):
+        return [values.get(f"{prefix}_{number}", "") for number in range(1, 4)]
+    return [values.get(legacy, ""), "", ""]
 
 
 def notification_context():
     values = read_env()
-    return {"wechat": bool(values.get("WECHAT_WEBHOOK")), "dingtalk": bool(values.get("DINGTALK_WEBHOOK")),
-        "email": bool(values.get("SMTP_HOST") and values.get("SMTP_FROM") and values.get("SMTP_TO")),
+    wechat = indexed_notification_values(values, "WECHAT_WEBHOOK", "WECHAT_WEBHOOK")
+    dingtalk = indexed_notification_values(values, "DINGTALK_WEBHOOK", "DINGTALK_WEBHOOK")
+    recipients = indexed_notification_values(values, "EMAIL_TO", "SMTP_TO")
+    delivery = values.get("EMAIL_DELIVERY", "smtp")
+    email_ready = bool([item for item in recipients if item]) and (delivery == "direct" or
+        bool(values.get("SMTP_HOST") and values.get("SMTP_FROM")))
+    return {"wechat": bool([item for item in wechat if item]), "wechat_count": len([item for item in wechat if item]),
+        "wechat_slots": [{"number": number, "configured": bool(wechat[number - 1])} for number in range(1, 4)],
+        "dingtalk": bool([item for item in dingtalk if item]), "dingtalk_count": len([item for item in dingtalk if item]),
+        "dingtalk_slots": [{"number": number, "configured": bool(dingtalk[number - 1])} for number in range(1, 4)],
+        "email": email_ready, "email_count": len([item for item in recipients if item]),
+        "email_delivery": delivery, "email_recipients": recipients,
+        "direct_mail_available": Path("/usr/sbin/postfix").exists(),
         "smtp_host": values.get("SMTP_HOST", ""), "smtp_port": values.get("SMTP_PORT", "465"),
         "smtp_security": values.get("SMTP_SECURITY", "ssl"), "smtp_username": values.get("SMTP_USERNAME", ""),
-        "smtp_from": values.get("SMTP_FROM", ""), "smtp_to": values.get("SMTP_TO", "")}
+        "smtp_from": values.get("SMTP_FROM", "")}
 
 
 def clamp_int(value, minimum, maximum):
@@ -2044,29 +2063,52 @@ def save_notification_settings():
     if not csrf_ok():
         return "Forbidden", 403
     current = read_env()
+    for prefix, legacy in (("WECHAT_WEBHOOK", "WECHAT_WEBHOOK"), ("DINGTALK_WEBHOOK", "DINGTALK_WEBHOOK"),
+            ("DINGTALK_SECRET", "DINGTALK_SECRET"), ("EMAIL_TO", "SMTP_TO")):
+        if not any(f"{prefix}_{number}" in current for number in range(1, 4)):
+            current[f"{prefix}_1"] = current.get(legacy, "")
     updates = {key: current.get(key, "") for key in NOTIFICATION_ENV_KEYS}
-    mapping = {"wechat_webhook": "WECHAT_WEBHOOK", "dingtalk_webhook": "DINGTALK_WEBHOOK",
-        "dingtalk_secret": "DINGTALK_SECRET", "smtp_host": "SMTP_HOST", "smtp_port": "SMTP_PORT",
+    mapping = {"smtp_host": "SMTP_HOST", "smtp_port": "SMTP_PORT",
         "smtp_security": "SMTP_SECURITY", "smtp_username": "SMTP_USERNAME", "smtp_password": "SMTP_PASSWORD",
-        "smtp_from": "SMTP_FROM", "smtp_to": "SMTP_TO"}
+        "smtp_from": "SMTP_FROM"}
     try:
         for field, key in mapping.items():
             value = request.form.get(field, "").strip()
             if value:
                 updates[key] = value
-        for prefix, keys in {"wechat": ("WECHAT_WEBHOOK",), "dingtalk": ("DINGTALK_WEBHOOK", "DINGTALK_SECRET"),
-                "email": ("SMTP_HOST", "SMTP_PORT", "SMTP_SECURITY", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM", "SMTP_TO")}.items():
-            if request.form.get("remove_" + prefix) == "1":
-                for key in keys:
-                    updates[key] = ""
+        for number in range(1, 4):
+            for field, key in ((f"wechat_webhook_{number}", f"WECHAT_WEBHOOK_{number}"),
+                    (f"dingtalk_webhook_{number}", f"DINGTALK_WEBHOOK_{number}"),
+                    (f"dingtalk_secret_{number}", f"DINGTALK_SECRET_{number}")):
+                value = request.form.get(field, "").strip()
+                if value:
+                    updates[key] = value
+            if request.form.get(f"remove_wechat_{number}") == "1":
+                updates[f"WECHAT_WEBHOOK_{number}"] = ""
+            if request.form.get(f"remove_dingtalk_{number}") == "1":
+                updates[f"DINGTALK_WEBHOOK_{number}"] = ""
+                updates[f"DINGTALK_SECRET_{number}"] = ""
+            updates[f"EMAIL_TO_{number}"] = request.form.get(f"email_to_{number}", "").strip()
+        updates["EMAIL_DELIVERY"] = request.form.get("email_delivery", updates.get("EMAIL_DELIVERY") or "smtp").strip()
+        if request.form.get("remove_email") == "1":
+            for key in ("SMTP_HOST", "SMTP_PORT", "SMTP_SECURITY", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM",
+                    "SMTP_TO", "EMAIL_TO_1", "EMAIL_TO_2", "EMAIL_TO_3"):
+                updates[key] = ""
+        # Indexed values replace the old single-target fields after the first save.
+        updates["WECHAT_WEBHOOK"] = updates["DINGTALK_WEBHOOK"] = updates["DINGTALK_SECRET"] = updates["SMTP_TO"] = ""
         if any("\n" in value or "\r" in value for value in updates.values()):
             raise ValueError("配置不能包含换行")
-        for key in ("WECHAT_WEBHOOK", "DINGTALK_WEBHOOK"):
+        for key in [f"{prefix}_{number}" for prefix in ("WECHAT_WEBHOOK", "DINGTALK_WEBHOOK") for number in range(1, 4)]:
             if updates[key] and not updates[key].startswith("https://"):
                 raise ValueError("机器人地址必须以 https:// 开头")
-        if updates["SMTP_HOST"] or updates["SMTP_FROM"] or updates["SMTP_TO"]:
-            if not (updates["SMTP_HOST"] and "@" in updates["SMTP_FROM"] and "@" in updates["SMTP_TO"]):
-                raise ValueError("邮箱服务器、发件地址和收件地址需要完整填写")
+        recipients = [updates[f"EMAIL_TO_{number}"] for number in range(1, 4) if updates[f"EMAIL_TO_{number}"]]
+        if any(not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", address) for address in recipients):
+            raise ValueError("收件邮箱格式不正确")
+        if updates["EMAIL_DELIVERY"] not in {"smtp", "direct"}:
+            raise ValueError("邮箱发送方式不正确")
+        if recipients and updates["EMAIL_DELIVERY"] == "smtp":
+            if not (updates["SMTP_HOST"] and re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", updates["SMTP_FROM"])):
+                raise ValueError("使用邮箱服务商发送时，需要完整填写 SMTP 服务器和发件地址")
             updates["SMTP_PORT"] = str(clamp_int(updates["SMTP_PORT"] or "465", 1, 65535))
             if updates["SMTP_SECURITY"] not in {"ssl", "starttls", "plain"}:
                 raise ValueError("邮箱加密方式不正确")
@@ -2082,7 +2124,7 @@ def save_notification_settings():
         if failed_services:
             flash("通知渠道已保存，但部分监控服务重新载入失败；请在“日志”页查看服务状态。")
         else:
-            flash("通知渠道已保存。密码和机器人地址不会在页面中回显，请分别发送测试通知。")
+            flash("通知渠道已保存。机器人地址和密码不会回显，请分别发送测试通知。")
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         flash(f"通知渠道保存失败：{exc}")
     return redirect(url_for("dashboard_page", page="settings"))
@@ -2113,16 +2155,13 @@ def test_notification_channel(channel):
 def test_wechat():
     if not authorized() or not csrf_ok():
         return "Forbidden", 403
-    webhook = read_env().get("WECHAT_WEBHOOK", "")
-    if not webhook.startswith("https://"):
+    notifier = Notifier(event_path=ENDPOINT_EVENT_FILE, settings=read_env())
+    if "wechat" not in notifier.configured_channels():
         flash("尚未配置有效的企业微信 Webhook。")
         return redirect(url_for("dashboard_page", page="alerts"))
-    payload = json.dumps({"msgtype": "text", "text": {"content": f"Stratum V3 测试通知\n时间（北京时间）：{beijing_time(time.time())}"}}, ensure_ascii=False).encode()
     try:
-        req = urllib.request.Request(webhook, data=payload, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=8) as response:
-            result = json.loads(response.read())
-        flash("测试通知发送成功。" if result.get("errcode") == 0 else f"企业微信返回错误：{result}")
+        notifier.send(f"Stratum V3 测试通知\n时间（北京时间）：{beijing_time(time.time())}", only="wechat")
+        flash("测试通知发送成功。")
     except (OSError, ValueError) as exc:
         flash(f"测试通知发送失败：{exc}")
     return redirect(url_for("dashboard_page", page="alerts"))

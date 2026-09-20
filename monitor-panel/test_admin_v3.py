@@ -216,25 +216,51 @@ class AdminV3Test(unittest.TestCase):
     def test_notification_settings_require_tailscale_preserve_blank_secrets_and_can_be_tested(self):
         original = "WECHAT_WEBHOOK=https://qyapi.example/private\nDINGTALK_SECRET=SEC-private\nSMTP_PASSWORD=mail-private\n"
         admin.ENV_FILE.write_text(original, encoding="utf-8")
-        data = {"csrf": "token", "dingtalk_webhook": "https://oapi.example/send?access_token=x",
+        data = {"csrf": "token", "dingtalk_webhook_1": "https://oapi.example/send?access_token=x",
             "smtp_host": "smtp.example.com", "smtp_port": "465", "smtp_security": "ssl",
-            "smtp_username": "sender@example.com", "smtp_from": "sender@example.com", "smtp_to": "ops@example.com"}
+            "smtp_username": "sender@example.com", "smtp_from": "sender@example.com", "email_to_1": "ops@example.com",
+            "email_delivery": "smtp"}
         self.assertEqual(self.client.post("/notification-settings", data=data).status_code, 404)
         headers = {"Tailscale-User-Login": "owner@example.com"}
         with patch.object(admin.subprocess, "run"), patch.object(admin, "approve_integrity"):
             response = self.client.post("/notification-settings", data=data, headers=headers)
         self.assertEqual(response.status_code, 302)
         values = admin.read_env()
-        self.assertEqual(values["WECHAT_WEBHOOK"], "https://qyapi.example/private")
-        self.assertEqual(values["DINGTALK_SECRET"], "SEC-private")
+        self.assertEqual(values["WECHAT_WEBHOOK_1"], "https://qyapi.example/private")
+        self.assertEqual(values["DINGTALK_SECRET_1"], "SEC-private")
+        self.assertEqual(values["WECHAT_WEBHOOK"], "")
         self.assertEqual(values["SMTP_PASSWORD"], "mail-private")
-        self.assertEqual(values["SMTP_TO"], "ops@example.com")
+        self.assertEqual(values["EMAIL_TO_1"], "ops@example.com")
         with patch.object(admin.Notifier, "send") as send:
             response = self.client.post("/notification-settings/test/dingtalk", data={"csrf": "token"}, headers=headers)
         self.assertEqual(response.status_code, 302)
         send.assert_called_once()
         page = self.client.get("/settings", headers=headers)
         self.assertNotIn(b"private", page.data)
+
+    def test_direct_email_only_requires_up_to_three_recipients(self):
+        headers = {"Tailscale-User-Login": "owner@example.com"}
+        data = {"csrf": "token", "email_delivery": "direct", "email_to_1": "one@example.com",
+            "email_to_2": "two@example.com", "email_to_3": "three@example.com"}
+        with patch.object(admin.subprocess, "run"), patch.object(admin, "approve_integrity"):
+            response = self.client.post("/notification-settings", data=data, headers=headers)
+        self.assertEqual(response.status_code, 302)
+        values = admin.read_env()
+        self.assertEqual(values["EMAIL_DELIVERY"], "direct")
+        self.assertEqual([values[f"EMAIL_TO_{number}"] for number in range(1, 4)],
+            ["one@example.com", "two@example.com", "three@example.com"])
+
+    def test_single_robot_can_be_deleted_without_removing_other_targets(self):
+        admin.ENV_FILE.write_text("WECHAT_WEBHOOK_1=https://qyapi.example/one\n"
+            "WECHAT_WEBHOOK_2=https://qyapi.example/two\nWECHAT_WEBHOOK_3=\n", encoding="utf-8")
+        headers = {"Tailscale-User-Login": "owner@example.com"}
+        with patch.object(admin.subprocess, "run"), patch.object(admin, "approve_integrity"):
+            response = self.client.post("/notification-settings", data={"csrf": "token",
+                "remove_wechat_1": "1", "email_delivery": "smtp"}, headers=headers)
+        self.assertEqual(response.status_code, 302)
+        values = admin.read_env()
+        self.assertEqual(values["WECHAT_WEBHOOK_1"], "")
+        self.assertEqual(values["WECHAT_WEBHOOK_2"], "https://qyapi.example/two")
 
     def test_vps_logs_are_explained_for_nontechnical_administrators(self):
         raw = json.dumps({"_SYSTEMD_UNIT": "stratum-secure-relay.service", "PRIORITY": "3",

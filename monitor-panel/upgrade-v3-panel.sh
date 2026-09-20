@@ -47,7 +47,15 @@ systemctl stop stratum-route-switch-monitor.service 2>/dev/null || true
 systemctl stop stratum-vps-watchdog.timer 2>/dev/null || true
 systemctl stop stratum-secure-relay.service
 trap 'systemctl start stratum-secure-relay.service >/dev/null 2>&1 || true; systemctl start stratum-route-switch-monitor.service >/dev/null 2>&1 || true; systemctl start stratum-security-monitor.service >/dev/null 2>&1 || true; systemctl start stratum-vps-watchdog.timer >/dev/null 2>&1 || true' EXIT
-DEBIAN_FRONTEND=noninteractive apt-get install -y gunicorn
+mail_name=$(hostname -f 2>/dev/null || hostname)
+printf 'postfix postfix/mailname string %s\n' "$mail_name" | debconf-set-selections
+printf 'postfix postfix/main_mailer_type select Internet Site\n' | debconf-set-selections
+DEBIAN_FRONTEND=noninteractive apt-get install -y gunicorn postfix
+postconf -e 'inet_interfaces = loopback-only'
+postconf -e 'mynetworks = 127.0.0.0/8 [::1]/128'
+postconf -e 'smtp_tls_security_level = may'
+systemctl enable postfix
+systemctl restart postfix
 install -m 0755 ./stratum_admin_v3.py ./stratum_public_status.py ./stratum_inspector.py ./endpoint_monitor.py ./security_monitor.py ./v3_manager.py ./version_info.py ./admin_auth.py ./route_switch_monitor.py ./vps_watchdog.py ./reset-panel-password.sh ./install-public-status.sh /opt/stratum-admin/
 install -o root -g root -m 0755 ./version_info.py /opt/version_info.py
 install -o root -g root -m 0644 ../version.json /etc/stratum-version.json
