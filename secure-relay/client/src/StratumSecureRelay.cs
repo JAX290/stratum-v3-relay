@@ -33,6 +33,7 @@ public static class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        if(SignedUpdateCoordinator.RunHelper(args))return;
         if(CrashRecovery.RunHelper(args))return;
         bool created;
         using (Mutex single = new Mutex(true, "Local\\MulinSenSecureRelayV2", out created)) {
@@ -42,7 +43,7 @@ public static class Program
             Application.ThreadException+=delegate(object sender,ThreadExceptionEventArgs e){CrashRecovery.Schedule(e.Exception,"界面线程异常");Application.ExitThread();};
             AppDomain.CurrentDomain.UnhandledException+=delegate(object sender,UnhandledExceptionEventArgs e){CrashRecovery.Schedule(e.ExceptionObject as Exception??new Exception("未知后台异常"),"后台线程异常");};
             TaskScheduler.UnobservedTaskException+=delegate(object sender,UnobservedTaskExceptionEventArgs e){CrashRecovery.Log(e.Exception,"已处理的后台任务异常");e.SetObserved();};
-            try{Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);Application.Run(new MainForm());}
+            try{Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);MainForm form=new MainForm();form.Shown+=delegate{SignedUpdateCoordinator.SignalStartupHealthy(args);if(SignedUpdateCoordinator.WasRolledBack(args))MessageBox.Show("新版本启动检查没有通过，程序已自动恢复上一版本。","升级已回退",MessageBoxButtons.OK,MessageBoxIcon.Warning);};Application.Run(form);}
             catch(Exception error){CrashRecovery.Schedule(error,"程序主循环异常");}
         }
     }

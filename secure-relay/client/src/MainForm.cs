@@ -146,13 +146,14 @@ public sealed class MainForm : Form
         Button importAccess=new Button();importAccess.Text="导入加密接入文件";importAccess.AutoSize=true;importAccess.Click+=delegate{ImportAccessPackage();};
         Button exportMigration=new Button();exportMigration.Text="导出换机备份";exportMigration.AutoSize=true;exportMigration.Click+=delegate{ExportMigrationBackup();};
         Button importMigration=new Button();importMigration.Text="导入换机备份";importMigration.AutoSize=true;importMigration.Click+=delegate{ImportMigrationBackup();};
+        Button updateClient=new Button();updateClient.Text="检查并升级";updateClient.AutoSize=true;updateClient.Click+=delegate{CheckAndInstallUpdate(updateClient);};
         Button miners = new Button(); miners.Text="矿机状态"; miners.AutoSize=true; miners.Click+=delegate{new MinerStatusForm(manager).Show(this);};
         diagnostics.Text="一键诊断"; diagnostics.AutoSize=true; diagnostics.Click+=delegate{RunDiagnostics();};
         repair.Text="检查并修复";repair.AutoSize=true;repair.Click+=delegate{RunCheckAndRepair();};
         Button help = new Button(); help.Text = "各项说明"; help.AutoSize = true; help.Click += delegate { ShowHelp(); };
         start.Text = "启动中转"; start.AutoSize = true; start.Click += delegate { StartRelay(); };
         stop.Text = "停止"; stop.AutoSize = true; stop.Enabled = false; stop.Click += delegate { relayRequested=false;manager.Stop();manager.SetRecoveryState("","");SetRunning(false); };
-        settingsButtons.Controls.Add(save); settingsButtons.Controls.Add(validateConfig); settingsButtons.Controls.Add(backups);settingsButtons.Controls.Add(importAccess);settingsButtons.Controls.Add(exportMigration);settingsButtons.Controls.Add(importMigration);settingsButtons.Controls.Add(help);
+        settingsButtons.Controls.Add(save); settingsButtons.Controls.Add(validateConfig); settingsButtons.Controls.Add(backups);settingsButtons.Controls.Add(importAccess);settingsButtons.Controls.Add(exportMigration);settingsButtons.Controls.Add(importMigration);settingsButtons.Controls.Add(updateClient);settingsButtons.Controls.Add(help);
         settingsPage.Controls.Add(settingsButtons);settingsButtons.BringToFront();
 
         FlowLayoutPanel dutyButtons=new FlowLayoutPanel();dutyButtons.Dock=DockStyle.Top;dutyButtons.Height=58;dutyButtons.Padding=new Padding(18,10,0,0);
@@ -433,6 +434,12 @@ public sealed class MainForm : Form
                 }catch(Exception ex){Log("换机备份导入失败："+ex.Message);MessageBox.Show(this,"迁移没有生效，矿机地址不要切换。\r\n\r\n"+ex.Message,"迁移验证失败",MessageBoxButtons.OK,MessageBoxIcon.Warning);}
             }
         }
+    }
+
+    private async void CheckAndInstallUpdate(Button button)
+    {
+        button.Enabled=false;button.Text="检查升级中…";try{LatestClientRelease release=await LatestClientReleaseChecker.CheckAsync(CancellationToken.None);if(!release.IsNewerThan(AppBrand.Version)){MessageBox.Show(this,"当前版本 "+AppBrand.Version+" 已是最新版。","无需升级",MessageBoxButtons.OK,MessageBoxIcon.Information);return;}if(!UpdateRolloutPolicy.IsEligible(Environment.MachineName,release.RolloutPercent)){MessageBox.Show(this,"新版 "+release.Version+" 正在分批发布，这台电脑暂未进入本批次。稍后再次检查即可。","分批升级",MessageBoxButtons.OK,MessageBoxIcon.Information);return;}string folder=Path.Combine(ConfigStore.Folder,"updates");Log("发现新版 "+release.Version+"，正在下载并校验摘要、版本和固定发布者签名。");string staged=await SignedUpdatePackage.DownloadAndVerifyAsync(release,folder,CancellationToken.None);if(MessageBox.Show(this,"新版 "+release.Version+" 已通过 SHA-256、文件版本和固定发布者签名校验。\r\n\r\n程序将退出并自动替换；如果新版本无法正常启动，会恢复上一版本。现在升级吗？","安装签名升级",MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return;SignedUpdateCoordinator.Begin(Application.ExecutablePath,staged,release.Version,SignedUpdatePackage.ComputeSha256(staged));exiting=true;Application.Exit();}
+        catch(Exception ex){Log("升级检查失败："+ex.Message);MessageBox.Show(this,"升级没有执行，当前版本保持不变。\r\n\r\n"+ex.Message,"升级失败",MessageBoxButtons.OK,MessageBoxIcon.Warning);}finally{if(!IsDisposed&&!Disposing){button.Enabled=true;button.Text="检查并升级";}}
     }
 
     private async void RunDiagnostics()

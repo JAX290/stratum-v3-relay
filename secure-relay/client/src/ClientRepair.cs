@@ -75,7 +75,8 @@ public static class FirewallRuleManager
 
 public sealed class LatestClientRelease
 {
-    public string Version="",Url="";
+    public string Version="",Url="",DesktopDownloadUrl="",ChecksumsDownloadUrl="";
+    public int RolloutPercent=100;
     public bool IsNewerThan(string current){return CompareVersions(Version,current)>0;}
     public static int CompareVersions(string left,string right)
     {
@@ -91,7 +92,7 @@ public static class LatestClientReleaseChecker
         request.UserAgent="MulinSenRelay/"+AppBrand.Version;request.Accept="application/vnd.github+json";request.Timeout=5000;request.ReadWriteTimeout=5000;
         using(cancellation.Register(delegate{request.Abort();}))using(WebResponse response=await request.GetResponseAsync().ConfigureAwait(false))using(StreamReader reader=new StreamReader(response.GetResponseStream())){
             string json=await reader.ReadToEndAsync().ConfigureAwait(false);Match tag=Regex.Match(json,"\\\"tag_name\\\"\\s*:\\s*\\\"client-v([^\\\"]+)\\\"");Match url=Regex.Match(json,"\\\"html_url\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
-            if(!tag.Success)throw new InvalidDataException("发布信息格式不正确。");return new LatestClientRelease{Version=tag.Groups[1].Value,Url=url.Success?url.Groups[1].Value.Replace("\\/","/"):""};
+            if(!tag.Success)throw new InvalidDataException("发布信息格式不正确。");string version=tag.Groups[1].Value;Match desktop=Regex.Match(json,"\\\"browser_download_url\\\"\\s*:\\s*\\\"([^\\\"]*/MulinSenRelay-"+Regex.Escape(version)+"\\.exe)\\\"");Match sums=Regex.Match(json,"\\\"browser_download_url\\\"\\s*:\\s*\\\"([^\\\"]*/SHA256SUMS\\.txt)\\\"");Match rollout=Regex.Match(json,"rollout\\s*:\\s*(\\d{1,3})",RegexOptions.IgnoreCase);int percent=100;if(rollout.Success)Int32.TryParse(rollout.Groups[1].Value,out percent);percent=Math.Max(0,Math.Min(100,percent));return new LatestClientRelease{Version=version,Url=url.Success?url.Groups[1].Value.Replace("\\/","/"):"",DesktopDownloadUrl=desktop.Success?desktop.Groups[1].Value.Replace("\\/","/"):"",ChecksumsDownloadUrl=sums.Success?sums.Groups[1].Value.Replace("\\/","/"):"",RolloutPercent=percent};
         }
     }
 }
