@@ -37,7 +37,58 @@ public static class ClientCoreTests
         MinerHistoryFile history=new MinerHistoryFile();history.Miners.Add(new MinerHistoryItem{Ip="192.168.1.20",Shares=new List<ShareHistoryItem>{new ShareHistoryItem{Time=DateTime.Now,Difficulty=1024}}});
         try{using(System.IO.MemoryStream stream=new System.IO.MemoryStream()){new System.Runtime.Serialization.Json.DataContractJsonSerializer(typeof(MinerHistoryFile)).WriteObject(stream,history);stream.Position=0;MinerHistoryFile restored=(MinerHistoryFile)new System.Runtime.Serialization.Json.DataContractJsonSerializer(typeof(MinerHistoryFile)).ReadObject(stream);Check(restored.Miners.Count==1&&restored.Miners[0].Shares.Count==1&&restored.Miners[0].Shares[0].Difficulty==1024,"24-hour history serializes");}}catch(Exception ex){Console.WriteLine("HISTORY ERROR "+ex.GetType().FullName+" "+ex.Message);failures++;}
         RelayManager relay=new RelayManager(delegate(string value){});System.Reflection.FieldInfo minerField=typeof(RelayManager).GetField("miners",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic);Dictionary<string,MinerState> registry=(Dictionary<string,MinerState>)minerField.GetValue(relay);registry["203.0.113.250"]=new MinerState{Ip="203.0.113.250",Connections=4,FirstSeen=DateTime.Now,LastActivity=DateTime.Now};registry["203.0.113.251"]=new MinerState{Ip="203.0.113.251",Connections=0,FirstSeen=DateTime.Now,LastActivity=DateTime.Now};Check(relay.Snapshot().ActiveMiners==1&&relay.Snapshot().Active==0,"main count uses unique online IPs");
+        CheckStreamBoundaries();
+        CheckSnapshotIsolation(relay);
+        CheckListenerRollback();
         return failures==0?0:1;
+    }
+    private static void CheckStreamBoundaries()
+    {
+        MinerState state=new MinerState{Connections=1,FirstSeen=DateTime.Now.AddHours(-2),LastActivity=DateTime.Now};
+        MinerConnection connection=new MinerConnection{State=state};
+        Feed(connection,"{\"method\":\"mining.set_difficulty\",\"params\":[64]}\n",false);
+        Feed(connection,"{\"id\":7,\"method\":\"mining.sub",true);
+        Check(state.Submitted==0,"partial request waits for remaining bytes");
+        Feed(connection,"mit\",\"params\":[\"test.worker\"]}\ninvalid-json\n",true);
+        Feed(connection,"{\"id\":7,\"result\":false,",false);
+        Check(state.Rejected==0,"partial response waits for remaining bytes");
+        Feed(connection,"\"error\":[20,\"rejected\"]}\n{\"id\":7,\"result\":true}\n",false);
+        Check(state.Submitted==1&&state.Rejected==1&&state.Accepted==0,"rejected share and duplicate response counted once");
+        Check(state.Snapshot(DateTime.Now).Hashrate1h==0,"rejected share does not add hashrate");
+        DateTime now=DateTime.Now;
+        state.Shares.Add(new ShareEvent{Time=now.AddHours(-25),Difficulty=1000});
+        state.Shares.Add(new ShareEvent{Time=now.AddMinutes(-30),Difficulty=64});
+        MinerSnapshot snapshot=state.Snapshot(now);
+        Check(state.Shares.Count==1&&snapshot.Hashrate10m==0&&snapshot.Hashrate1h>0,"history expiry preserves rolling window boundaries");
+    }
+    private static void CheckSnapshotIsolation(RelayManager relay)
+    {
+        var field=typeof(RelayManager).GetField("endpointStates",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic);
+        var states=(Dictionary<string,EndpointState>)field.GetValue(relay);
+        states["test"]=new EndpointState{Name="test",Online=true};
+        RelaySnapshot first=relay.Snapshot();
+        first.Endpoints[0].Online=false;
+        first.Endpoints.Clear();
+        Check(relay.Snapshot().Endpoints.Count==1&&relay.Snapshot().Endpoints[0].Online,"UI snapshot mutation cannot change endpoint state");
+        Check(!relay.RemoveMiner("203.0.113.250"),"online miner cannot be removed");
+    }
+    private static void CheckListenerRollback()
+    {
+        var occupied=new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback,0);
+        occupied.Server.ExclusiveAddressUse=true;
+        occupied.Start();
+        int port=((System.Net.IPEndPoint)occupied.LocalEndpoint).Port;
+        RelayManager relay=new RelayManager(delegate(string value){});
+        bool rejected=false;
+        try {
+            relay.Start(new AppConfig{ListenAddress="127.0.0.1"},new List<PortRoute>{
+                new PortRoute{LocalPort=0,RemotePort=9999},new PortRoute{LocalPort=port,RemotePort=9999}});
+        } catch(InvalidOperationException){rejected=true;}
+        finally {occupied.Stop();}
+        var field=typeof(RelayManager).GetField("listeners",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic);
+        Check(rejected&&!relay.IsRunning&&((System.Collections.ICollection)field.GetValue(relay)).Count==0,"port conflict rolls back all partially started listeners");
+        relay.Stop();
+        Check(!relay.Snapshot().Running,"stop remains safe after startup rollback");
     }
     private static void Feed(MinerConnection c,string value,bool fromMiner){byte[] data=System.Text.Encoding.UTF8.GetBytes(value);c.Observe(data,data.Length,fromMiner);}
 }

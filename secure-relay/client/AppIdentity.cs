@@ -1,0 +1,37 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
+using System.Net;
+using System.Net.Security;
+using System.Net.Sockets;
+using System.Net.NetworkInformation;
+using System.Runtime.Serialization;
+using System.Runtime.Serialization.Json;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Security.Authentication;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Web.Script.Serialization;
+using Microsoft.Win32;
+
+public static partial class AppBrand
+{
+    public const string Name = "木林森中转";
+    public static string Version
+    {
+        get
+        {
+            System.Version version = Assembly.GetExecutingAssembly().GetName().Version;
+            return version.Major + "." + version.Minor + "." + version.Build;
+        }
+    }
+    public static string Title { get { return Name + " v" + Version; } }
+}

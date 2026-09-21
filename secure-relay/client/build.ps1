@@ -1,7 +1,10 @@
-param([switch]$TestBuild,[switch]$Sign,[string]$SigningThumbprint=$env:WINDOWS_SIGNING_THUMBPRINT)
+param([switch]$TestBuild,[switch]$Sign,[string]$SigningThumbprint=$env:WINDOWS_SIGNING_THUMBPRINT,[string]$OutputDirectory=$PSScriptRoot)
 $ErrorActionPreference = 'Stop'
 $source = Join-Path $PSScriptRoot 'StratumSecureRelay.cs'
 $configSource = Join-Path $PSScriptRoot 'ConfigModels.cs'
+$moduleSources = @('AppIdentity.cs','AppBrand.cs','SystemStatus.cs','CrashRecovery.cs',
+  'RelayManager.cs','RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','NetworkHelper.cs',
+  'MainForm.cs','DiagnosticReportForm.cs','MinerStatusForm.cs','BackupForm.cs') | ForEach-Object { Join-Path $PSScriptRoot $_ }
 $versionFile = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'version.json'
 if (-not (Test-Path -LiteralPath $versionFile)) { throw "Version file not found: $versionFile" }
 $version = (Get-Content -LiteralPath $versionFile -Raw -Encoding UTF8 | ConvertFrom-Json).windows_client
@@ -13,7 +16,8 @@ using System.Reflection;
 [assembly: AssemblyFileVersion("$version.0")]
 "@
 $edition = if ($TestBuild) { '测试版' } else { '正式版' }
-$output = Join-Path $PSScriptRoot ("木林森中转{0}{1}.exe" -f $version, $edition)
+New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+$output = Join-Path $OutputDirectory ("木林森中转{0}{1}.exe" -f $version, $edition)
 $icon = Join-Path $PSScriptRoot '木林森.ico'
 $compiler = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path -LiteralPath $compiler)) { throw "C# compiler not found: $compiler" }
@@ -22,7 +26,7 @@ try {
   & $compiler /nologo /target:winexe /optimize+ /platform:anycpu /win32icon:$icon /out:$output `
     /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll `
     /reference:System.Windows.Forms.dll /reference:System.Runtime.Serialization.dll `
-    /reference:System.Security.dll /reference:System.Web.Extensions.dll $source $configSource $assemblyInfo
+    /reference:System.Security.dll /reference:System.Web.Extensions.dll $source $configSource $moduleSources $assemblyInfo
   if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
 } finally {
   Remove-Item -LiteralPath $assemblyInfo -Force -ErrorAction SilentlyContinue
