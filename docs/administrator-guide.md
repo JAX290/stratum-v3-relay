@@ -152,18 +152,18 @@ Windows 客户端从 `2.3.0` 起保留原桌面版操作，并支持无需用户
 
 ### Windows 无人值守服务
 
-从当前 `client-v2.3.7` 发布页下载签名的 `MulinSenRelayService-2.3.7.exe` 与 `install-service-2.3.7.ps1`，放在同一目录。若“文件属性 → 数字签名”尚未显示签名有效，同时下载并解压 `publisher-certificate-tools-2.3.7.zip`，核对固定指纹后先运行其中的内部发布者证书安装脚本。随后以管理员身份打开 Windows PowerShell：
+从当前 `client-v2.3.8` 发布页下载签名的 `MulinSenRelayService-2.3.8.exe` 与 `install-service-2.3.8.ps1`，放在同一目录。若“文件属性 → 数字签名”尚未显示签名有效，同时下载并解压 `publisher-certificate-tools-2.3.8.zip`，核对固定指纹后先运行其中的内部发布者证书安装脚本。随后以管理员身份打开 Windows PowerShell：
 
 ```powershell
-.\install-service-2.3.7.ps1 -Mode Plan
-.\install-service-2.3.7.ps1 -Mode Install -ServiceExecutable .\MulinSenRelayService-2.3.7.exe
+.\install-service-2.3.8.ps1 -Mode Plan
+.\install-service-2.3.8.ps1 -Mode Install -ServiceExecutable .\MulinSenRelayService-2.3.8.exe
 ```
 
 `Install` 会核对发布者签名和固定证书指纹，备份已有服务文件，将当前用户保存的共享密钥直接转换成机器级 DPAPI 加密配置，并把服务注册为手动启动；此时不会抢占桌面版监听端口。确认提示成功后，在桌面版托盘选择“退出”，再执行：
 
 ```powershell
-.\install-service-2.3.7.ps1 -Mode Activate
-.\install-service-2.3.7.ps1 -Mode Status
+.\install-service-2.3.8.ps1 -Mode Activate
+.\install-service-2.3.8.ps1 -Mode Status
 ```
 
 看到服务为 `Running` 且状态包含 `Healthy` 后，服务将在电脑重启后由 LocalService 延迟自动启动，无需用户登录。需要恢复桌面版时执行 `-Mode Rollback`；需要删除服务注册时执行 `-Mode Uninstall`。卸载会保留机器加密配置和备份，便于恢复。
@@ -181,6 +181,8 @@ Windows 客户端的“检查并修复”会先检查当前配置、程序与监
 客户端默认进入值守员模式。值守员可查看总状态和矿机、运行诊断、执行安全修复及启停中转。打开“高级设置（管理员）”时，程序要求输入属于本机 Windows 管理员组的账号和密码；凭据只交给 Windows 登录接口验证，不保存。授权持续 15 分钟，到期后自动返回值守首页。
 
 新增电脑时，可在 **Tailscale 管理面板 → 设置 → 客户端接入资料** 为对应矿场生成加密接入文件。先保存页面显示的 4 组导入口令，再下载 `.msrelay` 文件；下载成功后网页会清除口令且不允许再次下载。Windows 客户端进入管理员设置，点击“导入加密接入文件”，选择文件并输入导入口令。客户端只有在文件未过期、认证完整，且本地端口、TLS 证书、共享密钥和 VPS 连通性全部通过后才保存。配置主备 VPS 时，可分别导入两台 VPS 生成的文件。
+
+整台值守电脑换机时，在旧电脑的管理员设置点击“导出换机备份”，设置至少 12 个字符的迁移密码并保存 `.msbackup` 文件。备份包含主备 VPS、端口和矿场名称，经过认证加密，有效期 72 小时；文件和密码应分开传输。新电脑安装当前正式版后点击“导入换机备份”。程序会先验证本地端口、全部启用 VPS 的证书、共享密钥和连通性；任何一项失败都不会保存迁移配置，也不会提示切换矿机。全部通过后，按页面列出的新电脑局域网地址启动新中转、停止旧中转，再逐台修改矿机地址。完成后删除迁移备份。
 
 ## 新增矿场或值守电脑
 

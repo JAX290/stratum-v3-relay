@@ -4,7 +4,7 @@
 
 管理员可以通过 Tailscale 管理线路和矿场，也可以通过带账号密码的 HTTPS 只读面板日常查看状态。
 
-当前 Windows 客户端版本为 `2.3.7`。本版可从 VPS 管理面板生成一次性加密接入文件，Windows 导入后自动填写地址、端口、证书指纹和矿场密钥，并在完整验证通过后保存；文件带 1–72 小时有效期、一次下载限制和本机一次导入记录。发布状态见[更新计划](docs/improvement-roadmap.md)，各组件版本定义见 [version.json](version.json)。
+当前 Windows 客户端版本为 `2.3.8`。本版增加换机迁移向导：旧电脑可导出 72 小时有效的加密备份，新电脑只有在本地端口、全部 VPS 证书、共享密钥和连通性验证通过后，才会显示新的矿机地址和切换步骤。发布状态见[更新计划](docs/improvement-roadmap.md)，各组件版本定义见 [version.json](version.json)。
 
 ```text
 矿机 → Windows 值守电脑 → VPS → 矿池

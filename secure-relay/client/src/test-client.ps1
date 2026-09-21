@@ -15,7 +15,7 @@ if($LASTEXITCODE-ne 0){throw 'Client regression tests failed.'}
 
 # Compile the same core without WinForms/Drawing or any UI source files.
 $coreSources=@('AppIdentity.cs','ConfigModels.cs','SystemStatus.cs','RelayManager.cs',
-  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','DutyStatus.cs','AdminAccessPolicy.cs','AccessPackage.cs','NetworkHelper.cs','NetworkRecovery.cs','ClientRepair.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs','FailoverPolicy.cs','RelayFailoverController.cs') |
+  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','DutyStatus.cs','AdminAccessPolicy.cs','AccessPackage.cs','MigrationBackup.cs','NetworkHelper.cs','NetworkRecovery.cs','ClientRepair.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs','FailoverPolicy.cs','RelayFailoverController.cs') |
   ForEach-Object { Join-Path $PSScriptRoot $_ }
 $coreLibrary=Join-Path $testDirectory 'RelayCore.dll'
 $coreAssemblyInfo=Join-Path $testDirectory 'CoreVersion.cs'
@@ -89,6 +89,12 @@ $accessPackageTestExe=Join-Path $testDirectory 'access-package-tests.exe'
 if($LASTEXITCODE-ne 0){throw 'Access package tests failed to compile.'}
 & $accessPackageTestExe
 if($LASTEXITCODE-ne 0){throw 'Access package tests failed.'}
+
+$migrationTestExe=Join-Path $testDirectory 'migration-backup-tests.exe'
+& $compiler /nologo /target:exe /out:$migrationTestExe /reference:$coreLibrary (Join-Path $PSScriptRoot 'test_migration_backup.cs')
+if($LASTEXITCODE-ne 0){throw 'Migration backup tests failed to compile.'}
+& $migrationTestExe
+if($LASTEXITCODE-ne 0){throw 'Migration backup tests failed.'}
 
 # WIN-P01 first acceptance stage: recovery decisions, without installing services.
 $recoveryTestExe=Join-Path $testDirectory 'recovery-policy-tests.exe'
