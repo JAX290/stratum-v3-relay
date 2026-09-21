@@ -15,7 +15,7 @@ if($LASTEXITCODE-ne 0){throw 'Client regression tests failed.'}
 
 # Compile the same core without WinForms/Drawing or any UI source files.
 $coreSources=@('AppIdentity.cs','ConfigModels.cs','SystemStatus.cs','RelayManager.cs',
-  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','NetworkHelper.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs') |
+  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','NetworkHelper.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs') |
   ForEach-Object { Join-Path $PSScriptRoot $_ }
 $coreLibrary=Join-Path $testDirectory 'RelayCore.dll'
 $coreAssemblyInfo=Join-Path $testDirectory 'CoreVersion.cs'

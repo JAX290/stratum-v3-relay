@@ -198,11 +198,17 @@ public sealed class MainForm : Form
     private void LoadConfig()
     {
         AppConfig c = ConfigStore.Load();
+        ApplyConfig(c);
+        Log("请填写 VPS 安装脚本输出的设置，然后启动中转。");
+    }
+
+    private void ApplyConfig(AppConfig c)
+    {
+        c.Normalize();
         ServerProfile primary = c.Servers[0];
         siteName.Text=c.SiteName; server.Text = primary.Address; tlsPort.Value = Math.Max(1, Math.Min(65535, primary.Port)); serverName.Text = primary.ServerName;
         pin.Text = primary.CertificateSha256; token.Text = primary.SharedKey; listen.Text = c.ListenAddress; ports.Text = c.Ports; healthCheckMinutes.Value=c.HealthCheckMinutes; autoStart.Checked = c.AutoStart; closeToTray.Checked = c.CloseToTray;
         backupProfiles.Clear(); backupProfiles.Add(c.Servers[1].Copy()); backupProfiles.Add(c.Servers[2].Copy());
-        Log("请填写 VPS 安装脚本输出的设置，然后启动中转。");
     }
 
     private AppConfig CurrentConfig()
@@ -242,8 +248,9 @@ public sealed class MainForm : Form
 
     private async void ValidateAndPromoteConfig()
     {
+        AppConfig config = null;
         try {
-            AppConfig config = CurrentConfig();
+            config = CurrentConfig();
             validateConfig.Enabled = false; validateConfig.Text = "完整验证中…";
             Log("开始完整验证本地端口以及所有已启用 VPS 的证书、密钥和连通性。");
             CompleteConfigurationValidator validator = new CompleteConfigurationValidator();
@@ -260,9 +267,35 @@ public sealed class MainForm : Form
         } catch (Exception ex) {
             if (IsDisposed || Disposing) return;
             Log("完整配置验证失败：" + ex.Message);
-            MessageBox.Show(this, "当前设置未保存为最后可用配置。\r\n\r\n" + ex.Message, "验证失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            string rollback = config == null ? "无法读取当前设置，未执行自动回退。" : RestoreLastKnownGood(config);
+            MessageBox.Show(this, "当前设置未保存为最后可用配置。\r\n\r\n" + ex.Message + "\r\n\r\n" + rollback, "验证失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         } finally {
             if (!IsDisposed && !Disposing) { validateConfig.Enabled = !manager.IsRunning; validateConfig.Text = "验证并设为可用配置"; RefreshStatus(); }
+        }
+    }
+
+    private string RestoreLastKnownGood(AppConfig failedConfig)
+    {
+        try {
+            ConfigurationRollbackCoordinator coordinator = new ConfigurationRollbackCoordinator();
+            ConfigurationRollbackResult result = coordinator.RestoreIfDifferent(failedConfig,
+                new LastKnownGoodStore(ConfigStore.Folder), delegate(AppConfig restored) {
+                    ConfigStore.Save(restored); SetAutoStart(restored.AutoStart);
+                });
+            if (result.AlreadyCurrent) {
+                Log("验证失败；当前设置与最后可用配置相同，因此未重复回退。");
+                return "当前设置与最后可用配置相同，未重复回退。";
+            }
+            ApplyConfig(result.Config);
+            string message = "已自动恢复到 " + result.ValidatedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") + " 验证通过的最后可用配置。";
+            Log(message);
+            return message;
+        } catch (FileNotFoundException) {
+            Log("验证失败，尚无最后可用配置可供自动回退。");
+            return "尚无最后可用配置，未执行自动回退。";
+        } catch (Exception ex) {
+            Log("自动回退失败：" + ex.Message);
+            return "自动回退失败：" + ex.Message;
         }
     }
 

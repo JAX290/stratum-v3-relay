@@ -44,6 +44,7 @@ public static class ClientCoreTests
         CheckLocalHealth();
         CheckLastKnownGood();
         CheckCompleteConfigurationValidation();
+        CheckConfigurationRollback();
         return failures==0?0:1;
     }
     private static void CheckStreamBoundaries()
@@ -210,6 +211,30 @@ public static class ClientCoreTests
     private static int FreeTcpPort()
     {
         System.Net.Sockets.TcpListener listener=new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback,0);listener.Start();int port=((System.Net.IPEndPoint)listener.LocalEndpoint).Port;listener.Stop();return port;
+    }
+    private static void CheckConfigurationRollback()
+    {
+        string directory=System.IO.Path.Combine(System.IO.Path.GetTempPath(),"mulinsen-rollback-"+Guid.NewGuid().ToString("N"));
+        try {
+            LastKnownGoodStore store=new LastKnownGoodStore(directory);
+            AppConfig good=ValidationConfig(FreeTcpPort());good.SiteName="稳定配置";
+            string fingerprint=LastKnownGoodStore.ComputeFingerprint(good);
+            store.Promote(good,new ConfigurationValidationEvidence(fingerprint,DateTime.UtcNow,true,true,true,true));
+            AppConfig failed=ValidationConfig(FreeTcpPort());failed.SiteName="失败的新配置";
+            AppConfig persisted=null;int saves=0;
+            ConfigurationRollbackCoordinator coordinator=new ConfigurationRollbackCoordinator();
+            ConfigurationRollbackResult restored=coordinator.RestoreIfDifferent(failed,store,delegate(AppConfig value){saves++;persisted=value;});
+            Check(restored.Restored&&!restored.AlreadyCurrent&&saves==1&&persisted.SiteName=="稳定配置","failed new configuration restores last-known-good snapshot");
+            saves=0;ConfigurationRollbackResult same=coordinator.RestoreIfDifferent(good,store,delegate(AppConfig value){saves++;});
+            Check(!same.Restored&&same.AlreadyCurrent&&saves==0,"identical last-known-good configuration is not rewritten");
+            byte[] bytes=System.IO.File.ReadAllBytes(store.FilePath);bytes[bytes.Length/2]^=0x33;System.IO.File.WriteAllBytes(store.FilePath,bytes);bool tamperRejected=false;saves=0;
+            try{coordinator.RestoreIfDifferent(failed,store,delegate(AppConfig value){saves++;});}catch(System.IO.InvalidDataException){tamperRejected=true;}
+            Check(tamperRejected&&saves==0,"tampered snapshot cannot be used for automatic rollback");
+        } catch(Exception ex) {
+            Console.WriteLine("CONFIGURATION ROLLBACK ERROR "+ex.GetType().FullName+" "+ex.Message);failures++;
+        } finally {
+            try{if(System.IO.Directory.Exists(directory))System.IO.Directory.Delete(directory,true);}catch{}
+        }
     }
     private static void Feed(MinerConnection c,string value,bool fromMiner){byte[] data=System.Text.Encoding.UTF8.GetBytes(value);c.Observe(data,data.Length,fromMiner);}
 }
