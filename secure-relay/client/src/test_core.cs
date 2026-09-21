@@ -41,6 +41,7 @@ public static class ClientCoreTests
         CheckSnapshotIsolation(relay);
         CheckListenerRollback();
         CheckLocalHealth();
+        CheckLastKnownGood();
         return failures==0?0:1;
     }
     private static void CheckStreamBoundaries()
@@ -103,6 +104,61 @@ public static class ClientCoreTests
             listeners[0].Stop();
             Check(!relay.LocalHealthCheck(),"lost listening socket fails local health check");
         } finally {relay.Stop();}
+    }
+    private static void CheckLastKnownGood()
+    {
+        string directory=System.IO.Path.Combine(System.IO.Path.GetTempPath(),"mulinsen-lkg-"+Guid.NewGuid().ToString("N"));
+        try {
+            LastKnownGoodStore store=new LastKnownGoodStore(directory);
+            const string secret="0123456789abcdef0123456789abcdef";
+            AppConfig config=new AppConfig{ListenAddress="127.0.0.1",Ports="9999=10001",SiteName="一号矿场",ProtectedToken="unchanged"};
+            config.Servers.Add(new ServerProfile{Name="主VPS",Enabled=true,Address="relay.example",Port=443,ServerName="relay.example",CertificateSha256="AA:BB",SharedKey=secret,ProtectedToken="original-token"});
+            string fingerprint=LastKnownGoodStore.ComputeFingerprint(config);
+            DateTime completed=DateTime.UtcNow;
+            ConfigurationValidationEvidence evidence=new ConfigurationValidationEvidence(fingerprint,completed,true,true,true,true);
+            store.Promote(config,evidence);
+            LastKnownGoodSnapshot restored=store.Load();
+            Check(restored.Config.SiteName=="一号矿场"&&restored.Config.Ports=="9999=10001"&&restored.Config.Servers[0].SharedKey==secret&&restored.ValidatedUtc==completed,"last-known-good configuration round-trips");
+            byte[] fileBytes=System.IO.File.ReadAllBytes(store.FilePath);
+            Check(!ContainsBytes(fileBytes,System.Text.Encoding.UTF8.GetBytes(secret)),"last-known-good file does not expose shared key");
+            Check(config.ProtectedToken=="unchanged"&&config.Servers[0].ProtectedToken=="original-token","promoting snapshot does not mutate active config");
+            bool mismatchRejected=false;
+            try { store.Promote(config,new ConfigurationValidationEvidence(new string('0',64),DateTime.UtcNow,true,true,true,true)); }
+            catch(InvalidOperationException){mismatchRejected=true;}
+            Check(mismatchRejected,"validation evidence is bound to exact configuration");
+            bool incompleteRejected=false;
+            try { store.Promote(config,new ConfigurationValidationEvidence(fingerprint,DateTime.UtcNow,true,true,true,false)); }
+            catch(InvalidOperationException){incompleteRejected=true;}
+            Check(incompleteRejected,"incomplete validation evidence cannot promote configuration");
+            bool staleRejected=false;
+            try { store.Promote(config,new ConfigurationValidationEvidence(fingerprint,DateTime.UtcNow.AddHours(-1),true,true,true,true)); }
+            catch(InvalidOperationException){staleRejected=true;}
+            Check(staleRejected,"stale validation evidence cannot promote configuration");
+            config.SiteName="二号矿场";
+            fingerprint=LastKnownGoodStore.ComputeFingerprint(config);
+            store.Promote(config,new ConfigurationValidationEvidence(fingerprint,DateTime.UtcNow,true,true,true,true));
+            config.SiteName="三号矿场";
+            fingerprint=LastKnownGoodStore.ComputeFingerprint(config);
+            store.Promote(config,new ConfigurationValidationEvidence(fingerprint,DateTime.UtcNow,true,true,true,true));
+            Check(System.IO.File.Exists(store.BackupPath)&&store.Load().Config.SiteName=="三号矿场","repeated atomic replacement preserves previous snapshot backup");
+            fileBytes=System.IO.File.ReadAllBytes(store.FilePath);fileBytes[fileBytes.Length/2]^=0x5A;System.IO.File.WriteAllBytes(store.FilePath,fileBytes);
+            bool tamperRejected=false;
+            try { store.Load(); } catch(System.IO.InvalidDataException){tamperRejected=true;}
+            Check(tamperRejected,"tampered snapshot fails closed without backup fallback");
+        } catch(Exception ex) {
+            Console.WriteLine("LAST KNOWN GOOD ERROR "+ex.GetType().FullName+" "+ex.Message);failures++;
+        } finally {
+            try { if(System.IO.Directory.Exists(directory))System.IO.Directory.Delete(directory,true); } catch { }
+        }
+    }
+    private static bool ContainsBytes(byte[] source,byte[] value)
+    {
+        if(value.Length==0)return true;
+        for(int index=0;index<=source.Length-value.Length;index++){
+            int item=0;while(item<value.Length&&source[index+item]==value[item])item++;
+            if(item==value.Length)return true;
+        }
+        return false;
     }
     private static void Feed(MinerConnection c,string value,bool fromMiner){byte[] data=System.Text.Encoding.UTF8.GetBytes(value);c.Observe(data,data.Length,fromMiner);}
 }
