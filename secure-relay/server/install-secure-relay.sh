@@ -121,6 +121,9 @@ data = {
     "clients": [{"id": "default", "name": "默认矿场", "token": sys.argv[4], "enabled": True, "alert_enabled": True}],
     "max_connections": 1000,
     "offline_after_seconds": 180,
+    "offline_confirm_checks": 2,
+    "recovery_confirm_checks": 2,
+    "notification_dedup_seconds": 600,
     "state_file": "/var/lib/stratum-secure-relay/sites.json",
 }
 if os.path.exists(target):
@@ -128,6 +131,9 @@ if os.path.exists(target):
     clients = old.get("clients") or ([{"id": "default", "name": "默认矿场", "token": old["token"], "enabled": True, "alert_enabled": True}] if old.get("token") else [])
     if clients or "clients" in old:
         data["clients"] = clients
+    for key in ("offline_after_seconds", "offline_confirm_checks", "recovery_confirm_checks", "notification_dedup_seconds"):
+        if key in old:
+            data[key] = old[key]
 fd, temporary = tempfile.mkstemp(prefix="stratum-secure-relay.", dir="/etc")
 with os.fdopen(fd, "w", encoding="utf-8") as handle:
     json.dump(data, handle, indent=2)

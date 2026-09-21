@@ -190,14 +190,37 @@ class MonitorTests(unittest.TestCase):
             monitor_state.write_text(json.dumps({"started_at": 0, "clients": {"mine-a": "online"}}), encoding="utf-8")
             with patch.object(monitor, "CONFIG_FILE", config), patch.object(monitor, "STATE_FILE", state), patch.object(monitor, "MONITOR_FILE", monitor_state), patch.object(monitor, "EVENT_FILE", event_file):
                 events = monitor.check_once(now=200)
+                self.assertEqual(events, [])
+                events = monitor.check_once(now=230)
                 self.assertEqual(len(events), 1)
                 self.assertIn("离线", events[0])
-                state.write_text(json.dumps({"sites": {"mine-a": {"last_seen": 205}}}), encoding="utf-8")
-                events = monitor.check_once(now=210)
+                state.write_text(json.dumps({"sites": {"mine-a": {"last_seen": 235}}}), encoding="utf-8")
+                events = monitor.check_once(now=240)
+                self.assertEqual(events, [])
+                events = monitor.check_once(now=270)
                 self.assertEqual(len(events), 1)
                 self.assertIn("恢复", events[0])
                 records = [json.loads(line) for line in event_file.read_text(encoding="utf-8").splitlines()]
                 self.assertEqual([item["type"] for item in records], ["site_offline", "site_recovered"])
+
+    def test_duplicate_transition_is_suppressed_after_state_reset(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = root / "config.json"
+            state = root / "sites.json"
+            monitor_state = root / "monitor.json"
+            event_file = root / "events.jsonl"
+            config.write_text(json.dumps({"offline_after_seconds": 60, "offline_confirm_checks": 1,
+                "recovery_confirm_checks": 1, "notification_dedup_seconds": 600,
+                "clients": [{"id": "mine-a", "name": "矿场A", "enabled": True, "alert_enabled": True}]}), encoding="utf-8")
+            state.write_text(json.dumps({"sites": {"mine-a": {"last_seen": 100}}}), encoding="utf-8")
+            monitor_state.write_text(json.dumps({"started_at": 0, "clients": {"mine-a": "online"}}), encoding="utf-8")
+            with patch.object(monitor, "CONFIG_FILE", config), patch.object(monitor, "STATE_FILE", state), patch.object(monitor, "MONITOR_FILE", monitor_state), patch.object(monitor, "EVENT_FILE", event_file):
+                self.assertEqual(len(monitor.check_once(now=200)), 1)
+                monitor_state.write_text(json.dumps({"started_at": 0, "clients": {"mine-a": "online"}}), encoding="utf-8")
+                self.assertEqual(monitor.check_once(now=230), [])
+                records = [json.loads(line) for line in event_file.read_text(encoding="utf-8").splitlines()]
+                self.assertEqual([item["type"] for item in records], ["site_offline"])
 
 
 class CredentialTests(unittest.TestCase):

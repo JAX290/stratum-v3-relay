@@ -70,7 +70,7 @@ stratum-relay-client rotate mine-a
 
 ### 矿场离线告警
 
-客户端每 30 秒发送一次经过认证的心跳。连续 180 秒没有心跳时，`stratum-secure-monitor` 会向原 V3 使用的企业微信机器人发送离线告警；恢复后发送一次恢复通知。可以编辑 `/etc/stratum-secure-relay.json` 中的 `offline_after_seconds` 改变等待时间，修改后重启监控：
+客户端每 30 秒发送一次经过认证的心跳。连续 180 秒没有心跳后，`stratum-secure-monitor` 还会连续确认两轮，再发送离线告警；恢复也需连续确认两轮。同一矿场、同一类通知在 10 分钟内只发送一次，避免监控重启或状态抖动造成重复提醒。可以编辑 `/etc/stratum-secure-relay.json` 中的 `offline_after_seconds`、`offline_confirm_checks`、`recovery_confirm_checks` 和 `notification_dedup_seconds` 调整这些参数，修改后重启监控：
 
 ```bash
 systemctl restart stratum-secure-monitor

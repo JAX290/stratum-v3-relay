@@ -396,9 +396,20 @@ class Notifier:
     def _indexed_values(self, prefix, legacy_key):
         indexed = [self.settings.get(f"{prefix}_{number}", "").strip() for number in range(1, 4)]
         if any(f"{prefix}_{number}" in self.settings for number in range(1, 4)):
-            return [value for value in indexed if value]
+            return self._unique(value for value in indexed if value)
         legacy = self.settings.get(legacy_key, "").strip()
         return [legacy] if legacy else []
+
+    @staticmethod
+    def _unique(values, case_insensitive=False):
+        result = []
+        seen = set()
+        for value in values:
+            key = value.casefold() if case_insensitive and isinstance(value, str) else value
+            if key not in seen:
+                seen.add(key)
+                result.append(value)
+        return result
 
     def _wechat_targets(self):
         return [value for value in self._indexed_values("WECHAT_WEBHOOK", "WECHAT_WEBHOOK")
@@ -407,14 +418,21 @@ class Notifier:
     def _dingtalk_targets(self):
         indexed = any(f"DINGTALK_WEBHOOK_{number}" in self.settings for number in range(1, 4))
         if indexed:
-            return [(url, self.settings.get(f"DINGTALK_SECRET_{number}", "").strip())
+            values = [(url, self.settings.get(f"DINGTALK_SECRET_{number}", "").strip())
                 for number in range(1, 4)
                 if (url := self.settings.get(f"DINGTALK_WEBHOOK_{number}", "").strip()).startswith("https://")]
+            result = []
+            seen = set()
+            for value in values:
+                if value[0] not in seen:
+                    seen.add(value[0])
+                    result.append(value)
+            return result
         url = self.settings.get("DINGTALK_WEBHOOK", "").strip()
         return [(url, self.settings.get("DINGTALK_SECRET", "").strip())] if url.startswith("https://") else []
 
     def _email_recipients(self):
-        return self._indexed_values("EMAIL_TO", "SMTP_TO")
+        return self._unique(self._indexed_values("EMAIL_TO", "SMTP_TO"), case_insensitive=True)
 
     def send(self, content, only=None):
         channels = [only] if only else self.configured_channels()

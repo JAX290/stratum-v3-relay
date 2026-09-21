@@ -118,6 +118,19 @@ class EndpointMonitorTest(unittest.TestCase):
         self.assertIn("sign=", requests[2].full_url)
         self.assertNotIn("SEC-private", requests[2].full_url)
 
+    def test_duplicate_notification_targets_are_sent_once(self):
+        settings = {"WECHAT_WEBHOOK_1": "https://qyapi.example/send?key=same",
+            "WECHAT_WEBHOOK_2": "https://qyapi.example/send?key=same",
+            "DINGTALK_WEBHOOK_1": "https://oapi.example/send?access_token=same",
+            "DINGTALK_WEBHOOK_2": "https://oapi.example/send?access_token=same",
+            "EMAIL_TO_1": "ops@example.com", "EMAIL_TO_2": "OPS@example.com", "EMAIL_DELIVERY": "direct"}
+        notifier = Notifier(settings=settings)
+        with patch("endpoint_monitor.urllib.request.urlopen") as urlopen, patch("endpoint_monitor.smtplib.SMTP") as smtp:
+            sent, errors = notifier.send("去重测试")
+        self.assertEqual((sent, errors), (3, []))
+        self.assertEqual(urlopen.call_count, 2)
+        self.assertEqual(smtp.return_value.__enter__.return_value.send_message.call_count, 1)
+
     def test_notification_sends_email_through_configured_smtp(self):
         settings = {"SMTP_HOST": "smtp.example.com", "SMTP_PORT": "465", "SMTP_SECURITY": "ssl",
             "SMTP_USERNAME": "sender@example.com", "SMTP_PASSWORD": "secret",

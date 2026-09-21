@@ -72,6 +72,33 @@ def append_event(kind, client_id, name, message, now, site=None):
         os.replace(temporary, EVENT_FILE)
 
 
+def recently_emitted(kind, client_id, now, window):
+    if window <= 0:
+        return False
+    try:
+        lines = EVENT_FILE.read_text(encoding="utf-8").splitlines()[-500:]
+    except OSError:
+        return False
+    for line in reversed(lines):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        event_time = int(event.get("time", 0) or 0)
+        if event_time and now - event_time > window:
+            break
+        if event.get("type") == kind and str(event.get("client_id", "")) == client_id:
+            return True
+    return False
+
+
+def duplicate_notification(notifications, kind, client_id, now, window):
+    item = notifications.get(client_id, {})
+    if window > 0 and item.get("kind") == kind and now - int(item.get("time", 0) or 0) <= window:
+        return True
+    return recently_emitted(kind, client_id, now, window)
+
+
 def check_once(now=None):
     now = int(now or time.time())
     config = read_json(CONFIG_FILE, {})
@@ -81,7 +108,12 @@ def check_once(now=None):
     sites = read_json(STATE_FILE, {}).get("sites", {})
     monitor = read_json(MONITOR_FILE, {"started_at": now, "clients": {}})
     statuses = monitor.setdefault("clients", {})
+    pending = monitor.setdefault("pending", {})
+    notifications = monitor.setdefault("notifications", {})
     offline_after = int(config.get("offline_after_seconds", 180))
+    offline_checks = max(1, min(10, int(config.get("offline_confirm_checks", 2))))
+    recovery_checks = max(1, min(10, int(config.get("recovery_confirm_checks", 2))))
+    dedup_seconds = max(0, int(config.get("notification_dedup_seconds", 600)))
     events = []
     for client in clients:
         if not client.get("enabled", True) or not client.get("alert_enabled", True):
@@ -92,16 +124,34 @@ def check_once(now=None):
         last_seen = int(site.get("last_seen", 0))
         offline = (last_seen and now - last_seen > offline_after) or (not last_seen and now - int(monitor["started_at"]) > offline_after)
         previous = statuses.get(client_id, "waiting")
-        current = "offline" if offline else ("online" if last_seen else "waiting")
+        observed = "offline" if offline else ("online" if last_seen else "waiting")
+        current = observed
+        transition = ((previous != "offline" and observed == "offline") or
+            (previous == "offline" and observed == "online"))
+        if transition:
+            item = pending.get(client_id, {})
+            count = int(item.get("count", 0)) + 1 if item.get("target") == observed else 1
+            pending[client_id] = {"target": observed, "count": count, "since": int(item.get("since", now)) if item.get("target") == observed else now}
+            required = offline_checks if observed == "offline" else recovery_checks
+            if count < required:
+                current = previous
+            else:
+                pending.pop(client_id, None)
+        else:
+            pending.pop(client_id, None)
         if current == "offline" and previous != "offline":
             when = datetime.fromtimestamp(last_seen, timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S") if last_seen else "从未连接"
             message = f"【木林森中转离线】\n矿场：{name}\n最后连接：{when}\n请检查值守电脑、流量卡和VPS线路。"
-            events.append(message)
-            append_event("site_offline", client_id, name, message, now, site)
+            if not duplicate_notification(notifications, "site_offline", client_id, now, dedup_seconds):
+                events.append(message)
+                append_event("site_offline", client_id, name, message, now, site)
+                notifications[client_id] = {"kind": "site_offline", "time": now}
         elif current == "online" and previous == "offline":
             message = f"【木林森中转恢复】\n矿场：{name}\n客户端心跳已经恢复。"
-            events.append(message)
-            append_event("site_recovered", client_id, name, message, now, site)
+            if not duplicate_notification(notifications, "site_recovered", client_id, now, dedup_seconds):
+                events.append(message)
+                append_event("site_recovered", client_id, name, message, now, site)
+                notifications[client_id] = {"kind": "site_recovered", "time": now}
         statuses[client_id] = current
     save_monitor(monitor)
     return events
