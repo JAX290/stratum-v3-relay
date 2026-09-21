@@ -15,7 +15,7 @@ if($LASTEXITCODE-ne 0){throw 'Client regression tests failed.'}
 
 # Compile the same core without WinForms/Drawing or any UI source files.
 $coreSources=@('AppIdentity.cs','ConfigModels.cs','SystemStatus.cs','RelayManager.cs',
-  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','NetworkHelper.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs') |
+  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','NetworkHelper.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs','FailoverPolicy.cs') |
   ForEach-Object { Join-Path $PSScriptRoot $_ }
 $coreLibrary=Join-Path $testDirectory 'RelayCore.dll'
 $coreAssemblyInfo=Join-Path $testDirectory 'CoreVersion.cs'
@@ -29,6 +29,13 @@ if($LASTEXITCODE-ne 0){throw 'Headless core tests failed to compile.'}
 & $headlessTestExe
 if($LASTEXITCODE-ne 0){throw 'Headless core tests failed.'}
 Write-Host "Test artifacts: $testDirectory"
+
+$failoverTestExe=Join-Path $testDirectory 'failover-policy-tests.exe'
+& $compiler /nologo /target:exe /out:$failoverTestExe `
+  (Join-Path $PSScriptRoot 'FailoverPolicy.cs') (Join-Path $PSScriptRoot 'test_failover.cs')
+if($LASTEXITCODE-ne 0){throw 'Failover policy tests failed to compile.'}
+& $failoverTestExe
+if($LASTEXITCODE-ne 0){throw 'Failover policy tests failed.'}
 
 # WIN-P01 first acceptance stage: recovery decisions, without installing services.
 $recoveryTestExe=Join-Path $testDirectory 'recovery-policy-tests.exe'
