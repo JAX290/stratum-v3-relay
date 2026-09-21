@@ -84,18 +84,23 @@ public sealed class FailoverPolicy
 
     public bool TrySelect(string name, bool primary, DateTime nowUtc)
     {
+        if (!CanSelect(name, primary, nowUtc)) return false;
+        if (String.Equals(currentEndpoint, name, StringComparison.OrdinalIgnoreCase)) return true;
+        currentEndpoint = name;
+        lastSwitchUtc = nowUtc;
+        return true;
+    }
+
+    public bool CanSelect(string name, bool primary, DateTime nowUtc)
+    {
         ValidateInput(name, nowUtc);
         FailoverEndpointPolicyState candidate = Get(name);
         if (nowUtc < candidate.CooldownUntilUtc || (primary && candidate.RequiresRecoveryObservation)) return false;
         if (String.Equals(currentEndpoint, name, StringComparison.OrdinalIgnoreCase)) return true;
-        if (currentEndpoint.Length > 0) {
-            FailoverEndpointPolicyState current = Get(currentEndpoint);
-            bool currentUnavailable = nowUtc < current.CooldownUntilUtc;
-            if (!currentUnavailable && nowUtc - lastSwitchUtc < switchCooldown) return false;
-        }
-        currentEndpoint = name;
-        lastSwitchUtc = nowUtc;
-        return true;
+        if (currentEndpoint.Length == 0) return true;
+        FailoverEndpointPolicyState current = Get(currentEndpoint);
+        bool currentUnavailable = nowUtc < current.CooldownUntilUtc;
+        return currentUnavailable || nowUtc - lastSwitchUtc >= switchCooldown;
     }
 
     public FailoverEndpointPolicyState Snapshot(string name)

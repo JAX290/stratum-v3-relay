@@ -22,5 +22,5 @@ using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using Microsoft.Win32;
 
-[DataContract] public sealed class EndpointState { [DataMember]public string Name=""; [DataMember]public bool Online; [DataMember]public int LatencyMs; [DataMember]public long Failures; [DataMember]public string LastError=""; [DataMember]public DateTime LastCheck; public EndpointState Copy(){return (EndpointState)MemberwiseClone();} }
+[DataContract] public sealed class EndpointState { [DataMember]public string Name=""; [DataMember]public bool Online,Selected,Recovering; [DataMember]public int LatencyMs,ConsecutiveFailures; [DataMember]public long Failures; [DataMember]public string LastError=""; [DataMember]public DateTime LastCheck,CooldownUntilUtc,RecoverySinceUtc; public EndpointState Copy(){return (EndpointState)MemberwiseClone();} }
 [DataContract] public sealed class RelaySnapshot { [DataMember]public bool Running; [DataMember]public int Active,ActiveMiners; [DataMember]public long Total,Failures,Uploaded,Downloaded; [DataMember]public DateTime StartedAt; [DataMember]public List<EndpointState> Endpoints=new List<EndpointState>(); }

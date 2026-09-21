@@ -45,6 +45,7 @@ public static class ClientCoreTests
         CheckLastKnownGood();
         CheckCompleteConfigurationValidation();
         CheckConfigurationRollback();
+        CheckFailoverSnapshot();
         return failures==0?0:1;
     }
     private static void CheckStreamBoundaries()
@@ -235,6 +236,21 @@ public static class ClientCoreTests
         } finally {
             try{if(System.IO.Directory.Exists(directory))System.IO.Directory.Delete(directory,true);}catch{}
         }
+    }
+    private static void CheckFailoverSnapshot()
+    {
+        RelayManager relay=new RelayManager(delegate(string value){});
+        DateTime now=DateTime.UtcNow;
+        ServerProfile primary=new ServerProfile{Name="主VPS",Enabled=true,Address="primary.example"};
+        ServerProfile backup=new ServerProfile{Name="备用VPS 1",Enabled=true,Address="backup.example"};
+        ServerProfile[] profiles=new[]{primary,backup};
+        var controllerField=typeof(RelayManager).GetField("failover",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic);
+        RelayFailoverController controller=(RelayFailoverController)controllerField.GetValue(relay);controller.Reset(profiles,now);
+        controller.ConnectionFailed(primary,now.AddSeconds(1));controller.ConnectionFailed(primary,now.AddSeconds(6));controller.ConnectionFailed(primary,now.AddSeconds(11));controller.ConnectionSucceeded(backup,false,now.AddSeconds(12));
+        var statesField=typeof(RelayManager).GetField("endpointStates",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic);
+        Dictionary<string,EndpointState> states=(Dictionary<string,EndpointState>)statesField.GetValue(relay);states[primary.Name]=new EndpointState{Name=primary.Name};states[backup.Name]=new EndpointState{Name=backup.Name,Online=true};
+        RelaySnapshot snapshot=relay.Snapshot();EndpointState primaryState=snapshot.Endpoints.Find(delegate(EndpointState item){return item.Name==primary.Name;});EndpointState backupState=snapshot.Endpoints.Find(delegate(EndpointState item){return item.Name==backup.Name;});
+        Check(primaryState.ConsecutiveFailures==3&&primaryState.CooldownUntilUtc>now&&backupState.Selected,"relay snapshot exposes selected line and debounce state");
     }
     private static void Feed(MinerConnection c,string value,bool fromMiner){byte[] data=System.Text.Encoding.UTF8.GetBytes(value);c.Observe(data,data.Length,fromMiner);}
 }

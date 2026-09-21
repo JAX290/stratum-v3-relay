@@ -32,6 +32,7 @@ public sealed class RelayManager
     private DateTime startedAt;
     private readonly object stateLock = new object();
     private readonly Dictionary<string, EndpointState> endpointStates = new Dictionary<string, EndpointState>();
+    private readonly RelayFailoverController failover = new RelayFailoverController();
     private readonly Dictionary<string, MinerState> miners = new Dictionary<string, MinerState>();
     // Only connection setup is limited. Established mining connections do not occupy a slot.
     // This prevents hundreds of reconnecting miners from creating hundreds of slow VPS probes at once.
@@ -51,6 +52,7 @@ public sealed class RelayManager
     {
         if (IsRunning) return;
         config.Normalize();
+        failover.Reset(config.Servers, DateTime.UtcNow);
         stop = new CancellationTokenSource();
         startedAt = DateTime.Now;
         Interlocked.Exchange(ref totalConnections, 0); Interlocked.Exchange(ref failedConnections, 0);
@@ -110,8 +112,7 @@ public sealed class RelayManager
             ServerProfile selected = null;
             Exception last = null;
             int minerPort = endpoint == null ? 1 : endpoint.Port;
-            foreach (ServerProfile profile in EnabledProfiles(config)) {
-                if (IsCoolingDown(profile)) { last = new IOException(profile.Name + "刚刚检测失败，暂缓重复连接。"); continue; }
+            foreach (ServerProfile profile in failover.ConnectionCandidates(config.Servers, DateTime.UtcNow)) {
                 try {
                     TlsConnection connection = await OpenTls(profile, 10000, cancellation).ConfigureAwait(false); tls = connection.Stream; remote = connection.Client;
                     string targetName = String.IsNullOrWhiteSpace(profile.ServerName) ? profile.Address : profile.ServerName.Trim();
@@ -121,9 +122,17 @@ public sealed class RelayManager
                     byte[] requestBytes = Encoding.ASCII.GetBytes(request);
                     string response = await ExchangeHeaderWithTimeout(tls, remote, requestBytes, 10000, cancellation).ConfigureAwait(false);
                     if (!response.StartsWith("HTTP/1.1 200 ", StringComparison.Ordinal)) throw new IOException("VPS 拒绝认证或没有这个转发端口。");
+                    bool primary=Object.ReferenceEquals(profile,config.Servers[0]);
+                    string previousEndpoint=failover.CurrentEndpoint;
+                    if(!failover.ConnectionSucceeded(profile,primary,DateTime.UtcNow)){
+                        last=new IOException(profile.Name+"仍在恢复观察或切换冷却中。");
+                        try{tls.Dispose();}catch{}try{remote.Close();}catch{}tls=null;remote=null;continue;
+                    }
+                    if(!String.Equals(previousEndpoint,profile.Name,StringComparison.OrdinalIgnoreCase))log("线路已切换："+previousEndpoint+" → "+profile.Name+"。后续新连接使用新线路，已有连接保持不变。");
                     selected = profile; MarkSuccess(profile, 0); SetMinerEndpoint(minerState,profile.Name); break;
                 } catch (Exception ex) {
                     last = ex; MarkFailure(profile, FriendlyError(ex));
+                    failover.ConnectionFailed(profile,DateTime.UtcNow);
                     try { if(tls!=null)tls.Dispose(); } catch{} try { if(remote!=null)remote.Close(); } catch{}
                     tls=null; remote=null;
                 }
@@ -188,9 +197,14 @@ public sealed class RelayManager
     {
         while (!cancellation.IsCancellationRequested) {
             foreach (ServerProfile profile in EnabledProfiles(config)) {
+                if(!failover.ShouldProbe(profile,DateTime.UtcNow))continue;
+                bool primary=Object.ReferenceEquals(profile,config.Servers[0]);
                 try {
                     await TestProfileAsync(profile, config.SiteName, cancellation).ConfigureAwait(false);
-                } catch { }
+                    string previousEndpoint=failover.CurrentEndpoint;
+                    failover.HealthSucceeded(profile,primary,DateTime.UtcNow);
+                    if(primary&&!String.Equals(previousEndpoint,failover.CurrentEndpoint,StringComparison.OrdinalIgnoreCase))log("主线路已通过恢复观察："+previousEndpoint+" → "+failover.CurrentEndpoint+"。后续新连接恢复使用主线路。");
+                } catch { failover.HealthFailed(profile,DateTime.UtcNow); }
             }
             try { await Task.Delay(TimeSpan.FromMinutes(config.HealthCheckMinutes), cancellation).ConfigureAwait(false); } catch { break; }
         }
@@ -237,14 +251,13 @@ public sealed class RelayManager
 
     private void MarkSuccess(ServerProfile p, int latency) { lock(stateLock) { EndpointState s=GetState(p); s.Online=true; s.LatencyMs=latency; s.LastError=""; s.LastCheck=DateTime.Now; } }
     private void MarkFailure(ServerProfile p, string error) { lock(stateLock) { EndpointState s=GetState(p); s.Online=false; s.Failures++; s.LastError=error; s.LastCheck=DateTime.Now; } }
-    private bool IsCoolingDown(ServerProfile p) { lock(stateLock) { EndpointState s=GetState(p); return s.LastCheck!=DateTime.MinValue&&!s.Online&&(DateTime.Now-s.LastCheck)<TimeSpan.FromSeconds(15); } }
     private EndpointState GetState(ServerProfile p) { EndpointState s; if (!endpointStates.TryGetValue(p.Name, out s)) { s=new EndpointState{Name=p.Name}; endpointStates[p.Name]=s; } return s; }
     private EndpointState GetStateCopy(ServerProfile p) { lock(stateLock) { return GetState(p).Copy(); } }
 
     public RelaySnapshot Snapshot()
     {
         RelaySnapshot value = new RelaySnapshot { Running=IsRunning, Active=Volatile.Read(ref active), Total=Interlocked.Read(ref totalConnections), Failures=Interlocked.Read(ref failedConnections), Uploaded=Interlocked.Read(ref uploadedBytes), Downloaded=Interlocked.Read(ref downloadedBytes), StartedAt=startedAt };
-        lock(stateLock) { foreach (EndpointState s in endpointStates.Values) value.Endpoints.Add(s.Copy()); foreach(MinerState miner in miners.Values)if(miner.Connections>0)value.ActiveMiners++; }
+        lock(stateLock) { foreach (EndpointState s in endpointStates.Values) { EndpointState copy=s.Copy();FailoverEndpointPolicyState policy=failover.Snapshot(copy.Name);copy.Selected=String.Equals(copy.Name,failover.CurrentEndpoint,StringComparison.OrdinalIgnoreCase);copy.Recovering=policy.RequiresRecoveryObservation;copy.ConsecutiveFailures=policy.ConsecutiveFailures;copy.CooldownUntilUtc=policy.CooldownUntilUtc;copy.RecoverySinceUtc=policy.RecoverySinceUtc;value.Endpoints.Add(copy); } foreach(MinerState miner in miners.Values)if(miner.Connections>0)value.ActiveMiners++; }
         return value;
     }
 

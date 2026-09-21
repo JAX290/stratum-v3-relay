@@ -15,7 +15,7 @@ if($LASTEXITCODE-ne 0){throw 'Client regression tests failed.'}
 
 # Compile the same core without WinForms/Drawing or any UI source files.
 $coreSources=@('AppIdentity.cs','ConfigModels.cs','SystemStatus.cs','RelayManager.cs',
-  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','NetworkHelper.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs','FailoverPolicy.cs') |
+  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','NetworkHelper.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs','FailoverPolicy.cs','RelayFailoverController.cs') |
   ForEach-Object { Join-Path $PSScriptRoot $_ }
 $coreLibrary=Join-Path $testDirectory 'RelayCore.dll'
 $coreAssemblyInfo=Join-Path $testDirectory 'CoreVersion.cs'
@@ -32,7 +32,9 @@ Write-Host "Test artifacts: $testDirectory"
 
 $failoverTestExe=Join-Path $testDirectory 'failover-policy-tests.exe'
 & $compiler /nologo /target:exe /out:$failoverTestExe `
-  (Join-Path $PSScriptRoot 'FailoverPolicy.cs') (Join-Path $PSScriptRoot 'test_failover.cs')
+  (Join-Path $PSScriptRoot 'ConfigModels.cs') (Join-Path $PSScriptRoot 'FailoverPolicy.cs') `
+  (Join-Path $PSScriptRoot 'RelayFailoverController.cs') (Join-Path $PSScriptRoot 'test_failover.cs') `
+  /reference:System.Runtime.Serialization.dll /reference:System.Security.dll
 if($LASTEXITCODE-ne 0){throw 'Failover policy tests failed to compile.'}
 & $failoverTestExe
 if($LASTEXITCODE-ne 0){throw 'Failover policy tests failed.'}

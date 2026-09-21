@@ -376,7 +376,7 @@ public sealed class MainForm : Form
         RelaySnapshot s=manager.Snapshot();
         string line=s.Running ? "运行中" : "未启动";
         string uptime=s.Running ? FormatDuration(DateTime.Now-s.StartedAt) : "--";
-        List<string> endpoints=new List<string>(); foreach(EndpointState e in s.Endpoints) endpoints.Add(e.Name+":"+(e.Online ? "正常 "+e.LatencyMs+"ms" : "异常 "+e.LastError)+"（"+(e.LastCheck==DateTime.MinValue?"未检测":e.LastCheck.ToString("HH:mm:ss"))+"）");
+        List<string> endpoints=new List<string>(); foreach(EndpointState e in s.Endpoints) { string phase=e.Recovering?"恢复观察":(e.CooldownUntilUtc>DateTime.UtcNow?"冷却至 "+e.CooldownUntilUtc.ToLocalTime().ToString("HH:mm:ss"):(e.Online?"正常 "+e.LatencyMs+"ms":"异常 "+e.LastError));endpoints.Add((e.Selected?"当前·":"")+e.Name+":"+phase+"（"+(e.LastCheck==DateTime.MinValue?"未检测":e.LastCheck.ToString("HH:mm:ss"))+"）"); }
         start.Enabled=!manager.IsRunning;
         status.Text="状态："+line+"    当前矿机："+s.ActiveMiners+"    当前连接："+s.Active+"    累计连接："+s.Total+"    失败："+s.Failures+"    运行："+uptime+"\r\n流量：上传 "+FormatBytes(s.Uploaded)+" / 下载 "+FormatBytes(s.Downloaded)+"    异常退出自动恢复：已启用\r\n线路检测："+(endpoints.Count==0 ? "启动中转后自动检测，也可点击测试按钮" : String.Join("，",endpoints.ToArray()));
     }
