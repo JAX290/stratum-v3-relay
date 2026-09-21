@@ -20,6 +20,17 @@ public static class ServiceStoragePermissions
         Add(security,ServiceSid,FileSystemRights.Modify|FileSystemRights.Synchronize);
         return security;
     }
+    public static FileSecurity CreateFileSecurity()
+    {
+        FileSecurity security=new FileSecurity();
+        security.SetOwner(new SecurityIdentifier(AdministratorsSid));
+        security.SetAccessRuleProtection(true,false);
+        security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(SystemSid),FileSystemRights.FullControl,AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(AdministratorsSid),FileSystemRights.FullControl,AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(ServiceSid),FileSystemRights.Modify|FileSystemRights.Synchronize,AccessControlType.Allow));
+        return security;
+    }
+    public static void ApplyFileSecurity(string path){File.SetAccessControl(path,CreateFileSecurity());}
     private static void Add(DirectorySecurity security,string sid,FileSystemRights rights)
     {
         security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(sid),rights,

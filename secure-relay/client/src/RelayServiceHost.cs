@@ -10,14 +10,16 @@ using System.Threading.Tasks;
 public sealed class RelayServiceHost : ServiceBase
 {
     public const string InstalledServiceName="MulinSenRelaySupervisor";
-    public static readonly string DataFolder=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),"MulinSenRelayService");
+    public static readonly string DefaultDataFolder=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),"MulinSenRelayService");
+    private readonly string dataFolder;
     private readonly ManualResetEvent stop=new ManualResetEvent(false);
     private readonly ManualResetEvent ready=new ManualResetEvent(false);
     private Thread supervisorThread;
     private Exception startupFailure;
-    public RelayServiceHost()
+    public RelayServiceHost() : this(InstalledServiceName,DefaultDataFolder) {}
+    internal RelayServiceHost(string serviceName,string directory)
     {
-        ServiceName=InstalledServiceName;CanStop=true;CanShutdown=true;AutoLog=false;
+        ServiceName=serviceName;dataFolder=Path.GetFullPath(directory);CanStop=true;CanShutdown=true;AutoLog=false;
     }
     protected override void OnStart(string[] args)
     {
@@ -32,33 +34,36 @@ public sealed class RelayServiceHost : ServiceBase
     private void RunSupervisor()
     {
         try {
-            ServiceStoragePermissions.VerifyDirectory(DataFolder);
-            if(!File.Exists(Path.Combine(DataFolder,"service-config.dat")))throw new IOException();
-            ServiceStoragePermissions.VerifyFile(Path.Combine(DataFolder,"service-config.dat"));
-            ServiceStoragePermissions.VerifyFile(Path.Combine(DataFolder,"recovery.json"));
-            using(RecoverySession recovery=new RecoverySession(Path.Combine(DataFolder,"recovery.json"),false))
+            ServiceStoragePermissions.VerifyDirectory(dataFolder);
+            if(!File.Exists(Path.Combine(dataFolder,"service-config.dat")))throw new IOException();
+            ServiceStoragePermissions.VerifyFile(Path.Combine(dataFolder,"service-config.dat"));
+            ServiceStoragePermissions.VerifyFile(Path.Combine(dataFolder,"recovery.json"));
+            using(RecoverySession recovery=new RecoverySession(Path.Combine(dataFolder,"recovery.json"),false))
             using(WatchdogSupervisor supervisor=new WatchdogSupervisor(recovery,delegate {
-                return new WorkerProcess(Assembly.GetExecutingAssembly().Location,"--worker");
+                return new WorkerProcess(Assembly.GetExecutingAssembly().Location,"--worker \""+dataFolder+"\"");
             })) {
                 ready.Set();
                 while(!stop.WaitOne(0)) {
-                    RecoveryDecision result=supervisor.Tick(DateTime.UtcNow);
-                    WriteStatus(result);
+                    RecoveryDecision result=supervisor.TickCurrentTime();
+                    WriteStatus(result,dataFolder);
                     if(result.Action==RecoveryAction.Blocked)break;
                     if(stop.WaitOne(10000))break;
                 }
             }
         } catch(Exception error) {
             startupFailure=error;ready.Set();
-            try{WriteStatus(new RecoveryDecision(RecoveryAction.Blocked,"服务异常，已停止自动恢复，请检查安装与磁盘权限。"));}catch{}
+            string message="服务异常，已停止自动恢复，请检查安装与磁盘权限。";
+            if(Path.GetFileName(Assembly.GetExecutingAssembly().Location).EndsWith(".test.exe",StringComparison.OrdinalIgnoreCase))
+                message+=" TEST: "+error.GetType().Name+": "+error.Message;
+            try{WriteStatus(new RecoveryDecision(RecoveryAction.Blocked,message),dataFolder);}catch{}
         } finally {
             // Ask SCM to reflect the stopped state instead of displaying a dead thread as running.
             if(!stop.WaitOne(0)) {ExitCode=1;Stop();}
         }
     }
-    private static void WriteStatus(RecoveryDecision decision)
+    private static void WriteStatus(RecoveryDecision decision,string directory)
     {
-        string path=Path.Combine(DataFolder,"service-status.txt"),temporary=path+".tmp";
+        string path=Path.Combine(directory,"service-status.txt"),temporary=path+".tmp";
         File.WriteAllText(temporary,DateTime.UtcNow.ToString("o")+Environment.NewLine+decision.Action+Environment.NewLine+decision.Message);
         if(File.Exists(path))File.Replace(temporary,path,null);else File.Move(temporary,path);
     }
@@ -68,21 +73,22 @@ public sealed class RelayServiceHost : ServiceBase
         if(supervisorThread!=null&&Thread.CurrentThread!=supervisorThread&&!supervisorThread.Join(10000))
             throw new InvalidOperationException("中转服务尚未完成停止，请检查服务状态。");
         if(Thread.CurrentThread!=supervisorThread)
-            try{WriteStatus(new RecoveryDecision(RecoveryAction.Stopped,"服务已停止，不会自动拉起中转。"));}catch{}
+            try{WriteStatus(new RecoveryDecision(RecoveryAction.Stopped,"服务已停止，不会自动拉起中转。"),dataFolder);}catch{}
     }
     protected override void OnShutdown(){OnStop();}
 
-    public static int RunWorker()
+    public static int RunWorker(string directory)
     {
         Console.SetIn(new StreamReader(Console.OpenStandardInput(),new System.Text.UTF8Encoding(false,true),true));
         string startCommand=Console.ReadLine();
         if(startCommand!="GO")return 2;
         RelayManager manager=null;
         try {
-            ServiceStoragePermissions.VerifyDirectory(DataFolder);
-            ServiceStoragePermissions.VerifyFile(Path.Combine(DataFolder,"service-config.dat"));
-            ConfigStore.SetServiceFolder(DataFolder);
-            byte[] encrypted=File.ReadAllBytes(Path.Combine(DataFolder,"service-config.dat"));
+            string dataFolder=Path.GetFullPath(directory);
+            ServiceStoragePermissions.VerifyDirectory(dataFolder);
+            ServiceStoragePermissions.VerifyFile(Path.Combine(dataFolder,"service-config.dat"));
+            ConfigStore.SetServiceFolder(dataFolder);
+            byte[] encrypted=File.ReadAllBytes(Path.Combine(dataFolder,"service-config.dat"));
             AppConfig config=ServiceConfiguration.Decode(encrypted);
             manager=new RelayManager(delegate(string ignored){});
             manager.Start(config,PortRoute.Parse(config.Ports));
@@ -107,11 +113,34 @@ public sealed class RelayServiceHost : ServiceBase
 
 public static class RelayServiceProgram
 {
+    private static bool IsTestBuild()
+    {
+        return Path.GetFileName(Assembly.GetExecutingAssembly().Location).EndsWith(".test.exe",StringComparison.OrdinalIgnoreCase);
+    }
+    private static int ConfigurationFailure(Exception error)
+    {
+        if(IsTestBuild())Console.Error.WriteLine(error.GetType().Name+": "+error.Message);
+        return 1;
+    }
     public static int Main(string[] args)
     {
-        if(args.Length==1&&args[0]=="--worker")return RelayServiceHost.RunWorker();
+        if(args.Length==2&&args[0]=="--worker")return RelayServiceHost.RunWorker(args[1]);
+        if(args.Length==3&&args[0]=="--prepare") {
+            try{ServiceInstallerData.Prepare(args[1],args[2]);return 0;}catch(Exception error){return ConfigurationFailure(error);}
+        }
+        if(args.Length==2&&args[0]=="--validate-prepared") {
+            try{ServiceInstallerData.ValidatePrepared(args[1]);return 0;}catch(Exception error){return ConfigurationFailure(error);}
+        }
         if(args.Length==1&&args[0]=="--service") {
             ServiceBase.Run(new RelayServiceHost());return 0;
+        }
+        if(args.Length==2&&args[0]=="--service-test"&&
+            IsTestBuild()) {
+            ServiceBase.Run(new RelayServiceHost("MulinSenRelaySupervisorTest",args[1]));return 0;
+        }
+        if(args.Length==3&&args[0]=="--create-test-config"&&
+            IsTestBuild()) {
+            int port;try{if(!Int32.TryParse(args[2],out port))return 2;ServiceInstallerData.CreateSyntheticTestConfig(args[1],port);return 0;}catch(Exception error){return ConfigurationFailure(error);}
         }
         Console.WriteLine("这是服务组件，请通过安装向导配置。不要用它替换桌面客户端。");
         return 2;

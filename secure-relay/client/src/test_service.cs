@@ -127,6 +127,25 @@ public static class ServiceTests
             System.Security.AccessControl.AccessControlType.Allow));
         Check(!ServiceStoragePermissions.IsRestricted(permissions),"world-readable service data rejected");
         Check(!ServiceStoragePermissions.IsRestricted(new System.Security.AccessControl.DirectorySecurity()),"missing service permissions rejected");
+        string installData=Path.Combine(directory,"prepared");Directory.CreateDirectory(installData);
+        string desktopConfig=Path.Combine(directory,"desktop-config.json");
+        AppConfig desktop=new AppConfig{Ports="19998",ListenAddress="127.0.0.1",HealthCheckMinutes=5};
+        string secret="migration_test_012345678901234567890123456";
+        desktop.Servers.Add(new ServerProfile{Address="192.0.2.2",CertificateSha256=new string('B',64),ProtectedToken=ConfigStore.Protect(secret)});
+        using(var stream=File.Create(desktopConfig))new System.Runtime.Serialization.Json.DataContractJsonSerializer(typeof(AppConfig)).WriteObject(stream,desktop);
+        ServiceInstallerData.PrepareForTests(desktopConfig,installData);
+        ServiceInstallerData.ValidatePreparedForTests(installData);
+        Check(File.Exists(Path.Combine(installData,"service-config.dat"))&&File.Exists(Path.Combine(installData,"recovery.json")),"desktop configuration migrates to prepared service storage");
+        byte[] prepared=File.ReadAllBytes(Path.Combine(installData,"service-config.dat"));
+        Check(!System.Text.Encoding.UTF8.GetString(prepared).Contains(secret),"prepared service file does not expose shared key");
+        AppConfig preparedConfig=ServiceConfiguration.Decode(prepared);
+        Check(preparedConfig.Servers[0].SharedKey==secret&&preparedConfig.Ports==desktop.Ports,"prepared service configuration preserves routes and key");
+        string recoveryBefore=File.ReadAllText(Path.Combine(installData,"recovery.json"));
+        ServiceInstallerData.PrepareForTests(desktopConfig,installData);
+        Check(File.ReadAllText(Path.Combine(installData,"recovery.json"))==recoveryBefore,"configuration refresh cannot reset recovery budget");
+        File.WriteAllText(Path.Combine(installData,"service-config.dat"),"tampered");
+        bool preparedRejected=false;try{ServiceInstallerData.ValidatePreparedForTests(installData);}catch{preparedRejected=true;}
+        Check(preparedRejected,"prepared configuration validation rejects tampering");
         Console.WriteLine("Service test artifacts: "+directory);
     }
 }

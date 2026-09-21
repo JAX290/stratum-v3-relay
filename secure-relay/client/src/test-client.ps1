@@ -51,7 +51,17 @@ $serviceTestExe=Join-Path $testDirectory 'service-runtime-tests.exe'
   (Join-Path $PSScriptRoot 'RecoverySession.cs') (Join-Path $PSScriptRoot 'WorkerProcess.cs') `
   (Join-Path $PSScriptRoot 'WatchdogSupervisor.cs') (Join-Path $PSScriptRoot 'ServiceConfiguration.cs') `
   (Join-Path $PSScriptRoot 'ServiceStoragePermissions.cs') `
+  (Join-Path $PSScriptRoot 'ServiceInstallerData.cs') `
   (Join-Path $PSScriptRoot 'test_service.cs')
 if($LASTEXITCODE-ne 0){throw 'Service runtime tests failed to compile.'}
 & $serviceTestExe
 if($LASTEXITCODE-ne 0){throw 'Service runtime tests failed.'}
+$planJson=& (Join-Path $PSScriptRoot 'install-service.ps1') -Mode Plan `
+  -ServiceExecutable (Join-Path $testDirectory 'MulinSenRelayService.exe') `
+  -DesktopConfig (Join-Path $testDirectory 'not-used.json') `
+  -InstallDirectory (Join-Path $testDirectory 'planned-install') `
+  -DataDirectory (Join-Path $testDirectory 'planned-data')
+$plan=$planJson|ConvertFrom-Json
+if($plan.Result -ne '只生成计划，未修改电脑' -or $plan.Steps.Count -lt 6){throw 'Service installation plan is incomplete.'}
+if((Test-Path (Join-Path $testDirectory 'planned-install')) -or (Test-Path (Join-Path $testDirectory 'planned-data'))){throw 'Planning modified the computer.'}
+Write-Host 'PASS service installation plan is complete and read-only'
