@@ -4,7 +4,7 @@
 
 管理员可以通过 Tailscale 管理线路和矿场，也可以通过带账号密码的 HTTPS 只读面板日常查看状态。
 
-当前源码的 Windows 客户端版本为 `2.2.2`。本次调整拆分内部模块，现有操作与配置保持兼容；发布状态见[更新计划](docs/improvement-roadmap.md)。各组件版本定义见 [version.json](version.json)。
+当前 Windows 客户端版本为 `2.2.2`。本次调整拆分内部模块，现有操作与配置保持兼容；发布状态见[更新计划](docs/improvement-roadmap.md)。各组件版本定义见 [version.json](version.json)。
 
 ```text
 矿机 → Windows 值守电脑 → VPS → 矿池
