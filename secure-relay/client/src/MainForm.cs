@@ -55,6 +55,9 @@ public sealed class MainForm : Form
     private readonly Queue<string> pendingLogs = new Queue<string>();
     private readonly object logLock = new object();
     private readonly Label status = new Label();
+    private readonly TabControl pages=new TabControl();
+    private readonly TabPage homePage=new TabPage("值守首页"),settingsPage=new TabPage("高级设置（管理员）");
+    private readonly AdminAccessPolicy adminAccess=new AdminAccessPolicy();
     private List<ServerProfile> backupProfiles = new List<ServerProfile>();
     private int statusTicks;
     private bool exiting;
@@ -98,9 +101,9 @@ public sealed class MainForm : Form
 
     private void BuildUi()
     {
-        TabControl pages=new TabControl();pages.Dock=DockStyle.Fill;
-        TabPage homePage=new TabPage("值守首页");TabPage settingsPage=new TabPage("高级设置");
+        pages.Dock=DockStyle.Fill;
         pages.TabPages.Add(homePage);pages.TabPages.Add(settingsPage);
+        pages.Selecting+=OnPageSelecting;
         TableLayoutPanel grid = new TableLayoutPanel();
         grid.Dock = DockStyle.Top; grid.Height = 498; grid.Padding = new Padding(18, 14, 18, 4);
         grid.ColumnCount = 2; grid.RowCount = 13;
@@ -151,7 +154,8 @@ public sealed class MainForm : Form
 
         FlowLayoutPanel dutyButtons=new FlowLayoutPanel();dutyButtons.Dock=DockStyle.Top;dutyButtons.Height=58;dutyButtons.Padding=new Padding(18,10,0,0);
         Button contact=new Button();contact.Text="联系技术人员";contact.AutoSize=true;contact.Click+=delegate{ShowContactSupport();};
-        dutyButtons.Controls.Add(repair);dutyButtons.Controls.Add(diagnostics);dutyButtons.Controls.Add(miners);dutyButtons.Controls.Add(start);dutyButtons.Controls.Add(stop);dutyButtons.Controls.Add(contact);
+        Button admin=new Button();admin.Text="管理员设置";admin.AutoSize=true;admin.Click+=delegate{UnlockAdministrator();};
+        dutyButtons.Controls.Add(repair);dutyButtons.Controls.Add(diagnostics);dutyButtons.Controls.Add(miners);dutyButtons.Controls.Add(start);dutyButtons.Controls.Add(stop);dutyButtons.Controls.Add(contact);dutyButtons.Controls.Add(admin);
         homePage.Controls.Add(dutyButtons);
 
         status.Text = "状态：未启动"; status.Dock = DockStyle.Top; status.Height = 122; status.Padding = new Padding(18, 12, 18, 4);
@@ -377,6 +381,17 @@ public sealed class MainForm : Form
         MessageBox.Show(this,"请先点击“一键诊断”，在报告窗口复制或另存报告，再发送给维护人员。\r\n\r\n诊断报告会排除共享密钥、证书私钥和矿池密码。","联系技术人员",MessageBoxButtons.OK,MessageBoxIcon.Information);
     }
 
+    private void OnPageSelecting(object sender,TabControlCancelEventArgs args)
+    {
+        if(args.TabPage!=settingsPage||adminAccess.CanAccess(DateTime.UtcNow))return;args.Cancel=true;UnlockAdministrator();
+    }
+
+    private void UnlockAdministrator()
+    {
+        if(adminAccess.CanAccess(DateTime.UtcNow)){pages.SelectedTab=settingsPage;return;}
+        using(AdminLoginForm form=new AdminLoginForm())if(form.ShowDialog(this)==DialogResult.OK){adminAccess.Unlock(DateTime.UtcNow,TimeSpan.FromMinutes(15));Log("高级设置已由 Windows 管理员解锁 15 分钟。");pages.SelectedTab=settingsPage;}
+    }
+
     private void EditBackups()
     {
         using (BackupForm form = new BackupForm(backupProfiles,manager,siteName.Text.Trim())) if (form.ShowDialog(this) == DialogResult.OK) backupProfiles = form.Profiles;
@@ -433,6 +448,7 @@ public sealed class MainForm : Form
 
     private void RefreshStatus()
     {
+        if(pages.SelectedTab==settingsPage&&!adminAccess.CanAccess(DateTime.UtcNow)){adminAccess.Lock();pages.SelectedTab=homePage;Log("管理员授权已到期，已返回值守员模式。");}
         if(++statusTicks>=30){statusTicks=0;manager.SaveMinerHistory();}
         RelaySnapshot s=manager.Snapshot();
         DutyHomeSummary duty=DutyHomeSummary.Create(s,manager.MinerSnapshots());

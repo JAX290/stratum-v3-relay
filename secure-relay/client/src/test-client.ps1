@@ -15,7 +15,7 @@ if($LASTEXITCODE-ne 0){throw 'Client regression tests failed.'}
 
 # Compile the same core without WinForms/Drawing or any UI source files.
 $coreSources=@('AppIdentity.cs','ConfigModels.cs','SystemStatus.cs','RelayManager.cs',
-  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','DutyStatus.cs','NetworkHelper.cs','NetworkRecovery.cs','ClientRepair.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs','FailoverPolicy.cs','RelayFailoverController.cs') |
+  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','DutyStatus.cs','AdminAccessPolicy.cs','NetworkHelper.cs','NetworkRecovery.cs','ClientRepair.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs','FailoverPolicy.cs','RelayFailoverController.cs') |
   ForEach-Object { Join-Path $PSScriptRoot $_ }
 $coreLibrary=Join-Path $testDirectory 'RelayCore.dll'
 $coreAssemblyInfo=Join-Path $testDirectory 'CoreVersion.cs'
@@ -77,6 +77,12 @@ $dutyStatusTestExe=Join-Path $testDirectory 'duty-status-tests.exe'
 if($LASTEXITCODE-ne 0){throw 'Duty status tests failed to compile.'}
 & $dutyStatusTestExe
 if($LASTEXITCODE-ne 0){throw 'Duty status tests failed.'}
+
+$adminAccessTestExe=Join-Path $testDirectory 'admin-access-tests.exe'
+& $compiler /nologo /target:exe /out:$adminAccessTestExe /reference:$coreLibrary (Join-Path $PSScriptRoot 'test_admin_access.cs')
+if($LASTEXITCODE-ne 0){throw 'Admin access tests failed to compile.'}
+& $adminAccessTestExe
+if($LASTEXITCODE-ne 0){throw 'Admin access tests failed.'}
 
 # WIN-P01 first acceptance stage: recovery decisions, without installing services.
 $recoveryTestExe=Join-Path $testDirectory 'recovery-policy-tests.exe'
