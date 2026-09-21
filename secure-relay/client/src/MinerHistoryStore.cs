@@ -30,7 +30,7 @@ using Microsoft.Win32;
 }
 public static class MinerHistoryStore
 {
-    public static readonly string FilePath=Path.Combine(ConfigStore.Folder,"miner-history.json");
+    public static string FilePath { get { return Path.Combine(ConfigStore.Folder,"miner-history.json"); } }
     public static void Save(IEnumerable<MinerState> states)
     {
         DateTime cutoff=DateTime.Now.AddHours(-24);MinerHistoryFile file=new MinerHistoryFile();foreach(MinerState s in states){s.Shares.RemoveAll(delegate(ShareEvent e){return e.Time<cutoff;});if(s.LastActivity<cutoff)continue;MinerHistoryItem item=new MinerHistoryItem{Ip=s.Ip,Endpoint=s.Endpoint,LastError=s.LastError,Disconnects=s.Disconnects,Failures=s.Failures,Submitted=s.Submitted,Accepted=s.Accepted,Rejected=s.Rejected,LatencySamples=s.LatencySamples,Uploaded=s.Uploaded,Downloaded=s.Downloaded,LatencyTotal=s.LatencyTotal,FirstSeenTicks=s.FirstSeen.Ticks,LastActivityTicks=s.LastActivity.Ticks,LastAcceptedTicks=s.LastAccepted.Ticks,LocalPorts=new List<int>(s.LocalPorts),Workers=new List<string>(s.Workers),Agents=new List<string>(s.Agents)};foreach(ShareEvent e in s.Shares)item.Shares.Add(new ShareHistoryItem{Time=e.Time,Difficulty=e.Difficulty});file.Miners.Add(item);}

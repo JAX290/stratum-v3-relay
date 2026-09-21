@@ -37,6 +37,13 @@ public sealed class RelayManager
     // This prevents hundreds of reconnecting miners from creating hundreds of slow VPS probes at once.
     private readonly SemaphoreSlim connectionSetupSlots = new SemaphoreSlim(32, 32);
     public bool IsRunning { get { return stop != null; } }
+    public bool LocalHealthCheck()
+    {
+        if(!Snapshot().Running||listeners.Count==0)return false;
+        try {foreach(TcpListener listener in listeners)if(!listener.Server.IsBound)return false;}
+        catch {return false;}
+        return true;
+    }
 
     public RelayManager(Action<string> logger) { log = logger; LoadMinerHistory(); }
 

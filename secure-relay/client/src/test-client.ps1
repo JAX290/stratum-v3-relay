@@ -44,3 +44,13 @@ $storeTestExe=Join-Path $testDirectory 'recovery-store-tests.exe'
 if($LASTEXITCODE-ne 0){throw 'Recovery store tests failed to compile.'}
 & $storeTestExe
 if($LASTEXITCODE-ne 0){throw 'Recovery store tests failed.'}
+& (Join-Path $PSScriptRoot 'build-service.ps1') -OutputDirectory $testDirectory
+$serviceTestExe=Join-Path $testDirectory 'service-runtime-tests.exe'
+& $compiler /nologo /target:exe /out:$serviceTestExe /reference:System.Runtime.Serialization.dll /reference:System.Security.dll `
+  (Join-Path $PSScriptRoot 'ConfigModels.cs') (Join-Path $PSScriptRoot 'RecoveryPolicy.cs') `
+  (Join-Path $PSScriptRoot 'RecoverySession.cs') (Join-Path $PSScriptRoot 'WorkerProcess.cs') `
+  (Join-Path $PSScriptRoot 'WatchdogSupervisor.cs') (Join-Path $PSScriptRoot 'ServiceConfiguration.cs') `
+  (Join-Path $PSScriptRoot 'test_service.cs')
+if($LASTEXITCODE-ne 0){throw 'Service runtime tests failed to compile.'}
+& $serviceTestExe
+if($LASTEXITCODE-ne 0){throw 'Service runtime tests failed.'}

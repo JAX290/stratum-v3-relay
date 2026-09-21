@@ -58,8 +58,10 @@ public sealed class AppConfig
 
 public static class ConfigStore
 {
-    public static readonly string Folder=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"StratumSecureRelay");
-    public static readonly string FilePath=Path.Combine(Folder,"config.json");
+    private static string folder=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"StratumSecureRelay");
+    public static string Folder { get { return folder; } }
+    public static string FilePath { get { return Path.Combine(Folder,"config.json"); } }
+    internal static void SetServiceFolder(string value) { folder=Path.GetFullPath(value); }
     public static AppConfig Load(){try{using(FileStream stream=File.OpenRead(FilePath)){AppConfig value=(AppConfig)new DataContractJsonSerializer(typeof(AppConfig)).ReadObject(stream);value.Normalize();return value;}}catch{AppConfig value=new AppConfig();value.Normalize();return value;}}
     public static void Save(AppConfig config){config.Normalize();foreach(ServerProfile profile in config.Servers)profile.ProtectedToken=Protect(profile.SharedKey??"");ServerProfile primary=config.Servers[0];config.ServerAddress=primary.Address;config.ServerPort=primary.Port;config.ServerName=primary.ServerName;config.CertificateSha256=primary.CertificateSha256;config.ProtectedToken=primary.ProtectedToken;Directory.CreateDirectory(Folder);string temporary=FilePath+".tmp";using(FileStream stream=File.Create(temporary))new DataContractJsonSerializer(typeof(AppConfig)).WriteObject(stream,config);if(File.Exists(FilePath))File.Replace(temporary,FilePath,null);else File.Move(temporary,FilePath);}
     public static string Protect(string value){byte[] data=Encoding.UTF8.GetBytes(value);return Convert.ToBase64String(ProtectedData.Protect(data,null,DataProtectionScope.CurrentUser));}

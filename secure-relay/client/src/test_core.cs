@@ -40,6 +40,7 @@ public static class ClientCoreTests
         CheckStreamBoundaries();
         CheckSnapshotIsolation(relay);
         CheckListenerRollback();
+        CheckLocalHealth();
         return failures==0?0:1;
     }
     private static void CheckStreamBoundaries()
@@ -89,6 +90,19 @@ public static class ClientCoreTests
         Check(rejected&&!relay.IsRunning&&((System.Collections.ICollection)field.GetValue(relay)).Count==0,"port conflict rolls back all partially started listeners");
         relay.Stop();
         Check(!relay.Snapshot().Running,"stop remains safe after startup rollback");
+    }
+    private static void CheckLocalHealth()
+    {
+        RelayManager relay=new RelayManager(delegate(string value){});
+        Check(!relay.LocalHealthCheck(),"stopped relay is not healthy");
+        try {
+            relay.Start(new AppConfig{ListenAddress="127.0.0.1"},new List<PortRoute>{new PortRoute{LocalPort=0,RemotePort=9999}});
+            Check(relay.LocalHealthCheck(),"local health does not require a reachable pool or shares");
+            var field=typeof(RelayManager).GetField("listeners",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic);
+            var listeners=(List<System.Net.Sockets.TcpListener>)field.GetValue(relay);
+            listeners[0].Stop();
+            Check(!relay.LocalHealthCheck(),"lost listening socket fails local health check");
+        } finally {relay.Stop();}
     }
     private static void Feed(MinerConnection c,string value,bool fromMiner){byte[] data=System.Text.Encoding.UTF8.GetBytes(value);c.Observe(data,data.Length,fromMiner);}
 }
