@@ -15,13 +15,14 @@ if($LASTEXITCODE-ne 0){throw 'Client regression tests failed.'}
 
 # Compile the same core without WinForms/Drawing or any UI source files.
 $coreSources=@('AppIdentity.cs','ConfigModels.cs','SystemStatus.cs','RelayManager.cs',
-  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','DutyStatus.cs','AdminAccessPolicy.cs','AccessPackage.cs','MigrationBackup.cs','SignedUpdate.cs','RemoteControl.cs','NetworkHelper.cs','NetworkRecovery.cs','ClientRepair.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs','FailoverPolicy.cs','RelayFailoverController.cs') |
+  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','DutyStatus.cs','AdminAccessPolicy.cs','AccessPackage.cs','MigrationBackup.cs','SignedUpdate.cs','RemoteControl.cs','SupportBundle.cs','NetworkHelper.cs','NetworkRecovery.cs','ClientRepair.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs','FailoverPolicy.cs','RelayFailoverController.cs') |
   ForEach-Object { Join-Path $PSScriptRoot $_ }
 $coreLibrary=Join-Path $testDirectory 'RelayCore.dll'
 $coreAssemblyInfo=Join-Path $testDirectory 'CoreVersion.cs'
 Set-Content -LiteralPath $coreAssemblyInfo -Encoding UTF8 -Value ('[assembly: System.Reflection.AssemblyVersion("'+$version+'.0")]')
 & $compiler /nologo /target:library /out:$coreLibrary /reference:System.dll /reference:System.Core.dll `
-  /reference:System.Runtime.Serialization.dll /reference:System.Security.dll /reference:System.Web.Extensions.dll $coreSources $coreAssemblyInfo
+  /reference:System.Runtime.Serialization.dll /reference:System.Security.dll /reference:System.Web.Extensions.dll `
+  /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll $coreSources $coreAssemblyInfo
 if($LASTEXITCODE-ne 0){throw 'Core must compile without Windows Forms.'}
 $headlessTestExe=Join-Path $testDirectory 'headless-core-tests.exe'
 & $compiler /nologo /target:exe /out:$headlessTestExe /reference:$coreLibrary (Join-Path $PSScriptRoot 'test_core.cs')
@@ -107,6 +108,13 @@ $remoteControlTestExe=Join-Path $testDirectory 'remote-control-tests.exe'
 if($LASTEXITCODE-ne 0){throw 'Remote control tests failed to compile.'}
 & $remoteControlTestExe
 if($LASTEXITCODE-ne 0){throw 'Remote control tests failed.'}
+
+$supportBundleTestExe=Join-Path $testDirectory 'support-bundle-tests.exe'
+& $compiler /nologo /target:exe /out:$supportBundleTestExe /reference:$coreLibrary `
+  /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll (Join-Path $PSScriptRoot 'test_support_bundle.cs')
+if($LASTEXITCODE-ne 0){throw 'Support bundle tests failed to compile.'}
+& $supportBundleTestExe
+if($LASTEXITCODE-ne 0){throw 'Support bundle tests failed.'}
 
 # WIN-P01 first acceptance stage: recovery decisions, without installing services.
 $recoveryTestExe=Join-Path $testDirectory 'recovery-policy-tests.exe'

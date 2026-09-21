@@ -152,18 +152,18 @@ Windows 客户端从 `2.3.0` 起保留原桌面版操作，并支持无需用户
 
 ### Windows 无人值守服务
 
-从当前 `client-v2.3.10` 发布页下载签名的 `MulinSenRelayService-2.3.10.exe` 与 `install-service-2.3.10.ps1`，放在同一目录。若“文件属性 → 数字签名”尚未显示签名有效，同时下载并解压 `publisher-certificate-tools-2.3.10.zip`，核对固定指纹后先运行其中的内部发布者证书安装脚本。随后以管理员身份打开 Windows PowerShell：
+从当前 `client-v2.3.11` 发布页下载签名的 `MulinSenRelayService-2.3.11.exe` 与 `install-service-2.3.11.ps1`，放在同一目录。若“文件属性 → 数字签名”尚未显示签名有效，同时下载并解压 `publisher-certificate-tools-2.3.11.zip`，核对固定指纹后先运行其中的内部发布者证书安装脚本。随后以管理员身份打开 Windows PowerShell：
 
 ```powershell
-.\install-service-2.3.10.ps1 -Mode Plan
-.\install-service-2.3.10.ps1 -Mode Install -ServiceExecutable .\MulinSenRelayService-2.3.10.exe
+.\install-service-2.3.11.ps1 -Mode Plan
+.\install-service-2.3.11.ps1 -Mode Install -ServiceExecutable .\MulinSenRelayService-2.3.11.exe
 ```
 
 `Install` 会核对发布者签名和固定证书指纹，备份已有服务文件，将当前用户保存的共享密钥直接转换成机器级 DPAPI 加密配置，并把服务注册为手动启动；此时不会抢占桌面版监听端口。确认提示成功后，在桌面版托盘选择“退出”，再执行：
 
 ```powershell
-.\install-service-2.3.10.ps1 -Mode Activate
-.\install-service-2.3.10.ps1 -Mode Status
+.\install-service-2.3.11.ps1 -Mode Activate
+.\install-service-2.3.11.ps1 -Mode Status
 ```
 
 看到服务为 `Running` 且状态包含 `Healthy` 后，服务将在电脑重启后由 LocalService 延迟自动启动，无需用户登录。需要恢复桌面版时执行 `-Mode Rollback`；需要删除服务注册时执行 `-Mode Uninstall`。卸载会保留机器加密配置和备份，便于恢复。
@@ -187,6 +187,8 @@ Windows 客户端的“检查并修复”会先检查当前配置、程序与监
 桌面版管理员设置中的“检查并升级”只接受仓库正式 Release。程序先从 `SHA256SUMS.txt` 核对文件摘要，再核对 EXE 内嵌版本、Windows Authenticode 信任结果和固定发布者证书指纹。发布说明可用 `rollout: 25` 这类标记将新版稳定分配给 25% 的电脑；未进入当前批次的电脑不会下载或替换。确认安装后，独立升级助手先保留 `previous.exe`，替换完成并等到新主界面打开；60 秒内未成功或新进程提前退出时自动恢复上一版本并显示回退提示。Windows 服务版仍通过签名的服务安装脚本升级，以保留 LocalService 配置和回退记录。
 
 升级 VPS 和 Windows 2.3.10 后，Tailscale 管理员可在面板“总览 → 矿场运行总览”查看每台值守电脑的当前线路、最近 Share、累计失败重连和版本。右侧只提供“诊断、重连、升级”三种固定操作；指令有效 10 分钟，通过该客户端独有共享密钥保护的 TLS 心跳领取，不能携带脚本或命令行。客户端完成后会在后续心跳回传“执行中、已完成或失败”。桌面版可执行三种操作；Windows 服务版支持诊断和重连，服务升级继续使用签名安装脚本，以维持 SCM 权限、机器级配置和安装回退。
+
+需要技术人员排查时，值守员可直接在首页点击“导出技术支持包”。ZIP 中包含 `report.txt`、`connection-timeline.csv`、`logs.txt` 和带 SHA-256 的 `manifest.txt`。程序只读取允许的诊断、崩溃、更新错误和服务状态日志，单包日志内容最多约 512 KiB；不会打包配置文件、DPAPI 数据、迁移备份或接入文件。生成前会替换共享密钥、Authorization Bearer、密码字段、私钥块、Windows 用户目录、完整 VPS 地址以及完整 IPv4 地址；最终扫描仍发现已知密钥、私钥或完整 VPS 地址时会拒绝生成。
 
 ## 新增矿场或值守电脑
 

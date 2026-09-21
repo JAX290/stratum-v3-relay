@@ -157,10 +157,11 @@ public sealed class MainForm : Form
         settingsButtons.Controls.Add(save); settingsButtons.Controls.Add(validateConfig); settingsButtons.Controls.Add(backups);settingsButtons.Controls.Add(importAccess);settingsButtons.Controls.Add(exportMigration);settingsButtons.Controls.Add(importMigration);settingsButtons.Controls.Add(updateClient);settingsButtons.Controls.Add(help);
         settingsPage.Controls.Add(settingsButtons);settingsButtons.BringToFront();
 
-        FlowLayoutPanel dutyButtons=new FlowLayoutPanel();dutyButtons.Dock=DockStyle.Top;dutyButtons.Height=58;dutyButtons.Padding=new Padding(18,10,0,0);
+        FlowLayoutPanel dutyButtons=new FlowLayoutPanel();dutyButtons.Dock=DockStyle.Top;dutyButtons.Height=92;dutyButtons.Padding=new Padding(18,10,0,0);dutyButtons.WrapContents=true;
         Button contact=new Button();contact.Text="联系技术人员";contact.AutoSize=true;contact.Click+=delegate{ShowContactSupport();};
+        Button supportBundle=new Button();supportBundle.Text="导出技术支持包";supportBundle.AutoSize=true;supportBundle.Click+=delegate{ExportSupportBundle();};
         Button admin=new Button();admin.Text="管理员设置";admin.AutoSize=true;admin.Click+=delegate{UnlockAdministrator();};
-        dutyButtons.Controls.Add(repair);dutyButtons.Controls.Add(diagnostics);dutyButtons.Controls.Add(miners);dutyButtons.Controls.Add(start);dutyButtons.Controls.Add(stop);dutyButtons.Controls.Add(contact);dutyButtons.Controls.Add(admin);
+        dutyButtons.Controls.Add(repair);dutyButtons.Controls.Add(diagnostics);dutyButtons.Controls.Add(miners);dutyButtons.Controls.Add(start);dutyButtons.Controls.Add(stop);dutyButtons.Controls.Add(supportBundle);dutyButtons.Controls.Add(contact);dutyButtons.Controls.Add(admin);
         homePage.Controls.Add(dutyButtons);
 
         status.Text = "状态：未启动"; status.Dock = DockStyle.Top; status.Height = 122; status.Padding = new Padding(18, 12, 18, 4);
@@ -446,6 +447,12 @@ public sealed class MainForm : Form
             if(action.Action=="upgrade"){CheckAndInstallUpdate(null,action);return;}
             throw new InvalidOperationException("未允许的远程操作。");
         }catch(Exception ex){try{receipts.Save(action,"failed");}catch{}Log("VPS 受限操作失败："+ex.Message);}
+    }
+
+    private void ExportSupportBundle()
+    {
+        try{using(SaveFileDialog file=new SaveFileDialog()){file.Filter="木林森技术支持包|*.zip";file.DefaultExt="zip";file.AddExtension=true;file.FileName="木林森技术支持包-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+".zip";if(file.ShowDialog(this)!=DialogResult.OK)return;SupportBundleExporter.Create(file.FileName,CurrentConfig(),manager.Snapshot(),manager.MinerSnapshots(),logs.Text,ConfigStore.Folder);Log("脱敏技术支持包已导出："+file.FileName);MessageBox.Show(this,"技术支持包已生成。\r\n\r\n程序已扫描并排除共享密钥、密码、证书私钥、完整公网地址和完整矿机 IP。可以把这个 ZIP 交给技术人员。","导出完成",MessageBoxButtons.OK,MessageBoxIcon.Information);}}
+        catch(Exception ex){Log("技术支持包导出失败："+ex.Message);MessageBox.Show(this,"支持包没有生成。\r\n\r\n"+ex.Message,"导出失败",MessageBoxButtons.OK,MessageBoxIcon.Warning);}
     }
 
     private async void CheckAndInstallUpdate(Button button,RemoteClientAction remoteAction)

@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $source = Join-Path $PSScriptRoot 'StratumSecureRelay.cs'
 $configSource = Join-Path $PSScriptRoot 'ConfigModels.cs'
 $moduleSources = @('AppIdentity.cs','AppBrand.cs','SystemStatus.cs','CrashRecovery.cs',
-  'RelayManager.cs','RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','DutyStatus.cs','AdminAccessPolicy.cs','AdminLoginForm.cs','AccessPackage.cs','AccessPackageCodeForm.cs','MigrationBackup.cs','MigrationPasswordForm.cs','SignedUpdate.cs','RemoteControl.cs','NetworkHelper.cs','NetworkRecovery.cs','ClientRepair.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs','FailoverPolicy.cs','RelayFailoverController.cs',
+  'RelayManager.cs','RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','DutyStatus.cs','AdminAccessPolicy.cs','AdminLoginForm.cs','AccessPackage.cs','AccessPackageCodeForm.cs','MigrationBackup.cs','MigrationPasswordForm.cs','SignedUpdate.cs','RemoteControl.cs','SupportBundle.cs','NetworkHelper.cs','NetworkRecovery.cs','ClientRepair.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs','FailoverPolicy.cs','RelayFailoverController.cs',
   'MainForm.cs','DiagnosticReportForm.cs','MinerStatusForm.cs','BackupForm.cs') | ForEach-Object { Join-Path $PSScriptRoot $_ }
 $versionFile = Join-Path (Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent) 'version.json'
 if (-not (Test-Path -LiteralPath $versionFile)) { throw "Version file not found: $versionFile" }
@@ -26,7 +26,7 @@ try {
   & $compiler /nologo /target:winexe /optimize+ /platform:anycpu /win32icon:$icon /out:$output `
     /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll `
     /reference:System.Windows.Forms.dll /reference:System.Runtime.Serialization.dll `
-    /reference:System.Security.dll /reference:System.Web.Extensions.dll $source $configSource $moduleSources $assemblyInfo
+    /reference:System.Security.dll /reference:System.Web.Extensions.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll $source $configSource $moduleSources $assemblyInfo
   if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
 } finally {
   Remove-Item -LiteralPath $assemblyInfo -Force -ErrorAction SilentlyContinue
