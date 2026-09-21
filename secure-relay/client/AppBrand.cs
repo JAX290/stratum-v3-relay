@@ -37,4 +37,3 @@ public static partial class AppBrand
         form.Icon = LoadIcon();
     }
 }
-

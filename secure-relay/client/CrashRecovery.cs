@@ -52,4 +52,3 @@ public static class CrashRecovery
         int pid;try{if(Int32.TryParse(args[1],out pid)){try{Process.GetProcessById(pid).WaitForExit(30000);}catch{}}Thread.Sleep(3000);ProcessStartInfo start=new ProcessStartInfo(Application.ExecutablePath);start.UseShellExecute=false;Process.Start(start);}catch(Exception error){Log(error,"自动恢复助手");}return true;
     }
 }
-

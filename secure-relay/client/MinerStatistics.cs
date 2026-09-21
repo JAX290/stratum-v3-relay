@@ -71,4 +71,3 @@ public sealed class MinerConnection
     private static void AddIdentity(HashSet<string> values,object value){if(values.Count<32)values.Add(value.ToString());}
     private static IList Parameters(Dictionary<string,object> message){object value;if(message.TryGetValue("params",out value)&&value is IList)return (IList)value;return new object[0];}
 }
-

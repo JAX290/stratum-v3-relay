@@ -27,4 +27,3 @@ public static class SystemStatus
     [DllImport("kernel32.dll")] private static extern ulong GetTickCount64();
     public static TimeSpan Uptime { get { try { return TimeSpan.FromMilliseconds(GetTickCount64()); } catch { return TimeSpan.Zero; } } }
 }
-

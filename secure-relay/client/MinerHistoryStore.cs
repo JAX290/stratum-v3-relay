@@ -38,4 +38,3 @@ public static class MinerHistoryStore
     }
     public static List<MinerHistoryItem> Load(){try{using(FileStream stream=File.OpenRead(FilePath)){MinerHistoryFile file=(MinerHistoryFile)new DataContractJsonSerializer(typeof(MinerHistoryFile)).ReadObject(stream);return file.Miners??new List<MinerHistoryItem>();}}catch{return new List<MinerHistoryItem>();}}
 }
-

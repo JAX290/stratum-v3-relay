@@ -57,4 +57,3 @@ public static class NetworkHelper
         return value.Length == 4 && (value[0] == 10 || (value[0] == 172 && value[1] >= 16 && value[1] <= 31) || (value[0] == 192 && value[1] == 168));
     }
 }
-

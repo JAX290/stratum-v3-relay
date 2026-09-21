@@ -352,4 +352,3 @@ public sealed class RelayManager
 }
 
 public sealed class TlsConnection { public SslStream Stream; public TcpClient Client; }
-

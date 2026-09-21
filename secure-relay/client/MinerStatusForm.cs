@@ -51,4 +51,3 @@ public sealed class MinerStatusForm : Form
     private static string FormatBytes(long value){string[]u={"B","KB","MB","GB","TB"};double n=value;int i=0;while(n>=1024&&i<u.Length-1){n/=1024;i++;}return n.ToString(i==0?"0":"0.0")+u[i];}
     private static string FormatHashrate(double value){string[]u={"H/s","KH/s","MH/s","GH/s","TH/s","PH/s","EH/s"};int i=0;while(value>=1000&&i<u.Length-1){value/=1000;i++;}return value<=0?"--":value.ToString(value>=100?"0":value>=10?"0.0":"0.00")+" "+u[i];}
 }
-

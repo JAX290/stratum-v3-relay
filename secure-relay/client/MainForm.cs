@@ -344,4 +344,3 @@ public sealed class MainForm : Form
         ipTimer.Stop(); statusTimer.Stop(); logTimer.Stop(); manager.SaveMinerHistory(); manager.Stop(); tray.Visible = false;
     }
 }
-
