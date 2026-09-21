@@ -29,3 +29,18 @@ if($LASTEXITCODE-ne 0){throw 'Headless core tests failed to compile.'}
 & $headlessTestExe
 if($LASTEXITCODE-ne 0){throw 'Headless core tests failed.'}
 Write-Host "Test artifacts: $testDirectory"
+
+# WIN-P01 first acceptance stage: recovery decisions, without installing services.
+$recoveryTestExe=Join-Path $testDirectory 'recovery-policy-tests.exe'
+& $compiler /nologo /target:exe /out:$recoveryTestExe /reference:System.Runtime.Serialization.dll `
+  (Join-Path $PSScriptRoot 'RecoveryPolicy.cs') (Join-Path $PSScriptRoot 'test_recovery.cs')
+if($LASTEXITCODE-ne 0){throw 'Recovery policy tests failed to compile.'}
+& $recoveryTestExe
+if($LASTEXITCODE-ne 0){throw 'Recovery policy tests failed.'}
+$storeTestExe=Join-Path $testDirectory 'recovery-store-tests.exe'
+& $compiler /nologo /target:exe /out:$storeTestExe /reference:System.Runtime.Serialization.dll `
+  (Join-Path $PSScriptRoot 'RecoveryPolicy.cs') (Join-Path $PSScriptRoot 'RecoverySession.cs') `
+  (Join-Path $PSScriptRoot 'test_recovery_store.cs')
+if($LASTEXITCODE-ne 0){throw 'Recovery store tests failed to compile.'}
+& $storeTestExe
+if($LASTEXITCODE-ne 0){throw 'Recovery store tests failed.'}
