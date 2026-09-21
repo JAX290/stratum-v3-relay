@@ -8,7 +8,7 @@
 2. 完整运行测试，并确认升级和回滚说明仍适用。
 3. 在 GitHub 仓库 Actions secrets 配置 `WINDOWS_SIGNING_PFX_BASE64` 和 `WINDOWS_SIGNING_PFX_PASSWORD`。证书必须是专门用于自动发布的代码签名证书。
 4. 创建并推送与版本完全相同的标签，例如 `client-v2.2.2`。
-5. `Release Windows client` 工作流会重新测试、构建、签名、验证 Authenticode 签名、生成 `SHA256SUMS.txt`，随后创建 GitHub Release。
+5. `Release Windows client` 工作流会重新测试，构建并签名桌面客户端、Windows 服务、服务安装脚本和证书辅助脚本，核对固定发布证书指纹，同时附带不含私钥的公开证书并生成统一 `SHA256SUMS.txt`，随后创建 GitHub Release。
 
 缺少签名 secrets、标签与 `version.json` 不一致、测试失败或签名验证失败时，工作流会停止，不会发布未签名程序。
 

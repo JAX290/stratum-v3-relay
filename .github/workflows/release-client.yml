@@ -37,17 +37,55 @@ jobs:
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
           $password = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
           $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          if ($certificate.Thumbprint -ne 'D83C5C3E10822B6A4B45333EF41AFCC4F9156AAB') {
+            throw 'Signing certificate does not match the pinned 木林森 publisher certificate.'
+          }
           $env:WINDOWS_SIGNING_THUMBPRINT = $certificate.Thumbprint
           ./secure-relay/client/src/test-client.ps1
           ./secure-relay/client/src/build.ps1 -Sign -SigningThumbprint $certificate.Thumbprint
           $version = (Get-Content version.json -Raw | ConvertFrom-Json).windows_client
-          $file = "secure-relay/client/木林森中转${version}正式版.exe"
-          if ((Get-AuthenticodeSignature -LiteralPath $file).Status -ne 'Valid') { throw 'Authenticode signature validation failed.' }
-          $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $file
-          "{0}  {1}" -f $hash.Hash.ToLowerInvariant(), (Split-Path $file -Leaf) | Set-Content SHA256SUMS.txt -Encoding ascii
-          "RELEASE_FILE=$file" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          $desktop = "secure-relay/client/木林森中转${version}正式版.exe"
+          $serviceBuild = Join-Path $env:RUNNER_TEMP 'service-build'
+          ./secure-relay/client/src/build-service.ps1 -OutputDirectory $serviceBuild -Sign -SigningThumbprint $certificate.Thumbprint
+          $service = "secure-relay/client/木林森中转服务${version}.exe"
+          Move-Item -LiteralPath (Join-Path $serviceBuild 'MulinSenRelayService.exe') -Destination $service
+          $installer = "secure-relay/client/安装木林森中转服务${version}.ps1"
+          Copy-Item -LiteralPath secure-relay/client/src/install-service.ps1 -Destination $installer
+          $installerSignature = Set-AuthenticodeSignature -LiteralPath $installer -Certificate $certificate -HashAlgorithm SHA256 -TimestampServer 'http://timestamp.digicert.com'
+          if ($installerSignature.Status -ne 'Valid') { throw 'Installer script signing failed.' }
+          $trustInstaller = 'secure-relay/client/安装木林森内部签名证书.ps1'
+          $trustRemover = 'secure-relay/client/移除木林森内部签名证书.ps1'
+          $publicCertificate = 'secure-relay/client/木林森中转-内部代码签名证书.cer'
+          Copy-Item -LiteralPath secure-relay/client/src/signing/安装木林森内部签名证书.ps1 -Destination $trustInstaller
+          Copy-Item -LiteralPath secure-relay/client/src/signing/移除木林森内部签名证书.ps1 -Destination $trustRemover
+          Copy-Item -LiteralPath secure-relay/client/src/signing/木林森中转-内部代码签名证书.cer -Destination $publicCertificate
+          foreach ($script in @($trustInstaller, $trustRemover)) {
+            $scriptSignature = Set-AuthenticodeSignature -LiteralPath $script -Certificate $certificate -HashAlgorithm SHA256 -TimestampServer 'http://timestamp.digicert.com'
+            if ($scriptSignature.Status -ne 'Valid') { throw "Certificate helper signing failed: $script" }
+          }
+          $signedFiles = @($desktop, $service, $installer, $trustInstaller, $trustRemover)
+          foreach ($file in $signedFiles) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint) {
+              throw "Authenticode signature validation failed: $file"
+            }
+          }
+          $files = @($desktop, $service, $installer, $trustInstaller, $trustRemover, $publicCertificate)
+          $files | ForEach-Object {
+            $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $_
+            "{0}  {1}" -f $hash.Hash.ToLowerInvariant(), (Split-Path $_ -Leaf)
+          } | Set-Content SHA256SUMS.txt -Encoding ascii
+          "RELEASE_VERSION=$version" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
       - name: Publish GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create $env:GITHUB_REF_NAME $env:RELEASE_FILE SHA256SUMS.txt --verify-tag --generate-notes --title "木林森中转 $env:GITHUB_REF_NAME"
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            "secure-relay/client/木林森中转$($env:RELEASE_VERSION)正式版.exe" `
+            "secure-relay/client/木林森中转服务$($env:RELEASE_VERSION).exe" `
+            "secure-relay/client/安装木林森中转服务$($env:RELEASE_VERSION).ps1" `
+            "secure-relay/client/安装木林森内部签名证书.ps1" `
+            "secure-relay/client/移除木林森内部签名证书.ps1" `
+            "secure-relay/client/木林森中转-内部代码签名证书.cer" `
+            SHA256SUMS.txt --verify-tag --generate-notes --title "木林森中转 $env:GITHUB_REF_NAME"
