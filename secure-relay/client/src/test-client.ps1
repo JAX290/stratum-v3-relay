@@ -50,6 +50,7 @@ $serviceTestExe=Join-Path $testDirectory 'service-runtime-tests.exe'
   (Join-Path $PSScriptRoot 'ConfigModels.cs') (Join-Path $PSScriptRoot 'RecoveryPolicy.cs') `
   (Join-Path $PSScriptRoot 'RecoverySession.cs') (Join-Path $PSScriptRoot 'WorkerProcess.cs') `
   (Join-Path $PSScriptRoot 'WatchdogSupervisor.cs') (Join-Path $PSScriptRoot 'ServiceConfiguration.cs') `
+  (Join-Path $PSScriptRoot 'ServiceStoragePermissions.cs') `
   (Join-Path $PSScriptRoot 'test_service.cs')
 if($LASTEXITCODE-ne 0){throw 'Service runtime tests failed to compile.'}
 & $serviceTestExe

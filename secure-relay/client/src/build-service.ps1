@@ -5,7 +5,7 @@ New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 $compiler='C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $sources=@('AppIdentity.cs','ConfigModels.cs','RelayManager.cs','RelayStatus.cs',
  'MinerStatistics.cs','MinerHistoryStore.cs','RecoveryPolicy.cs','RecoverySession.cs',
- 'WorkerProcess.cs','WatchdogSupervisor.cs','ServiceConfiguration.cs','RelayServiceHost.cs') |
+ 'WorkerProcess.cs','WatchdogSupervisor.cs','ServiceConfiguration.cs','ServiceStoragePermissions.cs','RelayServiceHost.cs') |
  ForEach-Object {Join-Path $PSScriptRoot $_}
 $versionFile=Join-Path (Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent) 'version.json'
 $version=(Get-Content -LiteralPath $versionFile -Raw -Encoding UTF8|ConvertFrom-Json).windows_client

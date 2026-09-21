@@ -34,8 +34,10 @@
 - `ServiceConfiguration.cs`：在内存中转换配置，使用 LocalMachine DPAPI 加密；不写明文、不改变桌面密钥，导入时校验监听、端口、证书身份和共享密钥。机器作用域加密必须配合受限目录 ACL，不能独立替代访问控制。
 - `build-service.ps1 -OutputDirectory <临时目录>`：编译开发组件。测试入口同时验证桌面程序、无界面核心、恢复基础及服务开发组件，不覆盖历史 EXE。
 
-本地 119 项检查通过：桌面及无界面核心各 28 项、策略 29 项、存储 15 项、服务运行基础 19 项。其中真实子进程测试验证心跳、退出、无响应、限定时间内终止，以及监督进程崩溃后的子进程清理；完整重启预算流程使用受控时间和模拟进程，避免等待生产冷却时间。
+本地 122 项检查通过：桌面及无界面核心各 28 项、策略 29 项、存储 15 项、服务运行基础 22 项。其中真实子进程测试验证心跳、退出、无响应、限定时间内终止，以及监督进程崩溃后的子进程清理；完整重启预算流程使用受控时间和模拟进程，避免等待生产冷却时间。
 
 尚未验收：服务注册与 SCM 启停、LocalService 实际运行权限、原用户到服务账户的安装迁移、安装失败回退、无用户登录与电脑重启后的恢复、签名服务安装包。当前没有安装向导，不提供生产服务安装命令，不得将开发组件当作正式桌面 EXE 使用。WIN-P01 保留进行中。
 
 实现依据：[Windows Job Objects](https://learn.microsoft.com/zh-cn/windows/win32/procthread/job-objects)、[ServiceBase.OnStop](https://learn.microsoft.com/en-us/dotnet/api/system.serviceprocess.servicebase.onstop)。
+
+服务控制协议已固定字节编码并独立读取 UTF-8，避免 Windows 控制台代码页和 BOM 导致启动命令失效；该修复远端 CI 已通过。新增 ServiceStoragePermissions：生成受限目录权限模板，启动前验证目录和文件权限、所有者及目录链接。普通用户可访问的配置会阻止启动；权限实际写入由后续安装流程负责。

@@ -32,7 +32,10 @@ public sealed class RelayServiceHost : ServiceBase
     private void RunSupervisor()
     {
         try {
+            ServiceStoragePermissions.VerifyDirectory(DataFolder);
             if(!File.Exists(Path.Combine(DataFolder,"service-config.dat")))throw new IOException();
+            ServiceStoragePermissions.VerifyFile(Path.Combine(DataFolder,"service-config.dat"));
+            ServiceStoragePermissions.VerifyFile(Path.Combine(DataFolder,"recovery.json"));
             using(RecoverySession recovery=new RecoverySession(Path.Combine(DataFolder,"recovery.json"),false))
             using(WatchdogSupervisor supervisor=new WatchdogSupervisor(recovery,delegate {
                 return new WorkerProcess(Assembly.GetExecutingAssembly().Location,"--worker");
@@ -76,6 +79,8 @@ public sealed class RelayServiceHost : ServiceBase
         if(startCommand!="GO")return 2;
         RelayManager manager=null;
         try {
+            ServiceStoragePermissions.VerifyDirectory(DataFolder);
+            ServiceStoragePermissions.VerifyFile(Path.Combine(DataFolder,"service-config.dat"));
             ConfigStore.SetServiceFolder(DataFolder);
             byte[] encrypted=File.ReadAllBytes(Path.Combine(DataFolder,"service-config.dat"));
             AppConfig config=ServiceConfiguration.Decode(encrypted);

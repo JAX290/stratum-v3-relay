@@ -120,6 +120,13 @@ public static class ServiceTests
         config.Servers[0].CertificateSha256="bad";rejected=false;
         try{ServiceConfiguration.Encode(config);}catch(InvalidDataException){rejected=true;}
         Check(rejected,"invalid certificate identity blocks service export");
+        var permissions=ServiceStoragePermissions.CreateDirectorySecurity();
+        Check(permissions.AreAccessRulesProtected&&ServiceStoragePermissions.IsRestricted(permissions),"service ACL disables inheritance and limits principals");
+        permissions.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+            new System.Security.Principal.SecurityIdentifier("S-1-1-0"),System.Security.AccessControl.FileSystemRights.Read,
+            System.Security.AccessControl.AccessControlType.Allow));
+        Check(!ServiceStoragePermissions.IsRestricted(permissions),"world-readable service data rejected");
+        Check(!ServiceStoragePermissions.IsRestricted(new System.Security.AccessControl.DirectorySecurity()),"missing service permissions rejected");
         Console.WriteLine("Service test artifacts: "+directory);
     }
 }
