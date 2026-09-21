@@ -2,7 +2,9 @@
 """Authenticated V3 administration panel for Stratum relay configuration."""
 
 import json
+import base64
 import hashlib
+import hmac
 import os
 import re
 import secrets
@@ -52,6 +54,7 @@ SECURE_RELAY_CONFIG = Path(os.getenv("SECURE_RELAY_CONFIG", "/etc/stratum-secure
 SECURE_RELAY_STATE = Path(os.getenv("SECURE_RELAY_STATE", "/var/lib/stratum-secure-relay/sites.json"))
 SECURE_RELAY_MONITOR_STATE = Path(os.getenv("SECURE_RELAY_MONITOR_STATE", "/var/lib/stratum-secure-relay/monitor.json"))
 SECURE_RELAY_EVENT_FILE = Path(os.getenv("SECURE_RELAY_EVENT_FILE", "/var/lib/stratum-secure-relay/events.jsonl"))
+ACCESS_PACKAGE_DIR = Path(os.getenv("ACCESS_PACKAGE_DIR", "/var/lib/stratum-monitor/access-packages"))
 VERSIONS = load_versions()
 PANEL_VERSION = VERSIONS["panel"]
 CURRENT_CLIENT_VERSION = VERSIONS["windows_client"]
@@ -561,8 +564,36 @@ def client_access_context(config):
         rows.append(row)
     configured_host = str(config.get("settings", {}).get("secure_relay_host", "")).strip()
     relay_status = detect_relay_public_ip(config)
+    pending = session.get("access_package", {}) if isinstance(session.get("access_package", {}), dict) else {}
+    if int(pending.get("expires", 0) or 0) <= int(time.time()):
+        session.pop("access_package", None)
+        pending = {}
     return {"installed": bool(relay), "host": configured_host or relay_status.get("host", "") or "请填写VPS域名或公网IP",
-        "port": int(relay.get("listen_port", 0) or 0), "certificate": certificate, "clients": rows}
+        "port": int(relay.get("listen_port", 0) or 0), "certificate": certificate, "clients": rows,
+        "pending_package": pending}
+
+
+def _access_package_keystream(key, nonce, length):
+    output = bytearray()
+    counter = 1
+    while len(output) < length:
+        output.extend(hmac.new(key, nonce + counter.to_bytes(4, "big"), hashlib.sha256).digest())
+        counter += 1
+    return bytes(output[:length])
+
+
+def create_access_package(payload, code, package_id, expires):
+    salt, nonce = secrets.token_bytes(16), secrets.token_bytes(16)
+    keys = hashlib.pbkdf2_hmac("sha256", code.encode("ascii"), salt, 200000, dklen=64)
+    plain = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    stream = _access_package_keystream(keys[:32], nonce, len(plain))
+    cipher = bytes(left ^ right for left, right in zip(plain, stream))
+    aad = f"MSRA1|{package_id}|{expires}|1".encode("ascii")
+    digest = hmac.new(keys[32:], aad + salt + nonce + cipher, hashlib.sha256).digest()
+    return json.dumps({"format": "MSRA1", "id": package_id, "expires": expires, "one_time": True,
+        "salt": base64.b64encode(salt).decode(), "nonce": base64.b64encode(nonce).decode(),
+        "ciphertext": base64.b64encode(cipher).decode(), "mac": base64.b64encode(digest).decode()},
+        ensure_ascii=False, separators=(",", ":")) + "\n"
 
 
 def site_overview_rows(now=None):
@@ -1266,6 +1297,64 @@ def reveal_client_secret(client_id):
     session["revealed_client_until"] = int(time.time()) + 60
     append_audit(f"查看客户端共享密钥:{client_id}")
     return redirect(url_for("dashboard_page", page="access"))
+
+
+@app.route("/client-access/<client_id>/package", methods=["POST"])
+def generate_client_access_package(client_id):
+    if not current_tailscale_admin():
+        return "Not found", 404
+    if not csrf_ok():
+        return "Forbidden", 403
+    client = find_relay_client(client_id)
+    if not client:
+        return "Not found", 404
+    config = store.load()
+    access = client_access_context(config)
+    if not access.get("certificate", {}).get("available") or not access.get("host") or not access.get("port"):
+        flash("无法生成：请先确认公网地址、TLS 端口和证书指纹均可读取。", "error")
+        return redirect(url_for("dashboard_page", page="access"))
+    try:
+        hours = max(1, min(72, int(request.form.get("hours", "24") or 24)))
+    except ValueError:
+        hours = 24
+    now, package_id = int(time.time()), secrets.token_hex(16)
+    expires = now + hours * 3600
+    code = "-".join(secrets.token_hex(3).upper() for _ in range(4))
+    payload = {"site_name": str(client.get("name") or client_id), "client_id": client_id,
+        "address": access["host"], "port": access["port"],
+        "server_name": access["certificate"].get("name", ""),
+        "certificate_sha256": access["certificate"]["fingerprint"],
+        "shared_key": str(client.get("token", "")), "created": now, "expires": expires}
+    package = create_access_package(payload, code.replace("-", ""), package_id, expires)
+    ACCESS_PACKAGE_DIR.mkdir(parents=True, exist_ok=True)
+    path = ACCESS_PACKAGE_DIR / f"{package_id}.msrelay"
+    ConfigStore._atomic_write(path, package, mode=0o600)
+    session["access_package"] = {"id": package_id, "client_id": client_id, "code": code,
+        "expires": expires, "expires_text": beijing_time(expires), "downloaded": False}
+    append_audit(f"生成一次性加密接入文件:{client_id}:{package_id}")
+    flash("加密接入文件已生成。导入口令只显示到过期或下载完成，请安全交给对应电脑。", "success")
+    return redirect(url_for("dashboard_page", page="access"))
+
+
+@app.route("/client-access/package/<package_id>/download")
+def download_client_access_package(package_id):
+    if not current_tailscale_admin():
+        return "Not found", 404
+    pending = session.get("access_package", {})
+    if (not isinstance(pending, dict) or pending.get("id") != package_id
+            or int(pending.get("expires", 0) or 0) <= int(time.time()) or pending.get("downloaded")):
+        return "Not found", 404
+    path = ACCESS_PACKAGE_DIR / f"{package_id}.msrelay"
+    if not path.is_file():
+        return "Not found", 404
+    pending["downloaded"] = True
+    pending["code"] = ""
+    session["access_package"] = pending
+    append_audit(f"下载一次性加密接入文件:{pending.get('client_id', '')}:{package_id}")
+    response = send_from_directory(str(ACCESS_PACKAGE_DIR), path.name, as_attachment=True,
+        download_name=f"mulinsen-access-{pending.get('client_id', 'client')}.msrelay")
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
 
 
 @app.route("/client-access/<client_id>/delete", methods=["GET", "POST"])

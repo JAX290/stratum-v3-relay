@@ -1,4 +1,7 @@
 import json
+import base64
+import hashlib
+import hmac
 import os
 import tempfile
 import unittest
@@ -44,6 +47,7 @@ class AdminV3Test(unittest.TestCase):
         admin.SECURE_RELAY_STATE = root / "relay-sites.json"
         admin.SECURE_RELAY_MONITOR_STATE = root / "relay-monitor.json"
         admin.SECURE_RELAY_EVENT_FILE = root / "relay-events.jsonl"
+        admin.ACCESS_PACKAGE_DIR = root / "access-packages"
         admin.store = ConfigStore(config_path, root / "history", admin.AUDIT_FILE)
         admin.app.config.update(TESTING=True, SECRET_KEY="test")
         admin.LOGIN_FAILURES.clear()
@@ -395,6 +399,36 @@ class AdminV3Test(unittest.TestCase):
         self.assertNotIn(secret.encode(), response.data)
         self.assertNotIn(b"/secret/server.key", response.data)
         self.assertEqual(response.headers["Cache-Control"], "no-store, max-age=0")
+
+    def test_access_package_is_encrypted_authenticated_and_downloaded_once(self):
+        secret = "b" * 64
+        certificate = {"available": True, "name": "relay.example.com", "fingerprint": "F" * 64}
+        admin.SECURE_RELAY_CONFIG.write_text(json.dumps({"listen_port": 452, "certificate": "server.crt",
+            "clients": [{"id": "mine-a", "name": "一号矿场", "token": secret, "enabled": True}]}), encoding="utf-8")
+        headers = {"Tailscale-User-Login": "owner@example.com"}
+        with patch.object(admin, "certificate_summary", return_value=certificate), \
+                patch.object(admin, "detect_relay_public_ip", return_value={"ok": True, "host": "198.51.100.8"}):
+            response = self.client.post("/client-access/mine-a/package", data={"csrf": "token", "hours": "24"}, headers=headers)
+        self.assertEqual(response.status_code, 302)
+        with self.client.session_transaction() as session:
+            pending = dict(session["access_package"])
+        package_path = admin.ACCESS_PACKAGE_DIR / f"{pending['id']}.msrelay"
+        raw = package_path.read_text(encoding="utf-8")
+        self.assertNotIn(secret, raw)
+        envelope = json.loads(raw)
+        salt, nonce, cipher = (base64.b64decode(envelope[name]) for name in ("salt", "nonce", "ciphertext"))
+        keys = hashlib.pbkdf2_hmac("sha256", pending["code"].replace("-", "").encode(), salt, 200000, dklen=64)
+        aad = f"MSRA1|{envelope['id']}|{envelope['expires']}|1".encode()
+        self.assertTrue(hmac.compare_digest(base64.b64decode(envelope["mac"]),
+            hmac.new(keys[32:], aad + salt + nonce + cipher, hashlib.sha256).digest()))
+        stream = admin._access_package_keystream(keys[:32], nonce, len(cipher))
+        payload = json.loads(bytes(a ^ b for a, b in zip(cipher, stream)))
+        self.assertEqual(payload["shared_key"], secret)
+        download = self.client.get(f"/client-access/package/{pending['id']}/download", headers=headers)
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(download.headers["Cache-Control"], "no-store, max-age=0")
+        download.close()
+        self.assertEqual(self.client.get(f"/client-access/package/{pending['id']}/download", headers=headers).status_code, 404)
 
     def test_create_and_rename_farm_preserve_legacy_access_and_settings(self):
         secret = "a" * 64

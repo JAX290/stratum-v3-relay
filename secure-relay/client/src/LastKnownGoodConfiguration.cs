@@ -182,7 +182,7 @@ public sealed class LastKnownGoodStore
         return result;
     }
 
-    private static AppConfig Clone(AppConfig source)
+    internal static AppConfig Clone(AppConfig source)
     {
         AppConfig result = new AppConfig {
             ServerAddress = source.ServerAddress,

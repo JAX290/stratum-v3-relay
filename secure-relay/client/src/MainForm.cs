@@ -143,13 +143,14 @@ public sealed class MainForm : Form
         Button save = new Button(); save.Text = "保存设置"; save.AutoSize = true; save.Click += delegate { SaveConfig(true); };
         validateConfig.Text = "验证并设为可用配置"; validateConfig.AutoSize = true; validateConfig.Click += delegate { ValidateAndPromoteConfig(); };
         Button backups = new Button(); backups.Text = "备用 VPS 设置"; backups.AutoSize = true; backups.Click += delegate { EditBackups(); };
+        Button importAccess=new Button();importAccess.Text="导入加密接入文件";importAccess.AutoSize=true;importAccess.Click+=delegate{ImportAccessPackage();};
         Button miners = new Button(); miners.Text="矿机状态"; miners.AutoSize=true; miners.Click+=delegate{new MinerStatusForm(manager).Show(this);};
         diagnostics.Text="一键诊断"; diagnostics.AutoSize=true; diagnostics.Click+=delegate{RunDiagnostics();};
         repair.Text="检查并修复";repair.AutoSize=true;repair.Click+=delegate{RunCheckAndRepair();};
         Button help = new Button(); help.Text = "各项说明"; help.AutoSize = true; help.Click += delegate { ShowHelp(); };
         start.Text = "启动中转"; start.AutoSize = true; start.Click += delegate { StartRelay(); };
         stop.Text = "停止"; stop.AutoSize = true; stop.Enabled = false; stop.Click += delegate { relayRequested=false;manager.Stop();manager.SetRecoveryState("","");SetRunning(false); };
-        settingsButtons.Controls.Add(save); settingsButtons.Controls.Add(validateConfig); settingsButtons.Controls.Add(backups);settingsButtons.Controls.Add(help);
+        settingsButtons.Controls.Add(save); settingsButtons.Controls.Add(validateConfig); settingsButtons.Controls.Add(backups);settingsButtons.Controls.Add(importAccess);settingsButtons.Controls.Add(help);
         settingsPage.Controls.Add(settingsButtons);settingsButtons.BringToFront();
 
         FlowLayoutPanel dutyButtons=new FlowLayoutPanel();dutyButtons.Dock=DockStyle.Top;dutyButtons.Height=58;dutyButtons.Padding=new Padding(18,10,0,0);
@@ -395,6 +396,16 @@ public sealed class MainForm : Form
     private void EditBackups()
     {
         using (BackupForm form = new BackupForm(backupProfiles,manager,siteName.Text.Trim())) if (form.ShowDialog(this) == DialogResult.OK) backupProfiles = form.Profiles;
+    }
+
+    private async void ImportAccessPackage()
+    {
+        using(OpenFileDialog file=new OpenFileDialog()){file.Filter="木林森加密接入文件|*.msrelay|所有文件|*.*";file.Title="选择加密接入文件";if(file.ShowDialog(this)!=DialogResult.OK)return;
+            using(AccessPackageCodeForm code=new AccessPackageCodeForm()){if(code.ShowDialog(this)!=DialogResult.OK)return;
+                try{string json=File.ReadAllText(file.FileName,Encoding.UTF8);AccessPackageData package=AccessPackageCodec.Decrypt(json,code.ImportCode,DateTime.UtcNow);UsedAccessPackageStore used=new UsedAccessPackageStore(ConfigStore.Folder);if(used.IsUsed(package.PackageId))throw new InvalidOperationException("这个一次性接入文件已经导入过。");AppConfig imported=AccessPackageCodec.Apply(CurrentConfig(),package);CompleteConfigurationValidator validator=new CompleteConfigurationValidator();ConfigurationValidationEvidence evidence=await validator.ValidateAsync(imported,delegate(ServerProfile profile,string name,CancellationToken cancellation){return manager.TestProfileAsync(profile,name,cancellation);},CancellationToken.None);used.MarkUsed(package.PackageId);ConfigStore.Save(imported);new LastKnownGoodStore(ConfigStore.Folder).Promote(imported,evidence);ApplyConfig(imported);Log("加密接入文件已导入并通过完整验证："+package.SiteName+"。");MessageBox.Show(this,"接入资料已自动填写并通过本地端口、TLS 证书、共享密钥和 VPS 连通性验证。\r\n\r\n此一次性文件已在本机标记为使用。","导入成功",MessageBoxButtons.OK,MessageBoxIcon.Information);}
+                catch(Exception ex){Log("加密接入文件导入失败："+ex.Message);MessageBox.Show(this,"接入文件没有导入。\r\n\r\n"+ex.Message,"导入失败",MessageBoxButtons.OK,MessageBoxIcon.Warning);}
+            }
+        }
     }
 
     private async void RunDiagnostics()
