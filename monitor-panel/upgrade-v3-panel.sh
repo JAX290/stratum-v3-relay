@@ -103,8 +103,9 @@ ln -sfn "$canonical_audit" /var/log/stratum-audit.jsonl
 # Migrate the Internet-facing TLS process from root to its dedicated account.
 id stratum-relay >/dev/null 2>&1 || useradd --system --home /nonexistent --shell /usr/sbin/nologin stratum-relay
 install -d -o root -g stratum-relay -m 0750 /etc/stratum-secure-relay
-install -d -o stratum-relay -g stratum-relay -m 0750 /var/lib/stratum-secure-relay
+install -d -o stratum-relay -g stratum-relay -m 2770 /var/lib/stratum-secure-relay
 chown -R stratum-relay:stratum-relay /var/lib/stratum-secure-relay
+chmod 2770 /var/lib/stratum-secure-relay
 python3 - <<'PY'
 import json, os, shutil, tempfile
 path = "/etc/stratum-secure-relay.json"

@@ -16,8 +16,9 @@ test -f /etc/stratum-v3.json || { echo "Deploy Stratum V3 first: /etc/stratum-v3
 test -f /etc/stratum-inspector.json || { echo "Deploy Stratum V3 first: /etc/stratum-inspector.json is missing." >&2; exit 1; }
 id stratum-relay >/dev/null 2>&1 || useradd --system --home /nonexistent --shell /usr/sbin/nologin stratum-relay
 install -d -o root -g stratum-relay -m 0750 /etc/stratum-secure-relay
-install -d -o stratum-relay -g stratum-relay -m 0750 /var/lib/stratum-secure-relay
+install -d -o stratum-relay -g stratum-relay -m 2770 /var/lib/stratum-secure-relay
 chown -R stratum-relay:stratum-relay /var/lib/stratum-secure-relay
+chmod 2770 /var/lib/stratum-secure-relay
 
 python3 - <<'PY'
 import json

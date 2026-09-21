@@ -55,6 +55,7 @@ SECURE_RELAY_STATE = Path(os.getenv("SECURE_RELAY_STATE", "/var/lib/stratum-secu
 SECURE_RELAY_MONITOR_STATE = Path(os.getenv("SECURE_RELAY_MONITOR_STATE", "/var/lib/stratum-secure-relay/monitor.json"))
 SECURE_RELAY_EVENT_FILE = Path(os.getenv("SECURE_RELAY_EVENT_FILE", "/var/lib/stratum-secure-relay/events.jsonl"))
 ACCESS_PACKAGE_DIR = Path(os.getenv("ACCESS_PACKAGE_DIR", "/var/lib/stratum-monitor/access-packages"))
+CLIENT_ACTION_FILE = Path(os.getenv("SECURE_RELAY_CLIENT_ACTIONS", "/var/lib/stratum-secure-relay/client-actions.json"))
 VERSIONS = load_versions()
 PANEL_VERSION = VERSIONS["panel"]
 CURRENT_CLIENT_VERSION = VERSIONS["windows_client"]
@@ -602,6 +603,7 @@ def site_overview_rows(now=None):
     state = load_json(SECURE_RELAY_STATE, {"sites": {}})
     sites = state.get("sites", {}) if isinstance(state.get("sites", {}), dict) else {}
     monitor = load_json(SECURE_RELAY_MONITOR_STATE, {"clients": {}}).get("clients", {})
+    action_results = load_json(CLIENT_ACTION_FILE, {"results": {}}).get("results", {})
     clients = relay.get("clients", []) if isinstance(relay.get("clients", []), list) else []
     if not clients and relay.get("token"):
         clients = [{"id": "default", "name": "默认矿场", "enabled": True}]
@@ -626,14 +628,43 @@ def site_overview_rows(now=None):
         current_connections = int(site.get("reported_connections", site.get("active", 0)) or 0)
         client_version = str(site.get("client_version", "未上报"))
         server_version = str(state.get("server_version", "未上报"))
+        action = action_results.get(client_id, {}) if isinstance(action_results.get(client_id, {}), dict) else {}
+        if site.get("last_action_id") and site.get("last_action_id") == action.get("id"):
+            action = {**action, "status": site.get("last_action_status"), "time": site.get("last_action_time", action.get("time", 0))}
+        action_labels = {"queued": "等待领取", "delivered": "已送达", "started": "执行中", "completed": "已完成", "failed": "失败"}
         rows.append({"id": client_id, "name": str(client.get("name") or client_id), "status": status,
             "status_text": text, "connections": current_connections,
             "miner_count": current_miners,
             "impact_miner_count": int(site.get("last_miner_count", site.get("miner_count", len(miners))) or 0), "last_ip": str(site.get("last_ip", "")),
             "last_seen": beijing_time(last_seen) if last_seen else "尚未连接", "last_seen_ts": last_seen,
             "client_version": client_version, "client_outdated": client_version not in {"未上报", CURRENT_CLIENT_VERSION},
-            "server_version": server_version, "server_outdated": server_version not in {"未上报", CURRENT_RELAY_VERSION}})
+            "server_version": server_version, "server_outdated": server_version not in {"未上报", CURRENT_RELAY_VERSION},
+            "current_vps": str(site.get("current_vps", "")) or "未上报",
+            "last_share": beijing_time(site.get("last_share", 0)) if site.get("last_share") else "尚无",
+            "reconnect_count": int(site.get("reconnect_count", 0) or 0),
+            "last_action": action_labels.get(str(action.get("status", "")), "尚无"),
+            "last_action_name": {"diagnose": "诊断", "reconnect": "重连", "upgrade": "升级"}.get(str(action.get("action", "")), "")})
     return rows
+
+
+def queue_client_action(client_id, action, now=None):
+    if action not in {"diagnose", "reconnect", "upgrade"}:
+        raise ValueError("unsupported client action")
+    now = int(now or time.time())
+    with file_lock(CLIENT_ACTION_FILE):
+        data = load_json(CLIENT_ACTION_FILE, {"clients": {}, "results": {}})
+        clients = data.get("clients", {}) if isinstance(data.get("clients", {}), dict) else {}
+        results = data.get("results", {}) if isinstance(data.get("results", {}), dict) else {}
+        action_id = secrets.token_hex(16)
+        clients[str(client_id)] = {"id": action_id, "action": action, "created": now, "expires": now + 600}
+        results[str(client_id)] = {"id": action_id, "action": action, "status": "queued", "time": now}
+        ConfigStore._atomic_write(CLIENT_ACTION_FILE,
+            json.dumps({"clients": clients, "results": results}, ensure_ascii=False, indent=2) + "\n", mode=0o660)
+    try:
+        os.chmod(Path(str(CLIENT_ACTION_FILE.resolve()) + ".lock"), 0o660)
+    except OSError:
+        pass
+    return action_id
 
 
 def parse_expiry(value):
@@ -1204,7 +1235,8 @@ def build_page_context(page):
         operation_timeline=operation_timeline(security), panel_version=PANEL_VERSION,
         current_client_version=CURRENT_CLIENT_VERSION, current_relay_version=CURRENT_RELAY_VERSION,
         relay_server_version=(sites[0]["server_version"] if sites else load_json(SECURE_RELAY_STATE, {}).get("server_version", "未上报")),
-        client_access=access, tailscale_access_available=bool(tailscale_identity()), csrf=session["csrf"])
+        client_access=access, tailscale_access_available=bool(tailscale_identity()),
+        remote_actions_available=current_tailscale_admin(), csrf=session["csrf"])
 
 
 @app.route("/")
@@ -1231,6 +1263,20 @@ def find_relay_client(client_id):
     if not clients and relay.get("token"):
         clients = [{"id": "default", "name": "默认客户端", "token": relay.get("token"), "enabled": True}]
     return next((item for item in clients if str(item.get("id", "")) == client_id), None)
+
+
+@app.route("/client-action/<client_id>/<action>", methods=["POST"])
+def request_client_action(client_id, action):
+    if not current_tailscale_admin():
+        return "Not found", 404
+    if not csrf_ok():
+        return "Forbidden", 403
+    if not find_relay_client(client_id) or action not in {"diagnose", "reconnect", "upgrade"}:
+        return "Not found", 404
+    action_id = queue_client_action(client_id, action)
+    append_audit(f"客户端受限操作:{client_id}:{action}:{action_id}")
+    flash({"diagnose": "诊断", "reconnect": "重连", "upgrade": "签名升级"}[action] + "指令已排队，客户端下次安全心跳时领取。", "success")
+    return redirect(url_for("dashboard_page", page="overview"))
 
 
 @app.route("/client-access/create", methods=["POST"])

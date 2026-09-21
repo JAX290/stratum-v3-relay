@@ -71,6 +71,7 @@ public sealed class MainForm : Form
         MinimumSize = new Size(760, 720);
         StartPosition = FormStartPosition.CenterScreen;
         manager = new RelayManager(Log);
+        manager.RemoteActionRequested+=HandleRemoteAction;
         BuildUi();
         LoadConfig();
         networkRecovery = new NetworkRecoveryMonitor(delegate{return relayRequested;},NetworkHelper.GetLanIPv4,
@@ -146,7 +147,7 @@ public sealed class MainForm : Form
         Button importAccess=new Button();importAccess.Text="导入加密接入文件";importAccess.AutoSize=true;importAccess.Click+=delegate{ImportAccessPackage();};
         Button exportMigration=new Button();exportMigration.Text="导出换机备份";exportMigration.AutoSize=true;exportMigration.Click+=delegate{ExportMigrationBackup();};
         Button importMigration=new Button();importMigration.Text="导入换机备份";importMigration.AutoSize=true;importMigration.Click+=delegate{ImportMigrationBackup();};
-        Button updateClient=new Button();updateClient.Text="检查并升级";updateClient.AutoSize=true;updateClient.Click+=delegate{CheckAndInstallUpdate(updateClient);};
+        Button updateClient=new Button();updateClient.Text="检查并升级";updateClient.AutoSize=true;updateClient.Click+=delegate{CheckAndInstallUpdate(updateClient,null);};
         Button miners = new Button(); miners.Text="矿机状态"; miners.AutoSize=true; miners.Click+=delegate{new MinerStatusForm(manager).Show(this);};
         diagnostics.Text="一键诊断"; diagnostics.AutoSize=true; diagnostics.Click+=delegate{RunDiagnostics();};
         repair.Text="检查并修复";repair.AutoSize=true;repair.Click+=delegate{RunCheckAndRepair();};
@@ -436,10 +437,21 @@ public sealed class MainForm : Form
         }
     }
 
-    private async void CheckAndInstallUpdate(Button button)
+    private void HandleRemoteAction(RemoteClientAction action)
     {
-        button.Enabled=false;button.Text="检查升级中…";try{LatestClientRelease release=await LatestClientReleaseChecker.CheckAsync(CancellationToken.None);if(!release.IsNewerThan(AppBrand.Version)){MessageBox.Show(this,"当前版本 "+AppBrand.Version+" 已是最新版。","无需升级",MessageBoxButtons.OK,MessageBoxIcon.Information);return;}if(!UpdateRolloutPolicy.IsEligible(Environment.MachineName,release.RolloutPercent)){MessageBox.Show(this,"新版 "+release.Version+" 正在分批发布，这台电脑暂未进入本批次。稍后再次检查即可。","分批升级",MessageBoxButtons.OK,MessageBoxIcon.Information);return;}string folder=Path.Combine(ConfigStore.Folder,"updates");Log("发现新版 "+release.Version+"，正在下载并校验摘要、版本和固定发布者签名。");string staged=await SignedUpdatePackage.DownloadAndVerifyAsync(release,folder,CancellationToken.None);if(MessageBox.Show(this,"新版 "+release.Version+" 已通过 SHA-256、文件版本和固定发布者签名校验。\r\n\r\n程序将退出并自动替换；如果新版本无法正常启动，会恢复上一版本。现在升级吗？","安装签名升级",MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return;SignedUpdateCoordinator.Begin(Application.ExecutablePath,staged,release.Version,SignedUpdatePackage.ComputeSha256(staged));exiting=true;Application.Exit();}
-        catch(Exception ex){Log("升级检查失败："+ex.Message);MessageBox.Show(this,"升级没有执行，当前版本保持不变。\r\n\r\n"+ex.Message,"升级失败",MessageBoxButtons.OK,MessageBoxIcon.Warning);}finally{if(!IsDisposed&&!Disposing){button.Enabled=true;button.Text="检查并升级";}}
+        if(IsDisposed||Disposing)return;if(InvokeRequired){BeginInvoke(new Action<RemoteClientAction>(HandleRemoteAction),action);return;}RemoteActionReceiptStore receipts=new RemoteActionReceiptStore(ConfigStore.Folder);Log("收到 VPS 受限操作："+action.Action+"（"+action.Id+"）。");
+        try{
+            if(action.Action=="diagnose"){RelaySnapshot snapshot=manager.Snapshot();List<ClientHealthIssue> issues=ClientHealthInspector.Inspect(CurrentConfig(),manager,Application.ExecutablePath);StringBuilder report=new StringBuilder();report.AppendLine("木林森中转远程诊断");report.AppendLine("时间："+DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));report.AppendLine("版本："+AppBrand.Version);report.AppendLine("运行："+(snapshot.Running?"是":"否"));report.AppendLine("在线矿机："+snapshot.ActiveMiners);report.AppendLine("当前连接："+snapshot.Active);report.AppendLine("失败重连："+snapshot.Failures);foreach(ClientHealthIssue issue in issues)report.AppendLine(issue.Code+"："+issue.Title+"；"+issue.Detail);Directory.CreateDirectory(ConfigStore.Folder);File.WriteAllText(Path.Combine(ConfigStore.Folder,"remote-diagnostic-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+".txt"),report.ToString(),Encoding.UTF8);receipts.Save(action,"completed");Log("VPS 远程诊断完成，报告已保存在本机数据目录。");return;}
+            if(action.Action=="reconnect"){if(!relayRequested)throw new InvalidOperationException("中转当前未启动，不能执行远程重连。");RunNetworkRecovery("VPS 管理面板请求重新连接");receipts.Save(action,"completed");return;}
+            if(action.Action=="upgrade"){CheckAndInstallUpdate(null,action);return;}
+            throw new InvalidOperationException("未允许的远程操作。");
+        }catch(Exception ex){try{receipts.Save(action,"failed");}catch{}Log("VPS 受限操作失败："+ex.Message);}
+    }
+
+    private async void CheckAndInstallUpdate(Button button,RemoteClientAction remoteAction)
+    {
+        bool remote=remoteAction!=null;if(button!=null){button.Enabled=false;button.Text="检查升级中…";}try{LatestClientRelease release=await LatestClientReleaseChecker.CheckAsync(CancellationToken.None);if(!release.IsNewerThan(AppBrand.Version)){if(remote)new RemoteActionReceiptStore(ConfigStore.Folder).Save(remoteAction,"completed");else MessageBox.Show(this,"当前版本 "+AppBrand.Version+" 已是最新版。","无需升级",MessageBoxButtons.OK,MessageBoxIcon.Information);return;}if(!remote&&!UpdateRolloutPolicy.IsEligible(Environment.MachineName,release.RolloutPercent)){MessageBox.Show(this,"新版 "+release.Version+" 正在分批发布，这台电脑暂未进入本批次。稍后再次检查即可。","分批升级",MessageBoxButtons.OK,MessageBoxIcon.Information);return;}string folder=Path.Combine(ConfigStore.Folder,"updates");Log("发现新版 "+release.Version+"，正在下载并校验摘要、版本和固定发布者签名。");string staged=await SignedUpdatePackage.DownloadAndVerifyAsync(release,folder,CancellationToken.None);if(!remote&&MessageBox.Show(this,"新版 "+release.Version+" 已通过 SHA-256、文件版本和固定发布者签名校验。\r\n\r\n程序将退出并自动替换；如果新版本无法正常启动，会恢复上一版本。现在升级吗？","安装签名升级",MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return;if(remote)new RemoteActionReceiptStore(ConfigStore.Folder).Save(remoteAction,"started");SignedUpdateCoordinator.Begin(Application.ExecutablePath,staged,release.Version,SignedUpdatePackage.ComputeSha256(staged));exiting=true;Application.Exit();}
+        catch(Exception ex){if(remote){try{new RemoteActionReceiptStore(ConfigStore.Folder).Save(remoteAction,"failed");}catch{}}Log("升级检查失败："+ex.Message);if(!remote)MessageBox.Show(this,"升级没有执行，当前版本保持不变。\r\n\r\n"+ex.Message,"升级失败",MessageBoxButtons.OK,MessageBoxIcon.Warning);}finally{if(button!=null&&!IsDisposed&&!Disposing){button.Enabled=true;button.Text="检查并升级";}}
     }
 
     private async void RunDiagnostics()

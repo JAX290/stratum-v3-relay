@@ -91,6 +91,14 @@ public sealed class RelayServiceHost : ServiceBase
             byte[] encrypted=File.ReadAllBytes(Path.Combine(dataFolder,"service-config.dat"));
             AppConfig config=ServiceConfiguration.Decode(encrypted);
             manager=new RelayManager(delegate(string ignored){});
+            manager.RemoteActionRequested+=delegate(RemoteClientAction action){
+                RemoteActionReceiptStore receipts=new RemoteActionReceiptStore(dataFolder);
+                try{
+                    if(action.Action=="diagnose"){RelaySnapshot snapshot=manager.Snapshot();File.WriteAllText(Path.Combine(dataFolder,"remote-diagnostic-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+".txt"),"版本："+AppBrand.Version+Environment.NewLine+"运行："+snapshot.Running+Environment.NewLine+"在线矿机："+snapshot.ActiveMiners+Environment.NewLine+"当前连接："+snapshot.Active+Environment.NewLine+"失败重连："+snapshot.Failures);receipts.Save(action,"completed");}
+                    else if(action.Action=="reconnect"){lock(runtimeGate){manager.Stop();manager.Start(config,PortRoute.Parse(config.Ports));}receipts.Save(action,"completed");}
+                    else receipts.Save(action,"failed");
+                }catch{try{receipts.Save(action,"failed");}catch{}}
+            };
             manager.Start(config,PortRoute.Parse(config.Ports));
             networkRecovery=new NetworkRecoveryMonitor(delegate{return workerActive;},NetworkHelper.GetLanIPv4,
                 delegate(string reason){lock(runtimeGate){manager.Stop();manager.Start(config,PortRoute.Parse(config.Ports));}},

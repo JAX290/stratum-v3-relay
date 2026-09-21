@@ -39,6 +39,8 @@ public sealed class RelayManager
     // Only connection setup is limited. Established mining connections do not occupy a slot.
     // This prevents hundreds of reconnecting miners from creating hundreds of slow VPS probes at once.
     private readonly SemaphoreSlim connectionSetupSlots = new SemaphoreSlim(32, 32);
+    private readonly HashSet<string> remoteActionIds=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    public event Action<RemoteClientAction> RemoteActionRequested;
     public bool IsRunning { get { return stop != null; } }
     public bool LocalHealthCheck()
     {
@@ -232,9 +234,11 @@ public sealed class RelayManager
             using (connection.Client) using (SslStream tls = connection.Stream) {
                 string host = String.IsNullOrWhiteSpace(profile.ServerName) ? profile.Address : profile.ServerName.Trim();
                 RelaySnapshot status=Snapshot();
-                byte[] bytes = Encoding.ASCII.GetBytes("CONNECT /relay/v2/health HTTP/1.1\r\nHost: " + host + "\r\nAuthorization: Bearer " + profile.SharedKey + "\r\nX-Site-Name: " + SafeHeader(siteName) + "\r\nX-Client-Version: " + AppBrand.Version + "\r\nX-Miner-Count: " + status.ActiveMiners + "\r\nX-Active-Connections: " + status.Active + "\r\n\r\n");
+                DateTime lastShare=DateTime.MinValue;foreach(MinerSnapshot miner in MinerSnapshots())if(miner.LastAccepted>lastShare)lastShare=miner.LastAccepted;RemoteActionReceipt receipt=new RemoteActionReceiptStore(ConfigStore.Folder).Load();string receiptHeaders=receipt==null?"":("X-Last-Action-Id: "+receipt.Id+"\r\nX-Last-Action-Status: "+receipt.Status+"\r\n");
+                byte[] bytes = Encoding.ASCII.GetBytes("CONNECT /relay/v2/health HTTP/1.1\r\nHost: " + host + "\r\nAuthorization: Bearer " + profile.SharedKey + "\r\nX-Site-Name: " + SafeHeader(siteName) + "\r\nX-Client-Version: " + AppBrand.Version + "\r\nX-Miner-Count: " + status.ActiveMiners + "\r\nX-Active-Connections: " + status.Active + "\r\nX-Current-VPS: " + SafeHeader(failover.CurrentEndpoint) + "\r\nX-Last-Share: " + (lastShare==DateTime.MinValue?0:new DateTimeOffset(lastShare).ToUnixTimeSeconds()) + "\r\nX-Reconnect-Count: " + status.Failures + "\r\n"+receiptHeaders+"\r\n");
                 string response = await ExchangeHeaderWithTimeout(tls, connection.Client, bytes, 8000, cancellation).ConfigureAwait(false);
                 if (!response.StartsWith("HTTP/1.1 200 ", StringComparison.Ordinal)) throw new IOException("VPS拒绝认证，请检查共享密钥和服务版本。");
+                RemoteClientAction remote=RemoteActionPolicy.ParseResponse(response);Action<RemoteClientAction> handler=null;if(remote!=null){lock(stateLock){if(remoteActionIds.Add(remote.Id))handler=RemoteActionRequested;}}if(handler!=null)handler(remote);
             }
             MarkSuccess(profile, (int)(DateTime.UtcNow - begin).TotalMilliseconds);
             return GetStateCopy(profile);

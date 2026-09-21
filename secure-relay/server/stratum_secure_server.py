@@ -19,6 +19,11 @@ import time
 from pathlib import Path
 
 try:
+    import fcntl
+except ImportError:  # Windows unit tests do not provide POSIX file locks.
+    fcntl = None
+
+try:
     from version_info import load_versions
 except ModuleNotFoundError:
     import sys
@@ -34,6 +39,7 @@ INTERNAL_START = 20000
 DEFAULT_STATE_FILE = Path("/var/lib/stratum-secure-relay/sites.json")
 SERVER_VERSION = load_versions()["secure_relay"]
 CONTROL_FILE = Path(os.getenv("SECURE_RELAY_CONTROL", "/var/lib/stratum-secure-relay/control.json"))
+CLIENT_ACTION_FILE = Path(os.getenv("SECURE_RELAY_CLIENT_ACTIONS", "/var/lib/stratum-secure-relay/client-actions.json"))
 _v3_cache_key = None
 _v3_cache_value = None
 
@@ -159,7 +165,8 @@ class SiteState:
             self.write()
 
     def update(self, client, peer, active_delta=0, force=False, miner_ip="", client_version="",
-               reported_miner_count=None, reported_connections=None):
+               reported_miner_count=None, reported_connections=None, current_vps="", last_share=None,
+               reconnect_count=None, action_id="", action_status=""):
         now = time.time()
         site = self.sites.setdefault(client["id"], {"id": client["id"], "name": client["name"], "active": 0})
         site["name"] = client["name"]
@@ -173,6 +180,16 @@ class SiteState:
             site["last_miner_count"] = max(int(site.get("last_miner_count", 0) or 0), site["reported_miner_count"])
         if reported_connections is not None:
             site["reported_connections"] = max(0, min(1000000, int(reported_connections)))
+        if current_vps:
+            site["current_vps"] = str(current_vps)[:64]
+        if last_share is not None:
+            site["last_share"] = max(0, int(last_share))
+        if reconnect_count is not None:
+            site["reconnect_count"] = max(0, min(1000000000, int(reconnect_count)))
+        if action_id and action_status:
+            site["last_action_id"] = str(action_id)[:32]
+            site["last_action_status"] = str(action_status)[:32]
+            site["last_action_time"] = int(now)
         if miner_ip and active_delta:
             counts = self.miner_counts.setdefault(client["id"], {})
             counts[miner_ip] = max(0, int(counts.get(miner_ip, 0)) + active_delta)
@@ -234,6 +251,49 @@ def optional_count(headers, name):
         return value if value >= 0 else None
     except (TypeError, ValueError):
         return None
+
+
+def optional_timestamp(headers, name):
+    value = optional_count(headers, name)
+    return value if value is not None and value <= int(time.time()) + 300 else None
+
+
+def _write_action_store(data):
+    CLIENT_ACTION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=CLIENT_ACTION_FILE.name + ".", dir=str(CLIENT_ACTION_FILE.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.chmod(temporary, 0o660)
+        os.replace(temporary, CLIENT_ACTION_FILE)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def take_client_action(client_id, now=None):
+    now = int(now or time.time())
+    lock_path = CLIENT_ACTION_FILE.with_suffix(CLIENT_ACTION_FILE.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="ascii") as lock:
+        if fcntl:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            data = json.loads(CLIENT_ACTION_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {"clients": {}, "results": {}}
+        clients = data.get("clients", {}) if isinstance(data.get("clients", {}), dict) else {}
+        item = clients.pop(str(client_id), None)
+        data["clients"] = clients
+        if not isinstance(item, dict) or item.get("action") not in {"diagnose", "reconnect", "upgrade"} or int(item.get("expires", 0) or 0) <= now:
+            if item is not None:
+                _write_action_store(data)
+            return None
+        results = data.setdefault("results", {})
+        results[str(client_id)] = {"id": str(item.get("id", "")), "action": item["action"], "status": "delivered", "time": now}
+        _write_action_store(data)
+        return {"id": str(item.get("id", "")), "action": item["action"]}
 
 
 def is_local_watchdog(port, headers, peer):
@@ -325,9 +385,18 @@ class SecureRelay:
                 if not local_watchdog:
                     self.state.update(client, peer, client_version=client_version,
                         reported_miner_count=optional_count(headers, "x-miner-count"),
-                        reported_connections=optional_count(headers, "x-active-connections"))
+                        reported_connections=optional_count(headers, "x-active-connections"),
+                        current_vps=headers.get("x-current-vps", ""),
+                        last_share=optional_timestamp(headers, "x-last-share"),
+                        reconnect_count=optional_count(headers, "x-reconnect-count"),
+                        action_id=headers.get("x-last-action-id", ""),
+                        action_status=headers.get("x-last-action-status", ""))
                 if port is None:
-                    writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                    action = None if local_watchdog else take_client_action(client["id"])
+                    response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n"
+                    if action:
+                        response += "X-Client-Action: " + action["action"] + "\r\nX-Action-Id: " + action["id"] + "\r\n"
+                    writer.write((response + "\r\n").encode("ascii"))
                     await writer.drain()
                     return
                 miner_ip = source_address(headers, peer)

@@ -11,6 +11,19 @@ import secure_relay_clients as credentials
 
 
 class SecureServerTests(unittest.TestCase):
+    def test_limited_client_action_is_delivered_once(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            actions = Path(temporary) / "actions.json"
+            actions.write_text(json.dumps({"clients": {"mine-a": {"id": "a" * 32,
+                "action": "diagnose", "expires": 2000}}, "results": {}}), encoding="utf-8")
+            with patch.object(secure, "CLIENT_ACTION_FILE", actions):
+                delivered = secure.take_client_action("mine-a", now=1000)
+                repeated = secure.take_client_action("mine-a", now=1000)
+            self.assertEqual(delivered, {"id": "a" * 32, "action": "diagnose"})
+            self.assertIsNone(repeated)
+            stored = json.loads(actions.read_text(encoding="utf-8"))
+            self.assertEqual(stored["results"]["mine-a"]["status"], "delivered")
+
     def test_empty_client_list_is_valid_and_authenticates_nobody(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = Path(temporary) / "relay.json"

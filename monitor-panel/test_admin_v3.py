@@ -48,6 +48,7 @@ class AdminV3Test(unittest.TestCase):
         admin.SECURE_RELAY_MONITOR_STATE = root / "relay-monitor.json"
         admin.SECURE_RELAY_EVENT_FILE = root / "relay-events.jsonl"
         admin.ACCESS_PACKAGE_DIR = root / "access-packages"
+        admin.CLIENT_ACTION_FILE = root / "client-actions.json"
         admin.store = ConfigStore(config_path, root / "history", admin.AUDIT_FILE)
         admin.app.config.update(TESTING=True, SECRET_KEY="test")
         admin.LOGIN_FAILURES.clear()
@@ -429,6 +430,18 @@ class AdminV3Test(unittest.TestCase):
         self.assertEqual(download.headers["Cache-Control"], "no-store, max-age=0")
         download.close()
         self.assertEqual(self.client.get(f"/client-access/package/{pending['id']}/download", headers=headers).status_code, 404)
+
+    def test_remote_client_action_requires_tailscale_admin_and_is_limited(self):
+        admin.SECURE_RELAY_CONFIG.write_text(json.dumps({"listen_port": 452,
+            "clients": [{"id": "mine-a", "name": "一号矿场", "token": "b" * 64, "enabled": True}]}), encoding="utf-8")
+        self.assertEqual(self.client.post("/client-action/mine-a/reconnect", data={"csrf": "token"}).status_code, 404)
+        headers = {"Tailscale-User-Login": "owner@example.com"}
+        response = self.client.post("/client-action/mine-a/reconnect", data={"csrf": "token"}, headers=headers)
+        self.assertEqual(response.status_code, 302)
+        queued = json.loads(admin.CLIENT_ACTION_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(queued["clients"]["mine-a"]["action"], "reconnect")
+        self.assertEqual(queued["results"]["mine-a"]["status"], "queued")
+        self.assertEqual(self.client.post("/client-action/mine-a/shell", data={"csrf": "token"}, headers=headers).status_code, 404)
 
     def test_create_and_rename_farm_preserve_legacy_access_and_settings(self):
         secret = "a" * 64

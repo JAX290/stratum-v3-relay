@@ -3,7 +3,7 @@ $ErrorActionPreference='Stop'
 # Development component only. Installation and signed service packaging are separate gates.
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 $compiler='C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-$sources=@('AppIdentity.cs','ConfigModels.cs','RelayManager.cs','RelayStatus.cs','FailoverPolicy.cs','RelayFailoverController.cs','NetworkHelper.cs','NetworkRecovery.cs',
+$sources=@('AppIdentity.cs','ConfigModels.cs','RelayManager.cs','RelayStatus.cs','FailoverPolicy.cs','RelayFailoverController.cs','RemoteControl.cs','NetworkHelper.cs','NetworkRecovery.cs',
  'MinerStatistics.cs','MinerHistoryStore.cs','RecoveryPolicy.cs','RecoverySession.cs',
  'WorkerProcess.cs','WatchdogSupervisor.cs','ServiceConfiguration.cs','ServiceStoragePermissions.cs','ServiceInstallerData.cs','RelayServiceHost.cs') |
  ForEach-Object {Join-Path $PSScriptRoot $_}
