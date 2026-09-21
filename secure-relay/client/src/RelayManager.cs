@@ -34,6 +34,8 @@ public sealed class RelayManager
     private readonly Dictionary<string, EndpointState> endpointStates = new Dictionary<string, EndpointState>();
     private readonly RelayFailoverController failover = new RelayFailoverController();
     private readonly Dictionary<string, MinerState> miners = new Dictionary<string, MinerState>();
+    private string recoveryPhase="",recoveryMessage="";
+    private DateTime recoveryUpdatedAt=DateTime.MinValue;
     // Only connection setup is limited. Established mining connections do not occupy a slot.
     // This prevents hundreds of reconnecting miners from creating hundreds of slow VPS probes at once.
     private readonly SemaphoreSlim connectionSetupSlots = new SemaphoreSlim(32, 32);
@@ -81,6 +83,12 @@ public sealed class RelayManager
         listeners.Clear();
         if (source != null) source.Dispose();
         log("已停止监听。");
+    }
+
+    public void SetRecoveryState(string phase,string message)
+    {
+        lock(stateLock){recoveryPhase=phase??"";recoveryMessage=message??"";recoveryUpdatedAt=DateTime.Now;}
+        if(!String.IsNullOrWhiteSpace(message))log(message);
     }
 
     private async void AcceptLoop(TcpListener listener, AppConfig config, PortRoute route, CancellationToken cancellation)
@@ -257,7 +265,7 @@ public sealed class RelayManager
     public RelaySnapshot Snapshot()
     {
         RelaySnapshot value = new RelaySnapshot { Running=IsRunning, Active=Volatile.Read(ref active), Total=Interlocked.Read(ref totalConnections), Failures=Interlocked.Read(ref failedConnections), Uploaded=Interlocked.Read(ref uploadedBytes), Downloaded=Interlocked.Read(ref downloadedBytes), StartedAt=startedAt };
-        lock(stateLock) { foreach (EndpointState s in endpointStates.Values) { EndpointState copy=s.Copy();FailoverEndpointPolicyState policy=failover.Snapshot(copy.Name);copy.Selected=String.Equals(copy.Name,failover.CurrentEndpoint,StringComparison.OrdinalIgnoreCase);copy.Recovering=policy.RequiresRecoveryObservation;copy.ConsecutiveFailures=policy.ConsecutiveFailures;copy.CooldownUntilUtc=policy.CooldownUntilUtc;copy.RecoverySinceUtc=policy.RecoverySinceUtc;value.Endpoints.Add(copy); } foreach(MinerState miner in miners.Values)if(miner.Connections>0)value.ActiveMiners++; }
+        lock(stateLock) { value.RecoveryPhase=recoveryPhase;value.RecoveryMessage=recoveryMessage;value.RecoveryUpdatedAt=recoveryUpdatedAt;foreach (EndpointState s in endpointStates.Values) { EndpointState copy=s.Copy();FailoverEndpointPolicyState policy=failover.Snapshot(copy.Name);copy.Selected=String.Equals(copy.Name,failover.CurrentEndpoint,StringComparison.OrdinalIgnoreCase);copy.Recovering=policy.RequiresRecoveryObservation;copy.ConsecutiveFailures=policy.ConsecutiveFailures;copy.CooldownUntilUtc=policy.CooldownUntilUtc;copy.RecoverySinceUtc=policy.RecoverySinceUtc;value.Endpoints.Add(copy); } foreach(MinerState miner in miners.Values)if(miner.Connections>0)value.ActiveMiners++; }
         return value;
     }
 

@@ -47,6 +47,7 @@ public sealed class MainForm : Form
     private readonly TextBox logs = new TextBox();
     private readonly NotifyIcon tray = new NotifyIcon();
     private readonly RelayManager manager;
+    private readonly NetworkRecoveryMonitor networkRecovery;
     private readonly System.Windows.Forms.Timer ipTimer = new System.Windows.Forms.Timer();
     private readonly System.Windows.Forms.Timer statusTimer = new System.Windows.Forms.Timer();
     private readonly System.Windows.Forms.Timer logTimer = new System.Windows.Forms.Timer();
@@ -56,6 +57,7 @@ public sealed class MainForm : Form
     private List<ServerProfile> backupProfiles = new List<ServerProfile>();
     private int statusTicks;
     private bool exiting;
+    private bool relayRequested;
 
     public MainForm()
     {
@@ -67,6 +69,9 @@ public sealed class MainForm : Form
         manager = new RelayManager(Log);
         BuildUi();
         LoadConfig();
+        networkRecovery = new NetworkRecoveryMonitor(delegate{return relayRequested;},NetworkHelper.GetLanIPv4,
+            delegate(string reason){RunNetworkRecovery(reason);},
+            delegate(string phase,string message){manager.SetRecoveryState(phase,message);});
         ports.TextChanged += delegate { RefreshMinerAddresses(false); };
         RefreshMinerAddresses(false);
         ipTimer.Interval = 30000;
@@ -135,7 +140,7 @@ public sealed class MainForm : Form
         diagnostics.Text="一键诊断"; diagnostics.AutoSize=true; diagnostics.Click+=delegate{RunDiagnostics();};
         Button help = new Button(); help.Text = "各项说明"; help.AutoSize = true; help.Click += delegate { ShowHelp(); };
         start.Text = "启动中转"; start.AutoSize = true; start.Click += delegate { StartRelay(); };
-        stop.Text = "停止"; stop.AutoSize = true; stop.Enabled = false; stop.Click += delegate { manager.Stop(); SetRunning(false); };
+        stop.Text = "停止"; stop.AutoSize = true; stop.Enabled = false; stop.Click += delegate { relayRequested=false;manager.Stop();manager.SetRecoveryState("","");SetRunning(false); };
         buttons.Controls.Add(save); buttons.Controls.Add(validateConfig); buttons.Controls.Add(backups); buttons.Controls.Add(miners); buttons.Controls.Add(diagnostics); buttons.Controls.Add(start); buttons.Controls.Add(stop); buttons.Controls.Add(help);
         Controls.Add(buttons); buttons.BringToFront();
 
@@ -242,8 +247,19 @@ public sealed class MainForm : Form
 
     private void StartRelay()
     {
-        try { List<PortRoute> routePorts = ValidateSettings(); SaveConfig(false); manager.Start(CurrentConfig(), routePorts); SetRunning(true); }
+        try { List<PortRoute> routePorts = ValidateSettings(); SaveConfig(false); manager.Start(CurrentConfig(), routePorts); relayRequested=true;SetRunning(true); }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "无法启动", MessageBoxButtons.OK, MessageBoxIcon.Warning); Log("启动失败：" + ex.Message); }
+    }
+
+    private void RunNetworkRecovery(string reason)
+    {
+        if(IsDisposed||Disposing)return;
+        if(InvokeRequired){Invoke(new Action<string>(RunNetworkRecovery),reason);return;}
+        if(!relayRequested)return;
+        AppConfig config=CurrentConfig();List<PortRoute> routePorts=PortRoute.Parse(config.Ports);
+        manager.Stop();
+        try{manager.Start(config,routePorts);SetRunning(true);RefreshMinerAddresses(false);}
+        catch{SetRunning(false);throw;}
     }
 
     private async void ValidateAndPromoteConfig()
@@ -378,7 +394,8 @@ public sealed class MainForm : Form
         string uptime=s.Running ? FormatDuration(DateTime.Now-s.StartedAt) : "--";
         List<string> endpoints=new List<string>(); foreach(EndpointState e in s.Endpoints) { string phase=e.Recovering?"恢复观察":(e.CooldownUntilUtc>DateTime.UtcNow?"冷却至 "+e.CooldownUntilUtc.ToLocalTime().ToString("HH:mm:ss"):(e.Online?"正常 "+e.LatencyMs+"ms":"异常 "+e.LastError));endpoints.Add((e.Selected?"当前·":"")+e.Name+":"+phase+"（"+(e.LastCheck==DateTime.MinValue?"未检测":e.LastCheck.ToString("HH:mm:ss"))+"）"); }
         start.Enabled=!manager.IsRunning;
-        status.Text="状态："+line+"    当前矿机："+s.ActiveMiners+"    当前连接："+s.Active+"    累计连接："+s.Total+"    失败："+s.Failures+"    运行："+uptime+"\r\n流量：上传 "+FormatBytes(s.Uploaded)+" / 下载 "+FormatBytes(s.Downloaded)+"    异常退出自动恢复：已启用\r\n线路检测："+(endpoints.Count==0 ? "启动中转后自动检测，也可点击测试按钮" : String.Join("，",endpoints.ToArray()));
+        string recovery=String.IsNullOrWhiteSpace(s.RecoveryPhase)?"":("\r\n网络恢复："+s.RecoveryPhase+" · "+s.RecoveryMessage);
+        status.Text="状态："+line+"    当前矿机："+s.ActiveMiners+"    当前连接："+s.Active+"    累计连接："+s.Total+"    失败："+s.Failures+"    运行："+uptime+"\r\n流量：上传 "+FormatBytes(s.Uploaded)+" / 下载 "+FormatBytes(s.Downloaded)+"    异常退出自动恢复：已启用\r\n线路检测："+(endpoints.Count==0 ? "启动中转后自动检测，也可点击测试按钮" : String.Join("，",endpoints.ToArray()))+recovery;
     }
     private static string FormatDuration(TimeSpan t){ return ((int)t.TotalDays>0 ? ((int)t.TotalDays)+"天 " : "")+t.Hours.ToString("00")+":"+t.Minutes.ToString("00")+":"+t.Seconds.ToString("00"); }
     private static string FormatBytes(long value){ string[] u={"B","KB","MB","GB","TB"}; double n=value; int i=0; while(n>=1024&&i<u.Length-1){n/=1024;i++;} return n.ToString(i==0?"0":"0.0")+" "+u[i]; }
@@ -400,6 +417,6 @@ public sealed class MainForm : Form
     private void OnClosing(object sender, FormClosingEventArgs e)
     {
         if (!exiting && closeToTray.Checked && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); tray.ShowBalloonTip(1500, "木林森中转", "程序仍在后台运行。", ToolTipIcon.Info); return; }
-        ipTimer.Stop(); statusTimer.Stop(); logTimer.Stop(); manager.SaveMinerHistory(); manager.Stop(); tray.Visible = false;
+        relayRequested=false;networkRecovery.Dispose();ipTimer.Stop(); statusTimer.Stop(); logTimer.Stop(); manager.SaveMinerHistory(); manager.Stop(); tray.Visible = false;
     }
 }

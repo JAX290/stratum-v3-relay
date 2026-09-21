@@ -15,7 +15,7 @@ if($LASTEXITCODE-ne 0){throw 'Client regression tests failed.'}
 
 # Compile the same core without WinForms/Drawing or any UI source files.
 $coreSources=@('AppIdentity.cs','ConfigModels.cs','SystemStatus.cs','RelayManager.cs',
-  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','NetworkHelper.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs','FailoverPolicy.cs','RelayFailoverController.cs') |
+  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','NetworkHelper.cs','NetworkRecovery.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs','FailoverPolicy.cs','RelayFailoverController.cs') |
   ForEach-Object { Join-Path $PSScriptRoot $_ }
 $coreLibrary=Join-Path $testDirectory 'RelayCore.dll'
 $coreAssemblyInfo=Join-Path $testDirectory 'CoreVersion.cs'
@@ -52,11 +52,18 @@ try {
   & $compiler /nologo /target:exe /out:$liveFailoverExe /reference:$coreLibrary `
     (Join-Path $PSScriptRoot 'test_live_failover.cs')
   if($LASTEXITCODE-ne 0){throw 'Live failover tests failed to compile.'}
-  & $liveFailoverExe $pfxPath $pfxPassword
+& $liveFailoverExe $pfxPath $pfxPassword
   if($LASTEXITCODE-ne 0){throw 'Live failover tests failed.'}
 } finally {
   Remove-Item -LiteralPath ("Cert:\CurrentUser\My\{0}" -f $testCertificate.Thumbprint) -Force -ErrorAction SilentlyContinue
 }
+
+$networkRecoveryTestExe=Join-Path $testDirectory 'network-recovery-tests.exe'
+& $compiler /nologo /target:exe /out:$networkRecoveryTestExe /reference:System.dll `
+  (Join-Path $PSScriptRoot 'NetworkRecovery.cs') (Join-Path $PSScriptRoot 'test_network_recovery.cs')
+if($LASTEXITCODE-ne 0){throw 'Network recovery tests failed to compile.'}
+& $networkRecoveryTestExe
+if($LASTEXITCODE-ne 0){throw 'Network recovery tests failed.'}
 
 # WIN-P01 first acceptance stage: recovery decisions, without installing services.
 $recoveryTestExe=Join-Path $testDirectory 'recovery-policy-tests.exe'

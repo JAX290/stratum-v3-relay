@@ -82,7 +82,7 @@ public sealed class RelayServiceHost : ServiceBase
         Console.SetIn(new StreamReader(Console.OpenStandardInput(),new System.Text.UTF8Encoding(false,true),true));
         string startCommand=Console.ReadLine();
         if(startCommand!="GO")return 2;
-        RelayManager manager=null;
+        RelayManager manager=null;NetworkRecoveryMonitor networkRecovery=null;object runtimeGate=new object();bool workerActive=true;
         try {
             string dataFolder=Path.GetFullPath(directory);
             ServiceStoragePermissions.VerifyDirectory(dataFolder);
@@ -92,6 +92,9 @@ public sealed class RelayServiceHost : ServiceBase
             AppConfig config=ServiceConfiguration.Decode(encrypted);
             manager=new RelayManager(delegate(string ignored){});
             manager.Start(config,PortRoute.Parse(config.Ports));
+            networkRecovery=new NetworkRecoveryMonitor(delegate{return workerActive;},NetworkHelper.GetLanIPv4,
+                delegate(string reason){lock(runtimeGate){manager.Stop();manager.Start(config,PortRoute.Parse(config.Ports));}},
+                delegate(string phase,string message){manager.SetRecoveryState(phase,message);});
             DateTime lastSave=DateTime.UtcNow;
             string request;
             while((request=Console.ReadLine())!=null) {
@@ -100,14 +103,14 @@ public sealed class RelayServiceHost : ServiceBase
                 if(!request.StartsWith("PING ",StringComparison.Ordinal)||!Int64.TryParse(request.Substring(5),out sequence)||sequence<=0)continue;
                 // Use the same thread pool and state lock as relay work. If those stop responding,
                 // no PONG is produced; a separate timer cannot falsely certify this process.
-                bool healthy=Task.Run(delegate {return manager.LocalHealthCheck();}).GetAwaiter().GetResult();
+                bool healthy=Task.Run(delegate {lock(runtimeGate)return manager.LocalHealthCheck();}).GetAwaiter().GetResult();
                 if(!healthy)return 3;
                 if(DateTime.UtcNow-lastSave>TimeSpan.FromSeconds(30)){manager.SaveMinerHistory();lastSave=DateTime.UtcNow;}
                 Console.WriteLine("PONG "+sequence);Console.Out.Flush();
             }
             return 0;
         } catch {return 1;}
-        finally {if(manager!=null){manager.Stop();manager.SaveMinerHistory();}}
+        finally {workerActive=false;if(networkRecovery!=null)networkRecovery.Dispose();if(manager!=null){manager.Stop();manager.SaveMinerHistory();}}
     }
 }
 
