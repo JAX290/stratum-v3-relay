@@ -32,7 +32,9 @@ public static class ServiceTests
     }
     private static int Fixture(string mode)
     {
-        if(Console.ReadLine()!="GO")return 2;
+        Console.SetIn(new StreamReader(Console.OpenStandardInput(),new System.Text.UTF8Encoding(false,true),true));
+        string startCommand=Console.ReadLine();
+        if(startCommand!="GO")return 2;
         if(mode=="crash")return 7;
         string line;
         while((line=Console.ReadLine())!=null) {

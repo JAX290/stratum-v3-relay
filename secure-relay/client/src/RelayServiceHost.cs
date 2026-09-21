@@ -71,7 +71,9 @@ public sealed class RelayServiceHost : ServiceBase
 
     public static int RunWorker()
     {
-        if(Console.ReadLine()!="GO")return 2;
+        Console.SetIn(new StreamReader(Console.OpenStandardInput(),new System.Text.UTF8Encoding(false,true),true));
+        string startCommand=Console.ReadLine();
+        if(startCommand!="GO")return 2;
         RelayManager manager=null;
         try {
             ConfigStore.SetServiceFolder(DataFolder);
