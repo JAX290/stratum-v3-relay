@@ -44,6 +44,7 @@ public sealed class MainForm : Form
     private readonly Button testPrimary = new Button();
     private readonly Button validateConfig = new Button();
     private readonly Button diagnostics = new Button();
+    private readonly Button repair = new Button();
     private readonly TextBox logs = new TextBox();
     private readonly NotifyIcon tray = new NotifyIcon();
     private readonly RelayManager manager;
@@ -138,10 +139,11 @@ public sealed class MainForm : Form
         Button backups = new Button(); backups.Text = "备用 VPS 设置"; backups.AutoSize = true; backups.Click += delegate { EditBackups(); };
         Button miners = new Button(); miners.Text="矿机状态"; miners.AutoSize=true; miners.Click+=delegate{new MinerStatusForm(manager).Show(this);};
         diagnostics.Text="一键诊断"; diagnostics.AutoSize=true; diagnostics.Click+=delegate{RunDiagnostics();};
+        repair.Text="检查并修复";repair.AutoSize=true;repair.Click+=delegate{RunCheckAndRepair();};
         Button help = new Button(); help.Text = "各项说明"; help.AutoSize = true; help.Click += delegate { ShowHelp(); };
         start.Text = "启动中转"; start.AutoSize = true; start.Click += delegate { StartRelay(); };
         stop.Text = "停止"; stop.AutoSize = true; stop.Enabled = false; stop.Click += delegate { relayRequested=false;manager.Stop();manager.SetRecoveryState("","");SetRunning(false); };
-        buttons.Controls.Add(save); buttons.Controls.Add(validateConfig); buttons.Controls.Add(backups); buttons.Controls.Add(miners); buttons.Controls.Add(diagnostics); buttons.Controls.Add(start); buttons.Controls.Add(stop); buttons.Controls.Add(help);
+        buttons.Controls.Add(save); buttons.Controls.Add(validateConfig); buttons.Controls.Add(backups); buttons.Controls.Add(miners); buttons.Controls.Add(diagnostics);buttons.Controls.Add(repair); buttons.Controls.Add(start); buttons.Controls.Add(stop); buttons.Controls.Add(help);
         Controls.Add(buttons); buttons.BringToFront();
 
         status.Text = "状态：未启动"; status.Dock = DockStyle.Top; status.Height = 86; status.Padding = new Padding(18, 7, 18, 4);
@@ -385,6 +387,34 @@ public sealed class MainForm : Form
         } catch(Exception ex){if(IsDisposed||Disposing)return;Log("一键诊断失败："+ex.Message);MessageBox.Show(this,"无法完成诊断。\r\n\r\n"+ex.Message,"诊断失败",MessageBoxButtons.OK,MessageBoxIcon.Warning);}
         finally{if(!IsDisposed&&!Disposing){diagnostics.Enabled=true;diagnostics.Text="一键诊断";RefreshStatus();}}
     }
+
+    private async void RunCheckAndRepair()
+    {
+        repair.Enabled=false;repair.Text="检查修复中…";StringBuilder report=new StringBuilder();report.AppendLine("木林森中转检查并修复");report.AppendLine("时间："+DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));report.AppendLine();
+        try{
+            AppConfig config=CurrentConfig();List<ClientHealthIssue> issues=ClientHealthInspector.Inspect(config,manager,Application.ExecutablePath);
+            ClientHealthIssue configuration=FindIssue(issues,"CONFIG");
+            if(configuration!=null){report.AppendLine("发现："+configuration.Title+"。"+configuration.Detail);string result=RestoreLastKnownGood(config);report.AppendLine("处理："+result);config=CurrentConfig();issues=ClientHealthInspector.Inspect(config,manager,Application.ExecutablePath);}
+            bool primaryOk=false;ServerProfile verifiedBackup=null;
+            for(int index=0;index<config.Servers.Count;index++){
+                ServerProfile profile=config.Servers[index];if(profile==null||!profile.Enabled)continue;
+                try{ValidateProfile(profile);await manager.TestProfileAsync(profile,config.SiteName,CancellationToken.None);report.AppendLine("线路："+profile.Name+" 验证正常。");if(index==0)primaryOk=true;else if(verifiedBackup==null)verifiedBackup=profile;}
+                catch(Exception ex){report.AppendLine("线路："+profile.Name+" 异常，"+ex.Message);}
+            }
+            if(!primaryOk&&verifiedBackup!=null)report.AppendLine("发现：主线路不可用，"+verifiedBackup.Name+" 验证正常。");
+            ClientHealthIssue firewall=FindIssue(issues,"FIREWALL");
+            if(firewall!=null){try{FirewallRuleManager.EnsureRule(Application.ExecutablePath,PortRoute.Parse(config.Ports));report.AppendLine("已修复：Windows 私有网络防火墙入站规则已补齐。");}catch(Exception ex){report.AppendLine("未修复：防火墙规则需要管理员授权。"+ex.Message);}}
+            ClientHealthIssue port=FindIssue(issues,"PORT");if(port!=null)report.AppendLine("需人工："+port.Title+"。"+port.Detail);
+            if((FindIssue(issues,"STOPPED")!=null||FindIssue(issues,"LISTENER")!=null)&&port==null){manager.Stop();manager.Start(config,PortRoute.Parse(config.Ports));relayRequested=true;SetRunning(true);report.AppendLine("已修复：本地监听和中转进程已重新启动。");}
+            if(!primaryOk&&verifiedBackup!=null){manager.SelectVerifiedEndpoint(verifiedBackup,false);report.AppendLine("已修复：后续新连接已改用 "+verifiedBackup.Name+"。");}
+            try{LatestClientRelease latest=await LatestClientReleaseChecker.CheckAsync(CancellationToken.None);if(latest.IsNewerThan(AppBrand.Version))report.AppendLine("版本：发现新版 "+latest.Version+"，下载地址 "+latest.Url);else report.AppendLine("版本：当前 "+AppBrand.Version+" 已是最新版。 ");}catch(Exception ex){report.AppendLine("版本：暂时无法联网核对（"+ex.Message+"），不影响本地修复。 ");}
+            List<ClientHealthIssue> remaining=ClientHealthInspector.Inspect(config,manager,Application.ExecutablePath);report.AppendLine();report.AppendLine("复查结论："+(remaining.Count==0?"可自动处理的项目均已恢复正常。":"仍有 "+remaining.Count+" 项需要查看。"));foreach(ClientHealthIssue issue in remaining)report.AppendLine("- "+issue.Title+"："+issue.Detail);
+            Log("检查并修复完成。");using(DiagnosticReportForm form=new DiagnosticReportForm(report.ToString(),""))form.ShowDialog(this);
+        }catch(Exception ex){Log("检查并修复失败："+ex.Message);MessageBox.Show(this,"检查并修复未完成。\r\n\r\n"+ex.Message,"修复失败",MessageBoxButtons.OK,MessageBoxIcon.Warning);}
+        finally{if(!IsDisposed&&!Disposing){repair.Enabled=true;repair.Text="检查并修复";RefreshStatus();}}
+    }
+
+    private static ClientHealthIssue FindIssue(List<ClientHealthIssue> issues,string code){foreach(ClientHealthIssue issue in issues)if(issue.Code==code)return issue;return null;}
 
     private void RefreshStatus()
     {

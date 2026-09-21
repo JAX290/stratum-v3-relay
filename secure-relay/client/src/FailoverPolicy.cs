@@ -91,6 +91,13 @@ public sealed class FailoverPolicy
         return true;
     }
 
+    public void ForceSelectVerified(string name,bool primary,DateTime nowUtc)
+    {
+        ValidateInput(name,nowUtc);ReportSuccess(name,primary,nowUtc);FailoverEndpointPolicyState state=Get(name);
+        state.RequiresRecoveryObservation=false;state.RecoverySinceUtc=DateTime.MinValue;state.CooldownUntilUtc=DateTime.MinValue;
+        currentEndpoint=name;lastSwitchUtc=nowUtc;
+    }
+
     public bool CanSelect(string name, bool primary, DateTime nowUtc)
     {
         ValidateInput(name, nowUtc);

@@ -152,18 +152,18 @@ Windows 客户端从 `2.3.0` 起保留原桌面版操作，并支持无需用户
 
 ### Windows 无人值守服务
 
-从当前 `client-v2.3.3` 发布页下载签名的 `MulinSenRelayService-2.3.3.exe` 与 `install-service-2.3.3.ps1`，放在同一目录。若“文件属性 → 数字签名”尚未显示签名有效，同时下载并解压 `publisher-certificate-tools-2.3.3.zip`，核对固定指纹后先运行其中的内部发布者证书安装脚本。随后以管理员身份打开 Windows PowerShell：
+从当前 `client-v2.3.4` 发布页下载签名的 `MulinSenRelayService-2.3.4.exe` 与 `install-service-2.3.4.ps1`，放在同一目录。若“文件属性 → 数字签名”尚未显示签名有效，同时下载并解压 `publisher-certificate-tools-2.3.4.zip`，核对固定指纹后先运行其中的内部发布者证书安装脚本。随后以管理员身份打开 Windows PowerShell：
 
 ```powershell
-.\install-service-2.3.3.ps1 -Mode Plan
-.\install-service-2.3.3.ps1 -Mode Install -ServiceExecutable .\MulinSenRelayService-2.3.3.exe
+.\install-service-2.3.4.ps1 -Mode Plan
+.\install-service-2.3.4.ps1 -Mode Install -ServiceExecutable .\MulinSenRelayService-2.3.4.exe
 ```
 
 `Install` 会核对发布者签名和固定证书指纹，备份已有服务文件，将当前用户保存的共享密钥直接转换成机器级 DPAPI 加密配置，并把服务注册为手动启动；此时不会抢占桌面版监听端口。确认提示成功后，在桌面版托盘选择“退出”，再执行：
 
 ```powershell
-.\install-service-2.3.3.ps1 -Mode Activate
-.\install-service-2.3.3.ps1 -Mode Status
+.\install-service-2.3.4.ps1 -Mode Activate
+.\install-service-2.3.4.ps1 -Mode Status
 ```
 
 看到服务为 `Running` 且状态包含 `Healthy` 后，服务将在电脑重启后由 LocalService 延迟自动启动，无需用户登录。需要恢复桌面版时执行 `-Mode Rollback`；需要删除服务注册时执行 `-Mode Uninstall`。卸载会保留机器加密配置和备份，便于恢复。
@@ -174,7 +174,9 @@ Windows 客户端从 `2.3.0` 起保留原桌面版操作，并支持无需用户
 4. 有异常时记录发生时间、矿场名称和页面提示，交由管理员处理。公网只读页面不提供修改或修复按钮。
 5. 管理员在 Tailscale 面板查看“日志”页的中文处理建议，再按需要核对服务和原始日志。
 
-VPS 自动恢复只处理系统已定义的服务异常，不等于能自动解决所有网络、矿池、电脑或配置问题。Windows 客户端的“一键诊断”用于检查矿场端网络、端口和主备 VPS，不能代替 VPS 管理权限。
+VPS 自动恢复只处理系统已定义的服务异常，不等于能自动解决所有网络、矿池、电脑或配置问题。Windows 客户端的“一键诊断”只读取矿场端网络、端口和主备 VPS 状态，不请求管理员权限，也不能代替 VPS 管理权限。
+
+Windows 客户端的“检查并修复”会先检查当前配置、程序与监听、端口占用、主备 VPS、防火墙和版本。配置损坏时优先恢复最后验证通过的配置；程序或监听停止时重新启动；主 VPS 不通而备用 VPS 已通过完整 TLS 与密钥验证时，后续新连接立即改用备用线路。只有补充 Windows 私有网络防火墙规则需要管理员授权。系统不会自动结束占用端口的未知程序，报告会保留该项供人工核对。
 
 ## 新增矿场或值守电脑
 

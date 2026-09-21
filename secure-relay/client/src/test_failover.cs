@@ -57,5 +57,7 @@ public static class FailoverPolicyTests
         Check(controller.CurrentEndpoint=="备用VPS 1","healthy primary waits for switch cooldown");
         controller.HealthSucceeded(primary,true,start.AddSeconds(132));
         Check(controller.CurrentEndpoint=="主VPS","health probes return traffic to stable primary");
+        controller.SelectVerifiedEndpoint(backup,false,start.AddSeconds(140));
+        Check(controller.CurrentEndpoint=="备用VPS 1","explicit repair selects a verified backup immediately");
     }
 }

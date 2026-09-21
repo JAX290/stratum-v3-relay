@@ -91,6 +91,12 @@ public sealed class RelayManager
         if(!String.IsNullOrWhiteSpace(message))log(message);
     }
 
+    public void SelectVerifiedEndpoint(ServerProfile profile,bool primary)
+    {
+        failover.SelectVerifiedEndpoint(profile,primary,DateTime.UtcNow);
+        log("检查并修复已选择验证通过的"+profile.Name+"，后续新连接使用该线路。");
+    }
+
     private async void AcceptLoop(TcpListener listener, AppConfig config, PortRoute route, CancellationToken cancellation)
     {
         while (!cancellation.IsCancellationRequested) {

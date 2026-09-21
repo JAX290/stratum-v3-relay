@@ -89,4 +89,9 @@ public sealed class RelayFailoverController
     {
         lock (gate) return policy.Snapshot(name);
     }
+
+    public void SelectVerifiedEndpoint(ServerProfile profile,bool primary,DateTime nowUtc)
+    {
+        if(profile==null)throw new ArgumentNullException("profile");lock(gate)policy.ForceSelectVerified(profile.Name,primary,nowUtc);
+    }
 }
