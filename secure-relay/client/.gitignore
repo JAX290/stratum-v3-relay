@@ -1,0 +1,3 @@
+# Release executables stay here locally; GitHub Releases holds published binaries.
+*.exe
+*.exe.sha256
