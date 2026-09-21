@@ -19,9 +19,9 @@ class VersionConsistencyTest(unittest.TestCase):
             self.assertRegex(value, r"^\d+\.\d+\.\d+$")
 
     def test_client_source_has_no_second_assembly_version(self):
-        source = (ROOT / "secure-relay" / "client" / "StratumSecureRelay.cs").read_text(encoding="utf-8")
+        source = (ROOT / "secure-relay" / "client" / "src" / "StratumSecureRelay.cs").read_text(encoding="utf-8")
         self.assertIsNone(re.search(r"Assembly(File)?Version", source))
-        build = (ROOT / "secure-relay" / "client" / "build.ps1").read_text(encoding="utf-8")
+        build = (ROOT / "secure-relay" / "client" / "src" / "build.ps1").read_text(encoding="utf-8")
         self.assertIn("version.json", build)
         self.assertIn("AssemblyFileVersion", build)
         self.assertIn("ConfigModels.cs", build)

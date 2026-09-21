@@ -4,7 +4,7 @@ $testDirectory=Join-Path ([IO.Path]::GetTempPath()) ('mulinsen-client-tests-'+[g
 New-Item -ItemType Directory -Path $testDirectory | Out-Null
 & $PSScriptRoot\build.ps1 -TestBuild -OutputDirectory $testDirectory
 $compiler='C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-$versionFile=Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'version.json'
+$versionFile=Join-Path (Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent) 'version.json'
 $version=(Get-Content -LiteralPath $versionFile -Raw -Encoding UTF8 | ConvertFrom-Json).windows_client
 $relayExe=Join-Path $testDirectory ("木林森中转{0}测试版.exe" -f $version)
 $testExe=Join-Path $testDirectory 'client-core-tests.exe'

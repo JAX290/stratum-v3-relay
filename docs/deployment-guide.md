@@ -286,7 +286,7 @@ secure-relay/client/木林森中转2.2.1正式版.exe
 
 客户端版本可在窗口标题查看。主、备用 VPS 连接测试包含超时保护；日志和 Share 历史有容量限制。普通软件异常会写入本机 `crash.log`，程序退出3秒后自动启动；10分钟内最多自动恢复3次，避免故障循环。勾选“开机自动启动”后，恢复启动时也会自动开始中转。
 
-正式版使用内部代码证书签名。每台矿场电脑第一次部署前，把 `secure-relay/client/signing` 文件夹和正式版 EXE 一起下载，以管理员身份运行：
+正式版使用内部代码证书签名。每台矿场电脑第一次部署前，把 `secure-relay/client/src/signing` 文件夹和正式版 EXE 一起下载，以管理员身份运行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File ".\signing\安装木林森内部签名证书.ps1"

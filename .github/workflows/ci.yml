@@ -30,4 +30,4 @@ jobs:
       - uses: actions/checkout@v7
       - name: Build and run Windows client core tests
         shell: pwsh
-        run: ./secure-relay/client/test-client.ps1
+        run: ./secure-relay/client/src/test-client.ps1

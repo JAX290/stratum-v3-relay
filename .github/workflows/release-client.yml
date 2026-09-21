@@ -38,8 +38,8 @@ jobs:
           $password = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
           $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
           $env:WINDOWS_SIGNING_THUMBPRINT = $certificate.Thumbprint
-          ./secure-relay/client/test-client.ps1
-          ./secure-relay/client/build.ps1 -Sign -SigningThumbprint $certificate.Thumbprint
+          ./secure-relay/client/src/test-client.ps1
+          ./secure-relay/client/src/build.ps1 -Sign -SigningThumbprint $certificate.Thumbprint
           $version = (Get-Content version.json -Raw | ConvertFrom-Json).windows_client
           $file = "secure-relay/client/木林森中转${version}正式版.exe"
           if ((Get-AuthenticodeSignature -LiteralPath $file).Status -ne 'Valid') { throw 'Authenticode signature validation failed.' }

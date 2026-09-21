@@ -1,11 +1,11 @@
-param([switch]$TestBuild,[switch]$Sign,[string]$SigningThumbprint=$env:WINDOWS_SIGNING_THUMBPRINT,[string]$OutputDirectory=$PSScriptRoot)
+﻿param([switch]$TestBuild,[switch]$Sign,[string]$SigningThumbprint=$env:WINDOWS_SIGNING_THUMBPRINT,[string]$OutputDirectory=(Split-Path $PSScriptRoot -Parent))
 $ErrorActionPreference = 'Stop'
 $source = Join-Path $PSScriptRoot 'StratumSecureRelay.cs'
 $configSource = Join-Path $PSScriptRoot 'ConfigModels.cs'
 $moduleSources = @('AppIdentity.cs','AppBrand.cs','SystemStatus.cs','CrashRecovery.cs',
   'RelayManager.cs','RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','NetworkHelper.cs',
   'MainForm.cs','DiagnosticReportForm.cs','MinerStatusForm.cs','BackupForm.cs') | ForEach-Object { Join-Path $PSScriptRoot $_ }
-$versionFile = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'version.json'
+$versionFile = Join-Path (Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent) 'version.json'
 if (-not (Test-Path -LiteralPath $versionFile)) { throw "Version file not found: $versionFile" }
 $version = (Get-Content -LiteralPath $versionFile -Raw -Encoding UTF8 | ConvertFrom-Json).windows_client
 if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'windows_client version must use x.y.z format.' }

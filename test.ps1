@@ -10,5 +10,5 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 python (Join-Path $root 'scripts/check-version.py')
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-& (Join-Path $root 'secure-relay/client/test-client.ps1')
+& (Join-Path $root 'secure-relay/client/src/test-client.ps1')
 exit $LASTEXITCODE
