@@ -39,6 +39,25 @@ if($LASTEXITCODE-ne 0){throw 'Failover policy tests failed to compile.'}
 & $failoverTestExe
 if($LASTEXITCODE-ne 0){throw 'Failover policy tests failed.'}
 
+# Exercise the production TLS and relay path with an intentionally broken primary endpoint.
+$testCertificate=New-SelfSignedCertificate -Subject 'CN=localhost' -DnsName 'localhost' `
+  -CertStoreLocation 'Cert:\CurrentUser\My' -KeyAlgorithm RSA -KeyLength 2048 `
+  -NotAfter (Get-Date).AddDays(1)
+$pfxPath=Join-Path $testDirectory 'live-failover.pfx'
+$pfxPassword=[guid]::NewGuid().ToString('N')
+$securePassword=ConvertTo-SecureString -String $pfxPassword -AsPlainText -Force
+try {
+  Export-PfxCertificate -Cert $testCertificate -FilePath $pfxPath -Password $securePassword | Out-Null
+  $liveFailoverExe=Join-Path $testDirectory 'live-failover-tests.exe'
+  & $compiler /nologo /target:exe /out:$liveFailoverExe /reference:$coreLibrary `
+    (Join-Path $PSScriptRoot 'test_live_failover.cs')
+  if($LASTEXITCODE-ne 0){throw 'Live failover tests failed to compile.'}
+  & $liveFailoverExe $pfxPath $pfxPassword
+  if($LASTEXITCODE-ne 0){throw 'Live failover tests failed.'}
+} finally {
+  Remove-Item -LiteralPath ("Cert:\CurrentUser\My\{0}" -f $testCertificate.Thumbprint) -Force -ErrorAction SilentlyContinue
+}
+
 # WIN-P01 first acceptance stage: recovery decisions, without installing services.
 $recoveryTestExe=Join-Path $testDirectory 'recovery-policy-tests.exe'
 & $compiler /nologo /target:exe /out:$recoveryTestExe /reference:System.Runtime.Serialization.dll `

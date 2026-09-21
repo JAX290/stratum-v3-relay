@@ -4,7 +4,7 @@
 
 管理员可以通过 Tailscale 管理线路和矿场，也可以通过带账号密码的 HTTPS 只读面板日常查看状态。
 
-当前 Windows 客户端版本为 `2.3.1`。本版新增最后可用配置：完整检查本地端口及所有启用 VPS 的证书、密钥和连通性，验证失败时自动恢复上一份有效配置；2.3.0 的 Windows 服务和看门狗继续保持兼容。发布状态见[更新计划](docs/improvement-roadmap.md)，各组件版本定义见 [version.json](version.json)。
+当前 Windows 客户端版本为 `2.3.2`。本版完成主备切换防抖：连续失败达到阈值后才切换，异常线路进入重试冷却，主线路恢复需经过稳定观察；最后可用配置、Windows 服务和看门狗继续保持兼容。发布状态见[更新计划](docs/improvement-roadmap.md)，各组件版本定义见 [version.json](version.json)。
 
 ```text
 矿机 → Windows 值守电脑 → VPS → 矿池
