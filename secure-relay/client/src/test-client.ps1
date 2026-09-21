@@ -15,7 +15,7 @@ if($LASTEXITCODE-ne 0){throw 'Client regression tests failed.'}
 
 # Compile the same core without WinForms/Drawing or any UI source files.
 $coreSources=@('AppIdentity.cs','ConfigModels.cs','SystemStatus.cs','RelayManager.cs',
-  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','NetworkHelper.cs','NetworkRecovery.cs','ClientRepair.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs','FailoverPolicy.cs','RelayFailoverController.cs') |
+  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','DutyStatus.cs','NetworkHelper.cs','NetworkRecovery.cs','ClientRepair.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs','FailoverPolicy.cs','RelayFailoverController.cs') |
   ForEach-Object { Join-Path $PSScriptRoot $_ }
 $coreLibrary=Join-Path $testDirectory 'RelayCore.dll'
 $coreAssemblyInfo=Join-Path $testDirectory 'CoreVersion.cs'
@@ -71,6 +71,12 @@ $clientRepairTestExe=Join-Path $testDirectory 'client-repair-tests.exe'
 if($LASTEXITCODE-ne 0){throw 'Client repair tests failed to compile.'}
 & $clientRepairTestExe
 if($LASTEXITCODE-ne 0){throw 'Client repair tests failed.'}
+
+$dutyStatusTestExe=Join-Path $testDirectory 'duty-status-tests.exe'
+& $compiler /nologo /target:exe /out:$dutyStatusTestExe /reference:$coreLibrary (Join-Path $PSScriptRoot 'test_duty_status.cs')
+if($LASTEXITCODE-ne 0){throw 'Duty status tests failed to compile.'}
+& $dutyStatusTestExe
+if($LASTEXITCODE-ne 0){throw 'Duty status tests failed.'}
 
 # WIN-P01 first acceptance stage: recovery decisions, without installing services.
 $recoveryTestExe=Join-Path $testDirectory 'recovery-policy-tests.exe'

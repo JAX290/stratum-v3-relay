@@ -98,6 +98,9 @@ public sealed class MainForm : Form
 
     private void BuildUi()
     {
+        TabControl pages=new TabControl();pages.Dock=DockStyle.Fill;
+        TabPage homePage=new TabPage("值守首页");TabPage settingsPage=new TabPage("高级设置");
+        pages.TabPages.Add(homePage);pages.TabPages.Add(settingsPage);
         TableLayoutPanel grid = new TableLayoutPanel();
         grid.Dock = DockStyle.Top; grid.Height = 498; grid.Padding = new Padding(18, 14, 18, 4);
         grid.ColumnCount = 2; grid.RowCount = 13;
@@ -130,10 +133,10 @@ public sealed class MainForm : Form
         minerAddress.DropDownStyle = ComboBoxStyle.DropDownList;
         Button copyAddress = new Button(); copyAddress.Text = "复制地址"; copyAddress.AutoSize = true; copyAddress.Click += delegate { CopyMinerAddress(); };
         AddRow(grid, 12, "矿机填写地址", InlineControls(minerAddress, copyAddress), "选择端口后复制完整的 stratum+tcp 地址");
-        Controls.Add(grid);
+        settingsPage.Controls.Add(grid);
 
-        FlowLayoutPanel buttons = new FlowLayoutPanel();
-        buttons.Dock = DockStyle.Top; buttons.Height = 84; buttons.Padding = new Padding(90, 6, 0, 0); buttons.WrapContents = true;
+        FlowLayoutPanel settingsButtons = new FlowLayoutPanel();
+        settingsButtons.Dock = DockStyle.Top; settingsButtons.Height = 84; settingsButtons.Padding = new Padding(90, 6, 0, 0); settingsButtons.WrapContents = true;
         Button save = new Button(); save.Text = "保存设置"; save.AutoSize = true; save.Click += delegate { SaveConfig(true); };
         validateConfig.Text = "验证并设为可用配置"; validateConfig.AutoSize = true; validateConfig.Click += delegate { ValidateAndPromoteConfig(); };
         Button backups = new Button(); backups.Text = "备用 VPS 设置"; backups.AutoSize = true; backups.Click += delegate { EditBackups(); };
@@ -143,19 +146,26 @@ public sealed class MainForm : Form
         Button help = new Button(); help.Text = "各项说明"; help.AutoSize = true; help.Click += delegate { ShowHelp(); };
         start.Text = "启动中转"; start.AutoSize = true; start.Click += delegate { StartRelay(); };
         stop.Text = "停止"; stop.AutoSize = true; stop.Enabled = false; stop.Click += delegate { relayRequested=false;manager.Stop();manager.SetRecoveryState("","");SetRunning(false); };
-        buttons.Controls.Add(save); buttons.Controls.Add(validateConfig); buttons.Controls.Add(backups); buttons.Controls.Add(miners); buttons.Controls.Add(diagnostics);buttons.Controls.Add(repair); buttons.Controls.Add(start); buttons.Controls.Add(stop); buttons.Controls.Add(help);
-        Controls.Add(buttons); buttons.BringToFront();
+        settingsButtons.Controls.Add(save); settingsButtons.Controls.Add(validateConfig); settingsButtons.Controls.Add(backups);settingsButtons.Controls.Add(help);
+        settingsPage.Controls.Add(settingsButtons);settingsButtons.BringToFront();
 
-        status.Text = "状态：未启动"; status.Dock = DockStyle.Top; status.Height = 86; status.Padding = new Padding(18, 7, 18, 4);
+        FlowLayoutPanel dutyButtons=new FlowLayoutPanel();dutyButtons.Dock=DockStyle.Top;dutyButtons.Height=58;dutyButtons.Padding=new Padding(18,10,0,0);
+        Button contact=new Button();contact.Text="联系技术人员";contact.AutoSize=true;contact.Click+=delegate{ShowContactSupport();};
+        dutyButtons.Controls.Add(repair);dutyButtons.Controls.Add(diagnostics);dutyButtons.Controls.Add(miners);dutyButtons.Controls.Add(start);dutyButtons.Controls.Add(stop);dutyButtons.Controls.Add(contact);
+        homePage.Controls.Add(dutyButtons);
+
+        status.Text = "状态：未启动"; status.Dock = DockStyle.Top; status.Height = 122; status.Padding = new Padding(18, 12, 18, 4);
+        status.Font=new Font("Microsoft YaHei UI",11F,FontStyle.Bold);
         status.BackColor = Color.FromArgb(236, 244, 252); status.AutoEllipsis = true;
-        Controls.Add(status); status.BringToFront();
+        homePage.Controls.Add(status); status.BringToFront();
 
         Label logLabel = new Label(); logLabel.Text = "运行记录"; logLabel.Dock = DockStyle.Top; logLabel.Height = 28; logLabel.Padding = new Padding(18, 5, 0, 0);
-        Controls.Add(logLabel); logLabel.BringToFront();
+        homePage.Controls.Add(logLabel); logLabel.BringToFront();
         logs.Dock = DockStyle.Fill; logs.Multiline = true; logs.ReadOnly = true; logs.ScrollBars = ScrollBars.Vertical;
         logs.BackColor = Color.FromArgb(247, 249, 252); logs.BorderStyle = BorderStyle.FixedSingle; logs.Margin = new Padding(18);
         Panel logPanel = new Panel(); logPanel.Dock = DockStyle.Fill; logPanel.Padding = new Padding(18, 0, 18, 16); logPanel.Controls.Add(logs);
-        Controls.Add(logPanel); logPanel.BringToFront();
+        homePage.Controls.Add(logPanel); logPanel.BringToFront();
+        Controls.Add(pages);
     }
 
     private static void AddRow(TableLayoutPanel grid, int row, string labelText, Control control, string hint)
@@ -362,6 +372,11 @@ public sealed class MainForm : Form
         MessageBox.Show(this, message, "各项设置说明", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
+    private void ShowContactSupport()
+    {
+        MessageBox.Show(this,"请先点击“一键诊断”，在报告窗口复制或另存报告，再发送给维护人员。\r\n\r\n诊断报告会排除共享密钥、证书私钥和矿池密码。","联系技术人员",MessageBoxButtons.OK,MessageBoxIcon.Information);
+    }
+
     private void EditBackups()
     {
         using (BackupForm form = new BackupForm(backupProfiles,manager,siteName.Text.Trim())) if (form.ShowDialog(this) == DialogResult.OK) backupProfiles = form.Profiles;
@@ -420,12 +435,13 @@ public sealed class MainForm : Form
     {
         if(++statusTicks>=30){statusTicks=0;manager.SaveMinerHistory();}
         RelaySnapshot s=manager.Snapshot();
+        DutyHomeSummary duty=DutyHomeSummary.Create(s,manager.MinerSnapshots());
         string line=s.Running ? "运行中" : "未启动";
         string uptime=s.Running ? FormatDuration(DateTime.Now-s.StartedAt) : "--";
         List<string> endpoints=new List<string>(); foreach(EndpointState e in s.Endpoints) { string phase=e.Recovering?"恢复观察":(e.CooldownUntilUtc>DateTime.UtcNow?"冷却至 "+e.CooldownUntilUtc.ToLocalTime().ToString("HH:mm:ss"):(e.Online?"正常 "+e.LatencyMs+"ms":"异常 "+e.LastError));endpoints.Add((e.Selected?"当前·":"")+e.Name+":"+phase+"（"+(e.LastCheck==DateTime.MinValue?"未检测":e.LastCheck.ToString("HH:mm:ss"))+"）"); }
         start.Enabled=!manager.IsRunning;
         string recovery=String.IsNullOrWhiteSpace(s.RecoveryPhase)?"":("\r\n网络恢复："+s.RecoveryPhase+" · "+s.RecoveryMessage);
-        status.Text="状态："+line+"    当前矿机："+s.ActiveMiners+"    当前连接："+s.Active+"    累计连接："+s.Total+"    失败："+s.Failures+"    运行："+uptime+"\r\n流量：上传 "+FormatBytes(s.Uploaded)+" / 下载 "+FormatBytes(s.Downloaded)+"    异常退出自动恢复：已启用\r\n线路检测："+(endpoints.Count==0 ? "启动中转后自动检测，也可点击测试按钮" : String.Join("，",endpoints.ToArray()))+recovery;
+        status.Text="总状态："+duty.Overall+"    受影响矿机："+duty.AffectedMiners+" 台\r\n"+duty.Guidance+"\r\n运行："+line+"    当前连接："+s.Active+"    累计连接："+s.Total+"    失败："+s.Failures+"    时长："+uptime+"\r\n线路："+(endpoints.Count==0 ? "启动后自动检测" : String.Join("，",endpoints.ToArray()))+recovery;
     }
     private static string FormatDuration(TimeSpan t){ return ((int)t.TotalDays>0 ? ((int)t.TotalDays)+"天 " : "")+t.Hours.ToString("00")+":"+t.Minutes.ToString("00")+":"+t.Seconds.ToString("00"); }
     private static string FormatBytes(long value){ string[] u={"B","KB","MB","GB","TB"}; double n=value; int i=0; while(n>=1024&&i<u.Length-1){n/=1024;i++;} return n.ToString(i==0?"0":"0.0")+" "+u[i]; }
