@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
+using System.Threading;
 
 public static class ClientCoreTests
 {
@@ -42,6 +43,7 @@ public static class ClientCoreTests
         CheckListenerRollback();
         CheckLocalHealth();
         CheckLastKnownGood();
+        CheckCompleteConfigurationValidation();
         return failures==0?0:1;
     }
     private static void CheckStreamBoundaries()
@@ -159,6 +161,55 @@ public static class ClientCoreTests
             if(item==value.Length)return true;
         }
         return false;
+    }
+    private static void CheckCompleteConfigurationValidation()
+    {
+        string directory=System.IO.Path.Combine(System.IO.Path.GetTempPath(),"mulinsen-validation-"+Guid.NewGuid().ToString("N"));
+        System.Net.Sockets.TcpListener reservation=null;
+        try {
+            int port=FreeTcpPort();
+            AppConfig config=ValidationConfig(port);
+            int probes=0;
+            CompleteConfigurationValidator validator=new CompleteConfigurationValidator();
+            ConfigurationValidationEvidence evidence=validator.ValidateAsync(config,delegate(ServerProfile profile,string site,CancellationToken cancellation){probes++;return System.Threading.Tasks.Task.FromResult(new EndpointState{Name=profile.Name,Online=true});},CancellationToken.None).GetAwaiter().GetResult();
+            LastKnownGoodStore store=new LastKnownGoodStore(directory);store.Promote(config,evidence);
+            Check(probes==2&&store.Load().Config.Servers[1].Enabled,"complete validation probes every enabled VPS and promotes snapshot");
+            Check(!config.Servers[2].Enabled&&probes==2,"disabled VPS is excluded from complete validation");
+
+            int failedProbes=0;bool profileFailure=false;
+            try{validator.ValidateAsync(config,delegate(ServerProfile profile,string site,CancellationToken cancellation){failedProbes++;if(failedProbes==2)throw new System.IO.IOException("probe failed");return System.Threading.Tasks.Task.FromResult(new EndpointState());},CancellationToken.None).GetAwaiter().GetResult();}
+            catch(System.IO.IOException){profileFailure=true;}
+            Check(profileFailure&&failedProbes==2,"failed VPS validation returns no complete evidence");
+
+            reservation=new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback,0);reservation.Start();int occupied=((System.Net.IPEndPoint)reservation.LocalEndpoint).Port;
+            AppConfig occupiedConfig=ValidationConfig(occupied);int occupiedProbes=0;bool portFailure=false;
+            try{validator.ValidateAsync(occupiedConfig,delegate(ServerProfile profile,string site,CancellationToken cancellation){occupiedProbes++;return System.Threading.Tasks.Task.FromResult(new EndpointState());},CancellationToken.None).GetAwaiter().GetResult();}
+            catch(InvalidOperationException){portFailure=true;}
+            Check(portFailure&&occupiedProbes==0,"occupied local port stops validation before VPS probes");
+
+            AppConfig invalid=ValidationConfig(FreeTcpPort());invalid.Servers[0].SharedKey="short";int invalidProbes=0;bool invalidRejected=false;
+            try{validator.ValidateAsync(invalid,delegate(ServerProfile profile,string site,CancellationToken cancellation){invalidProbes++;return System.Threading.Tasks.Task.FromResult(new EndpointState());},CancellationToken.None).GetAwaiter().GetResult();}
+            catch(InvalidOperationException){invalidRejected=true;}
+            Check(invalidRejected&&invalidProbes==0,"invalid credentials stop complete validation before network access");
+        } catch(Exception ex) {
+            Console.WriteLine("COMPLETE VALIDATION ERROR "+ex.GetType().FullName+" "+ex.Message);failures++;
+        } finally {
+            if(reservation!=null)try{reservation.Stop();}catch{}
+            try{if(System.IO.Directory.Exists(directory))System.IO.Directory.Delete(directory,true);}catch{}
+        }
+    }
+    private static AppConfig ValidationConfig(int port)
+    {
+        const string key="0123456789abcdef0123456789abcdef";
+        AppConfig config=new AppConfig{ListenAddress="127.0.0.1",Ports=port.ToString(),SiteName="验证矿场"};
+        config.Servers.Add(new ServerProfile{Name="主VPS",Enabled=true,Address="primary.example",Port=443,ServerName="primary.example",SharedKey=key});
+        config.Servers.Add(new ServerProfile{Name="备用VPS 1",Enabled=true,Address="backup.example",Port=443,ServerName="backup.example",SharedKey=key});
+        config.Servers.Add(new ServerProfile{Name="备用VPS 2",Enabled=false});
+        return config;
+    }
+    private static int FreeTcpPort()
+    {
+        System.Net.Sockets.TcpListener listener=new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback,0);listener.Start();int port=((System.Net.IPEndPoint)listener.LocalEndpoint).Port;listener.Stop();return port;
     }
     private static void Feed(MinerConnection c,string value,bool fromMiner){byte[] data=System.Text.Encoding.UTF8.GetBytes(value);c.Observe(data,data.Length,fromMiner);}
 }

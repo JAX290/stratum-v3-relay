@@ -42,6 +42,7 @@ public sealed class MainForm : Form
     private readonly Button start = new Button();
     private readonly Button stop = new Button();
     private readonly Button testPrimary = new Button();
+    private readonly Button validateConfig = new Button();
     private readonly Button diagnostics = new Button();
     private readonly TextBox logs = new TextBox();
     private readonly NotifyIcon tray = new NotifyIcon();
@@ -128,13 +129,14 @@ public sealed class MainForm : Form
         FlowLayoutPanel buttons = new FlowLayoutPanel();
         buttons.Dock = DockStyle.Top; buttons.Height = 84; buttons.Padding = new Padding(90, 6, 0, 0); buttons.WrapContents = true;
         Button save = new Button(); save.Text = "保存设置"; save.AutoSize = true; save.Click += delegate { SaveConfig(true); };
+        validateConfig.Text = "验证并设为可用配置"; validateConfig.AutoSize = true; validateConfig.Click += delegate { ValidateAndPromoteConfig(); };
         Button backups = new Button(); backups.Text = "备用 VPS 设置"; backups.AutoSize = true; backups.Click += delegate { EditBackups(); };
         Button miners = new Button(); miners.Text="矿机状态"; miners.AutoSize=true; miners.Click+=delegate{new MinerStatusForm(manager).Show(this);};
         diagnostics.Text="一键诊断"; diagnostics.AutoSize=true; diagnostics.Click+=delegate{RunDiagnostics();};
         Button help = new Button(); help.Text = "各项说明"; help.AutoSize = true; help.Click += delegate { ShowHelp(); };
         start.Text = "启动中转"; start.AutoSize = true; start.Click += delegate { StartRelay(); };
         stop.Text = "停止"; stop.AutoSize = true; stop.Enabled = false; stop.Click += delegate { manager.Stop(); SetRunning(false); };
-        buttons.Controls.Add(save); buttons.Controls.Add(backups); buttons.Controls.Add(miners); buttons.Controls.Add(diagnostics); buttons.Controls.Add(start); buttons.Controls.Add(stop); buttons.Controls.Add(help);
+        buttons.Controls.Add(save); buttons.Controls.Add(validateConfig); buttons.Controls.Add(backups); buttons.Controls.Add(miners); buttons.Controls.Add(diagnostics); buttons.Controls.Add(start); buttons.Controls.Add(stop); buttons.Controls.Add(help);
         Controls.Add(buttons); buttons.BringToFront();
 
         status.Text = "状态：未启动"; status.Dock = DockStyle.Top; status.Height = 86; status.Padding = new Padding(18, 7, 18, 4);
@@ -222,9 +224,7 @@ public sealed class MainForm : Form
     }
 
     private static void ValidateProfile(ServerProfile p) {
-        if (String.IsNullOrWhiteSpace(p.Address)) throw new InvalidOperationException(p.Name + "：请填写 VPS 地址。");
-        if ((p.SharedKey ?? "").Length < 32 || !Regex.IsMatch(p.SharedKey ?? "", "^[A-Za-z0-9_-]+$")) throw new InvalidOperationException(p.Name + "：共享密钥格式不正确。");
-        if (String.IsNullOrWhiteSpace(p.CertificateSha256) && String.IsNullOrWhiteSpace(p.ServerName)) throw new InvalidOperationException(p.Name + "：请填写证书名称或证书 SHA-256 指纹。");
+        CompleteConfigurationValidator.ValidateProfile(p);
     }
 
     private void SaveConfig(bool showMessage)
@@ -238,6 +238,32 @@ public sealed class MainForm : Form
     {
         try { List<PortRoute> routePorts = ValidateSettings(); SaveConfig(false); manager.Start(CurrentConfig(), routePorts); SetRunning(true); }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "无法启动", MessageBoxButtons.OK, MessageBoxIcon.Warning); Log("启动失败：" + ex.Message); }
+    }
+
+    private async void ValidateAndPromoteConfig()
+    {
+        try {
+            AppConfig config = CurrentConfig();
+            validateConfig.Enabled = false; validateConfig.Text = "完整验证中…";
+            Log("开始完整验证本地端口以及所有已启用 VPS 的证书、密钥和连通性。");
+            CompleteConfigurationValidator validator = new CompleteConfigurationValidator();
+            ConfigurationValidationEvidence evidence = await validator.ValidateAsync(config,
+                delegate(ServerProfile profile, string name, CancellationToken cancellation) {
+                    return manager.TestProfileAsync(profile, name, cancellation);
+                }, CancellationToken.None);
+            if (IsDisposed || Disposing) return;
+            ConfigStore.Save(config);
+            SetAutoStart(config.AutoStart);
+            new LastKnownGoodStore(ConfigStore.Folder).Promote(config, evidence);
+            Log("完整验证通过，当前设置已保存为最后可用配置。");
+            MessageBox.Show(this, "完整配置验证通过。\r\n\r\n本地监听端口：通过\r\n所有已启用 VPS：证书、共享密钥和连通性均通过\r\n\r\n已保存为最后可用配置。", "验证成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        } catch (Exception ex) {
+            if (IsDisposed || Disposing) return;
+            Log("完整配置验证失败：" + ex.Message);
+            MessageBox.Show(this, "当前设置未保存为最后可用配置。\r\n\r\n" + ex.Message, "验证失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        } finally {
+            if (!IsDisposed && !Disposing) { validateConfig.Enabled = !manager.IsRunning; validateConfig.Text = "验证并设为可用配置"; RefreshStatus(); }
+        }
     }
 
     private async void TestPrimary()
@@ -254,7 +280,7 @@ public sealed class MainForm : Form
 
     private void SetRunning(bool running)
     {
-        start.Enabled = !running; stop.Enabled = running;
+        start.Enabled = !running; stop.Enabled = running; validateConfig.Enabled = !running;
         siteName.Enabled = server.Enabled = tlsPort.Enabled = serverName.Enabled = pin.Enabled = token.Enabled = listen.Enabled = ports.Enabled = healthCheckMinutes.Enabled = !running;
     }
 
