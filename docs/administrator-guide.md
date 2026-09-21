@@ -152,18 +152,18 @@ Windows 客户端 `2.3.0` 保留原桌面版操作，并新增无需用户登录
 
 ### Windows 无人值守服务
 
-从同一个 `client-v2.3.0` 发布页下载签名的 `木林森中转服务2.3.0.exe` 与 `安装木林森中转服务2.3.0.ps1`，放在同一目录。若“文件属性 → 数字签名”尚未显示签名有效，同时下载并解压 `publisher-certificate-tools-2.3.0.zip`，核对固定指纹后先运行其中的内部发布者证书安装脚本。随后以管理员身份打开 Windows PowerShell：
+从同一个 `client-v2.3.0` 发布页下载签名的 `MulinSenRelayService-2.3.0.exe` 与 `install-service-2.3.0.ps1`，放在同一目录。若“文件属性 → 数字签名”尚未显示签名有效，同时下载并解压 `publisher-certificate-tools-2.3.0.zip`，核对固定指纹后先运行其中的内部发布者证书安装脚本。随后以管理员身份打开 Windows PowerShell：
 
 ```powershell
-.\安装木林森中转服务2.3.0.ps1 -Mode Plan
-.\安装木林森中转服务2.3.0.ps1 -Mode Install -ServiceExecutable .\木林森中转服务2.3.0.exe
+.\install-service-2.3.0.ps1 -Mode Plan
+.\install-service-2.3.0.ps1 -Mode Install -ServiceExecutable .\MulinSenRelayService-2.3.0.exe
 ```
 
 `Install` 会核对发布者签名和固定证书指纹，备份已有服务文件，将当前用户保存的共享密钥直接转换成机器级 DPAPI 加密配置，并把服务注册为手动启动；此时不会抢占桌面版监听端口。确认提示成功后，在桌面版托盘选择“退出”，再执行：
 
 ```powershell
-.\安装木林森中转服务2.3.0.ps1 -Mode Activate
-.\安装木林森中转服务2.3.0.ps1 -Mode Status
+.\install-service-2.3.0.ps1 -Mode Activate
+.\install-service-2.3.0.ps1 -Mode Status
 ```
 
 看到服务为 `Running` 且状态包含 `Healthy` 后，服务将在电脑重启后由 LocalService 延迟自动启动，无需用户登录。需要恢复桌面版时执行 `-Mode Rollback`；需要删除服务注册时执行 `-Mode Uninstall`。卸载会保留机器加密配置和备份，便于恢复。

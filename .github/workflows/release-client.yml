@@ -44,12 +44,14 @@ jobs:
           ./secure-relay/client/src/test-client.ps1
           ./secure-relay/client/src/build.ps1 -Sign -SigningThumbprint $certificate.Thumbprint
           $version = (Get-Content version.json -Raw | ConvertFrom-Json).windows_client
-          $desktop = "secure-relay/client/木林森中转${version}正式版.exe"
+          $desktopBuild = "secure-relay/client/木林森中转${version}正式版.exe"
+          $desktop = "secure-relay/client/MulinSenRelay-${version}.exe"
+          Copy-Item -LiteralPath $desktopBuild -Destination $desktop
           $serviceBuild = Join-Path $env:RUNNER_TEMP 'service-build'
           ./secure-relay/client/src/build-service.ps1 -OutputDirectory $serviceBuild -Sign -SigningThumbprint $certificate.Thumbprint
-          $service = "secure-relay/client/木林森中转服务${version}.exe"
+          $service = "secure-relay/client/MulinSenRelayService-${version}.exe"
           Move-Item -LiteralPath (Join-Path $serviceBuild 'MulinSenRelayService.exe') -Destination $service
-          $installer = "secure-relay/client/安装木林森中转服务${version}.ps1"
+          $installer = "secure-relay/client/install-service-${version}.ps1"
           Copy-Item -LiteralPath secure-relay/client/src/install-service.ps1 -Destination $installer
           $installerSignature = Set-AuthenticodeSignature -LiteralPath $installer -Certificate $certificate -HashAlgorithm SHA256 -TimestampServer 'http://timestamp.digicert.com'
           if ($installerSignature.Status -ne 'Valid') { throw 'Installer script signing failed.' }
@@ -84,8 +86,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create $env:GITHUB_REF_NAME `
-            "secure-relay/client/木林森中转$($env:RELEASE_VERSION)正式版.exe" `
-            "secure-relay/client/木林森中转服务$($env:RELEASE_VERSION).exe" `
-            "secure-relay/client/安装木林森中转服务$($env:RELEASE_VERSION).ps1" `
+            "secure-relay/client/MulinSenRelay-$($env:RELEASE_VERSION).exe" `
+            "secure-relay/client/MulinSenRelayService-$($env:RELEASE_VERSION).exe" `
+            "secure-relay/client/install-service-$($env:RELEASE_VERSION).ps1" `
             "secure-relay/client/publisher-certificate-tools-$($env:RELEASE_VERSION).zip" `
             SHA256SUMS.txt --verify-tag --generate-notes --title "木林森中转 $env:GITHUB_REF_NAME"
