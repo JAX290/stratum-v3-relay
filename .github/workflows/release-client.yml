@@ -70,7 +70,9 @@ jobs:
               throw "Authenticode signature validation failed: $file"
             }
           }
-          $files = @($desktop, $service, $installer, $trustInstaller, $trustRemover, $publicCertificate)
+          $certificateTools = "secure-relay/client/publisher-certificate-tools-${version}.zip"
+          Compress-Archive -LiteralPath @($trustInstaller, $trustRemover, $publicCertificate) -DestinationPath $certificateTools
+          $files = @($desktop, $service, $installer, $certificateTools)
           $files | ForEach-Object {
             $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $_
             "{0}  {1}" -f $hash.Hash.ToLowerInvariant(), (Split-Path $_ -Leaf)
@@ -85,7 +87,5 @@ jobs:
             "secure-relay/client/木林森中转$($env:RELEASE_VERSION)正式版.exe" `
             "secure-relay/client/木林森中转服务$($env:RELEASE_VERSION).exe" `
             "secure-relay/client/安装木林森中转服务$($env:RELEASE_VERSION).ps1" `
-            "secure-relay/client/安装木林森内部签名证书.ps1" `
-            "secure-relay/client/移除木林森内部签名证书.ps1" `
-            "secure-relay/client/木林森中转-内部代码签名证书.cer" `
+            "secure-relay/client/publisher-certificate-tools-$($env:RELEASE_VERSION).zip" `
             SHA256SUMS.txt --verify-tag --generate-notes --title "木林森中转 $env:GITHUB_REF_NAME"
