@@ -24,7 +24,10 @@ public static class ServiceTests
                 }
                 return 0;
             }
-            Run();return failures==0?0:1;
+            var originalEncoding=Console.InputEncoding;
+            try { Console.InputEncoding=new System.Text.UTF8Encoding(true);Run(); }
+            finally {Console.InputEncoding=originalEncoding;}
+            return failures==0?0:1;
         }catch(Exception error){Console.WriteLine("TEST ERROR: "+error.GetType().FullName+": "+error.Message);return 1;}
     }
     private static int Fixture(string mode)

@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 public interface IRelayWorker : IDisposable
@@ -86,7 +87,7 @@ public sealed class WorkerProcess : IRelayWorker
             process.OutputDataReceived+=OnOutput;
             process.ErrorDataReceived+=delegate { }; // Never publish raw worker errors/credentials.
             process.BeginOutputReadLine();process.BeginErrorReadLine();
-            process.StandardInput.WriteLine("GO");process.StandardInput.Flush();
+            WriteCommand("GO");
             probeThread=new Thread(delegate() {
                 while(!stopProbes.WaitOne(0)) {
                     try{Probe();}catch{break;}
@@ -118,7 +119,7 @@ public sealed class WorkerProcess : IRelayWorker
             lock(heartbeatLock) {sequence=++sentProbe;}
             // Caller sends at most one short request per interval. A hung reader is terminated
             // by Stop; the supervisor uses a background probe thread so this cannot block it.
-            process.StandardInput.WriteLine("PING "+sequence);process.StandardInput.Flush();
+            WriteCommand("PING "+sequence);
         }
     }
     public void Stop()
@@ -127,7 +128,7 @@ public sealed class WorkerProcess : IRelayWorker
         stopProbes.Set();
         if(Alive) {
             Thread graceful=new Thread(delegate() {
-                try {lock(stopLock){process.StandardInput.WriteLine("STOP");process.StandardInput.Flush();}}catch{}
+                try {lock(stopLock){WriteCommand("STOP");}}catch{}
             });
             graceful.IsBackground=true;graceful.Start();
             try{process.WaitForExit(1500);}catch{}
@@ -143,5 +144,13 @@ public sealed class WorkerProcess : IRelayWorker
         bool probesEnded=probeThread==null||probeThread.Join(1000);
         process.Dispose();
         if(probesEnded)stopProbes.Dispose();
+    }
+    private void WriteCommand(string command)
+    {
+        // Write protocol bytes directly: StreamWriter's inherited encoding can emit a BOM
+        // on UTF-8 Windows/CI consoles, turning the initial GO into a different command.
+        byte[] bytes=Encoding.ASCII.GetBytes(command+"\n");
+        process.StandardInput.BaseStream.Write(bytes,0,bytes.Length);
+        process.StandardInput.BaseStream.Flush();
     }
 }
