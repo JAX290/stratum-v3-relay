@@ -6,6 +6,9 @@ New-Item -ItemType Directory -Path $testDirectory | Out-Null
 $compiler='C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $versionFile=Join-Path (Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent) 'version.json'
 $version=(Get-Content -LiteralPath $versionFile -Raw -Encoding UTF8 | ConvertFrom-Json).windows_client
+$mainFormSource=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'MainForm.cs') -Raw -Encoding UTF8
+if($mainFormSource-match'AdminLoginForm|AdminAccessPolicy|管理员解锁|授权已到期') { throw 'Desktop settings must not require a separate administrator password.' }
+if($mainFormSource-notmatch'admin\.Click\+=delegate\{pages\.SelectedTab=settingsPage;\}') { throw 'Desktop settings button must open settings directly.' }
 $relayExe=Join-Path $testDirectory ("木林森中转{0}测试版.exe" -f $version)
 $testExe=Join-Path $testDirectory 'client-core-tests.exe'
 & $compiler /nologo /target:exe /out:$testExe /reference:$relayExe (Join-Path $PSScriptRoot 'test_core.cs')
@@ -15,7 +18,7 @@ if($LASTEXITCODE-ne 0){throw 'Client regression tests failed.'}
 
 # Compile the same core without WinForms/Drawing or any UI source files.
 $coreSources=@('AppIdentity.cs','ConfigModels.cs','SystemStatus.cs','RelayManager.cs',
-  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','DutyStatus.cs','AdminAccessPolicy.cs','AccessPackage.cs','MigrationBackup.cs','SignedUpdate.cs','RemoteControl.cs','SupportBundle.cs','NetworkHelper.cs','NetworkRecovery.cs','ClientRepair.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs','FailoverPolicy.cs','RelayFailoverController.cs') |
+  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','DutyStatus.cs','AccessPackage.cs','MigrationBackup.cs','SignedUpdate.cs','RemoteControl.cs','SupportBundle.cs','NetworkHelper.cs','NetworkRecovery.cs','ClientRepair.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs','FailoverPolicy.cs','RelayFailoverController.cs') |
   ForEach-Object { Join-Path $PSScriptRoot $_ }
 $coreLibrary=Join-Path $testDirectory 'RelayCore.dll'
 $coreAssemblyInfo=Join-Path $testDirectory 'CoreVersion.cs'
@@ -78,12 +81,6 @@ $dutyStatusTestExe=Join-Path $testDirectory 'duty-status-tests.exe'
 if($LASTEXITCODE-ne 0){throw 'Duty status tests failed to compile.'}
 & $dutyStatusTestExe
 if($LASTEXITCODE-ne 0){throw 'Duty status tests failed.'}
-
-$adminAccessTestExe=Join-Path $testDirectory 'admin-access-tests.exe'
-& $compiler /nologo /target:exe /out:$adminAccessTestExe /reference:$coreLibrary (Join-Path $PSScriptRoot 'test_admin_access.cs')
-if($LASTEXITCODE-ne 0){throw 'Admin access tests failed to compile.'}
-& $adminAccessTestExe
-if($LASTEXITCODE-ne 0){throw 'Admin access tests failed.'}
 
 $accessPackageTestExe=Join-Path $testDirectory 'access-package-tests.exe'
 & $compiler /nologo /target:exe /out:$accessPackageTestExe /reference:$coreLibrary (Join-Path $PSScriptRoot 'test_access_package.cs')
