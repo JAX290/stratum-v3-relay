@@ -174,10 +174,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
+    last_inspection = 0
     while True:
         try:
             evaluate_due()
             flush_peer_outbox()
+            now = int(time.time())
+            if now - last_inspection >= 300:
+                admin.record_daily_inspection(now)
+                last_inspection = now
         except Exception:
             logging.exception("automatic route trial evaluation failed")
         if args.once:

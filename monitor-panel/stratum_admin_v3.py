@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from ipaddress import ip_address
 from urllib.parse import urlsplit
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from flask import Flask, flash, jsonify, redirect, render_template, render_template_string, request, send_file, send_from_directory, session, url_for
 from werkzeug.security import check_password_hash
@@ -67,10 +68,12 @@ REPAIR_BACKUP_DIR = Path(os.getenv("V3_REPAIR_BACKUP_DIR", "/var/lib/stratum-mon
 HIGH_RISK_CANDIDATE_DIR = Path(os.getenv("V3_CANDIDATE_DIR", "/var/lib/stratum-monitor/candidates"))
 NOTIFICATION_RESULT_FILE = Path(os.getenv("NOTIFICATION_RESULT_FILE", "/var/lib/stratum-monitor/notification-results.json"))
 SECURE_NOTIFICATION_RESULT_FILE = Path(os.getenv("SECURE_NOTIFICATION_RESULT_FILE", "/var/lib/stratum-secure-relay/notification-result.json"))
+DAILY_INSPECTION_FILE = Path(os.getenv("DAILY_INSPECTION_FILE", "/var/lib/stratum-monitor/daily-inspections.json"))
 VERSIONS = load_versions()
 PANEL_VERSION = VERSIONS["panel"]
 CURRENT_CLIENT_VERSION = VERSIONS["windows_client"]
 CURRENT_RELAY_VERSION = VERSIONS["secure_relay"]
+BEIJING = ZoneInfo("Asia/Shanghai")
 
 JOURNAL_SERVICES = {
     "haproxy": "流量转发",
@@ -924,6 +927,70 @@ def overview_summary(pools):
     return summary
 
 
+def build_daily_inspection(services, endpoint_state, sites, overview, now=None):
+    now = int(now or time.time())
+    start = now - 86400
+    samples = [sample for entry in endpoint_state.get("endpoints", {}).values()
+        for sample in entry.get("samples", []) if int(sample.get("checked_at", 0) or 0) >= start]
+    successful = sum(1 for sample in samples if sample.get("ok"))
+    availability = round(successful * 100 / len(samples), 2) if samples else None
+    stopped = [name for name, value in services.items() if value != "active"]
+    alerting = sum(1 for value in endpoint_state.get("endpoints", {}).values() if value.get("alerting"))
+    offline_sites = [site.get("name", site.get("id", "未知矿场")) for site in sites if site.get("status") == "offline"]
+    issues = []
+    if stopped:
+        issues.append("核心服务异常：" + "、".join(stopped))
+    if alerting:
+        issues.append(f"{alerting} 条矿池地址正在报警")
+    if offline_sites:
+        issues.append("矿场离线：" + "、".join(offline_sites))
+    if availability is not None and availability < 99:
+        issues.append(f"地址探测成功率 {availability}%")
+    if float(overview.get("reject_percent", 0) or 0) > 1:
+        issues.append(f"Share 拒绝率 {overview['reject_percent']}%")
+    status = "danger" if stopped or offline_sites else "warning" if issues else "ok"
+    conclusion = "今日巡检正常，无需人工处理。" if not issues else "；".join(issues) + "。"
+    return {"date": datetime.fromtimestamp(now, BEIJING).strftime("%Y-%m-%d"), "time": now,
+        "status": status, "conclusion": conclusion, "issues": issues, "availability": availability,
+        "samples": len(samples), "connections": int(overview.get("connections", 0) or 0),
+        "online_workers": int(overview.get("online_workers", 0) or 0),
+        "reject_percent": float(overview.get("reject_percent", 0) or 0)}
+
+
+def record_daily_inspection(now=None):
+    now = int(now or time.time())
+    config = store.load()
+    endpoint_state = load_json(STATE_FILE, {"endpoints": {}})
+    inspector = load_json(INSPECTOR_STATE_FILE, {"pools": []})
+    pools = stratum_pool_rows(config, inspector)
+    overview = overview_summary(pools)
+    services = {"HAProxy": service_state("haproxy"), "协议检查器": service_state("stratum-inspector-v3"),
+        "稳定性监控": service_state("stratum-endpoint-monitor"), "自动切换": service_state("stratum-route-switch-monitor"),
+        "安全监控": service_state("stratum-security-monitor"), "加密入口": service_state("stratum-secure-relay"),
+        "矿场在线监控": service_state("stratum-secure-monitor"), "管理面板": service_state("stratum-admin"),
+        "自动恢复": service_state("stratum-vps-watchdog.timer")}
+    row = build_daily_inspection(services, endpoint_state, site_overview_rows(), overview, now)
+    current = load_json(DAILY_INSPECTION_FILE, {"days": []})
+    days = [item for item in current.get("days", []) if item.get("date") != row["date"]]
+    days.append(row)
+    days.sort(key=lambda item: str(item.get("date", "")))
+    ConfigStore._atomic_write(DAILY_INSPECTION_FILE,
+        json.dumps({"days": days[-7:]}, ensure_ascii=False, indent=2) + "\n", mode=0o640)
+    return row
+
+
+def daily_inspection_context(services, endpoint_state, sites, overview, now=None):
+    current = build_daily_inspection(services, endpoint_state, sites, overview, now)
+    saved = load_json(DAILY_INSPECTION_FILE, {"days": []}).get("days", [])
+    days = [item for item in saved if item.get("date") != current["date"]] + [current]
+    days.sort(key=lambda item: str(item.get("date", "")), reverse=True)
+    days = days[:7]
+    valid = [float(item["availability"]) for item in days if item.get("availability") is not None]
+    return {"today": current, "days": days,
+        "seven_day_availability": round(sum(valid) / len(valid), 2) if valid else None,
+        "normal_days": sum(1 for item in days if item.get("status") == "ok")}
+
+
 def audit_rows(limit=30):
     if not AUDIT_FILE.exists():
         return []
@@ -1242,6 +1309,7 @@ def build_page_context(page):
         "矿场在线监控": service_state("stratum-secure-monitor"), "管理面板": service_state("stratum-admin"),
         "自动恢复": service_state("stratum-vps-watchdog.timer")}
     sites = site_overview_rows()
+    daily_inspection = daily_inspection_context(services, state, sites, overview)
     relay_config = load_json(SECURE_RELAY_CONFIG, {})
     certificate = certificate_summary(relay_config.get("certificate", "")) if relay_config else {"available": False, "name": "", "fingerprint": "", "expires": "", "days_left": None}
     reminders = reminder_rows(config, certificate)
@@ -1275,6 +1343,7 @@ def build_page_context(page):
         online=sum(1 for row in rows if row["ok"]), alerting=sum(1 for value in state.get("endpoints", {}).values() if value.get("alerting")),
         services=services, server=metrics, pools=pools, active_pools=active_pools,
         inactive_pools=inactive_pools, overview=overview, logs=logs,
+        daily_inspection=daily_inspection,
         alert_settings=alert_settings, wechat_configured=read_env().get("WECHAT_WEBHOOK", "").startswith("https://"),
         notifications_configured=bool(Notifier(settings=read_env()).configured_channels()),
         legacy_enabled=monitor_enabled(), history=store.history(), audit=audit_rows(),

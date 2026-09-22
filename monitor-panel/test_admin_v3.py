@@ -59,6 +59,7 @@ class AdminV3Test(unittest.TestCase):
         admin.HIGH_RISK_CANDIDATE_DIR.mkdir()
         admin.NOTIFICATION_RESULT_FILE = root / "notification-results.json"
         admin.SECURE_NOTIFICATION_RESULT_FILE = root / "secure-notification-result.json"
+        admin.DAILY_INSPECTION_FILE = root / "daily-inspections.json"
         admin.store = ConfigStore(config_path, root / "history", admin.AUDIT_FILE)
         admin.app.config.update(TESTING=True, SECRET_KEY="test")
         admin.LOGIN_FAILURES.clear()
@@ -999,6 +1000,37 @@ class AdminV3Test(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("双 VPS 统一健康摘要".encode(), response.data)
         self.assertIn("等待配置对端".encode(), response.data)
+
+    def test_daily_inspection_summarizes_and_keeps_seven_days(self):
+        active = {"HAProxy": "active", "管理面板": "active"}
+        state = {"endpoints": {"one": {"alerting": False, "samples": [
+            {"checked_at": 1000, "ok": True}, {"checked_at": 1001, "ok": True}]}}}
+        normal = admin.build_daily_inspection(active, state, [],
+            {"connections": 2, "online_workers": 1, "reject_percent": 0}, now=1100)
+        self.assertEqual(normal["status"], "ok")
+        self.assertEqual(normal["availability"], 100.0)
+        abnormal = admin.build_daily_inspection({"HAProxy": "failed"}, state, [],
+            {"connections": 0, "online_workers": 0, "reject_percent": 0}, now=1100)
+        self.assertEqual(abnormal["status"], "danger")
+        self.assertIn("核心服务异常", abnormal["conclusion"])
+
+        admin.STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+        with patch.object(admin, "service_state", return_value="active"), \
+                patch.object(admin, "site_overview_rows", return_value=[]):
+            for day in range(9):
+                admin.record_daily_inspection(now=1_700_000_000 + day * 86400)
+        saved = json.loads(admin.DAILY_INSPECTION_FILE.read_text(encoding="utf-8"))["days"]
+        self.assertEqual(len(saved), 7)
+        self.assertEqual(saved, sorted(saved, key=lambda item: item["date"]))
+
+    def test_overview_renders_daily_inspection_and_seven_day_stability(self):
+        with patch.object(admin, "detect_relay_public_ip", return_value={"ok": True,
+                "host": "93.184.216.34", "source": "test", "message": ""}), \
+                patch.object(admin, "service_state", return_value="active"):
+            response = self.client.get("/overview")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("每日巡检与最近 7 天稳定性".encode(), response.data)
+        self.assertIn("今日巡检正常，无需人工处理".encode(), response.data)
 
     def test_immediate_peer_sync_failure_is_reported_and_kept_for_retry(self):
         token = "f" * 64
