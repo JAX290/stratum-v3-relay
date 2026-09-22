@@ -93,6 +93,21 @@ class DeploymentSecurityTest(unittest.TestCase):
             self.assertIn("root -g stratum-admin -m 0750 /var/lib/stratum-monitor/candidates", script)
             self.assertIn("chmod 0660 /var/lib/stratum-monitor/integrity.json", script)
 
+    def test_watchdog_installs_root_only_recovery_guard_before_health_checks(self):
+        bootstrap = (ROOT / "monitor-panel" / "bootstrap-vps.sh").read_text(encoding="utf-8")
+        self.assertIn("recovery_guard.py", bootstrap)
+        for name in ("install-v3.sh", "upgrade-v3-panel.sh"):
+            script = (ROOT / "monitor-panel" / name).read_text(encoding="utf-8")
+            unit = re.search(r"cat >/etc/systemd/system/stratum-vps-watchdog\.service <<'EOF'\n(.*?)\nEOF",
+                script, re.S)
+            self.assertIsNotNone(unit)
+            self.assertIn("ExecStart=-/usr/bin/python3 /opt/stratum-admin/recovery_guard.py --check", unit.group(1))
+            self.assertLess(unit.group(1).index("recovery_guard.py --check"),
+                unit.group(1).index("vps_watchdog.py"))
+            self.assertIn("/var/lib/stratum-recovery", unit.group(1))
+            self.assertIn("install -d -o root -g root -m 0700 /var/lib/stratum-recovery", script)
+            self.assertIn("recovery_guard.py --initialize", script)
+
     def test_dashboard_posts_update_content_without_losing_scroll_position(self):
         template = (ROOT / "monitor-panel" / "templates" / "v3_dashboard.html").read_text(encoding="utf-8")
         stylesheet = (ROOT / "monitor-panel" / "static" / "v3.css").read_text(encoding="utf-8")

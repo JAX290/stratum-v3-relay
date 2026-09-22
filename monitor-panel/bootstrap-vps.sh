@@ -8,7 +8,7 @@ fi
 
 cd "$(dirname "$0")"
 
-for file in install-v3.sh install-public-status.sh v3-config.json v3_manager.py version_info.py admin_auth.py endpoint_monitor.py operations_center.py high_risk_wizard.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh templates/v3_dashboard.html templates/public_status.html templates/public_login.html static/v3.css static/public.css ../version.json; do
+for file in install-v3.sh install-public-status.sh v3-config.json v3_manager.py version_info.py admin_auth.py endpoint_monitor.py operations_center.py high_risk_wizard.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py recovery_guard.py reset-panel-password.sh templates/v3_dashboard.html templates/public_status.html templates/public_login.html static/v3.css static/public.css ../version.json; do
   test -f "./$file" || { echo "Missing $file" >&2; exit 1; }
 done
 

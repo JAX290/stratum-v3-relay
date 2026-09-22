@@ -52,6 +52,24 @@ class WatchdogTests(unittest.TestCase):
             finally:
                 watchdog.INSPECTOR_STATE = original
 
+    def test_reserved_listener_health_reports_every_missing_port(self):
+        ok, message = watchdog.listener_health([452, 8789, 8790], "保留服务", {452})
+        self.assertFalse(ok)
+        self.assertIn("8789", message)
+        self.assertIn("8790", message)
+
+    def test_inactive_service_reports_foreign_reserved_port_owner(self):
+        config = {"port_groups": [{"ports": [9999]}], "fixed_routes": [], "endpoints": []}
+        with patch.object(watchdog, "read_json", side_effect=lambda path, default: config
+                if path == watchdog.V3_CONFIG else default), \
+                patch.object(watchdog, "listening_ports", return_value={9999}), \
+                patch.object(watchdog, "service_active", return_value=False), \
+                patch.object(watchdog, "port_owner_summary", return_value='9999=users:(("other",pid=42))'):
+            checks = watchdog.collect_checks(now=1000)
+        self.assertFalse(checks["haproxy.service"][0])
+        self.assertIn("其他进程占用", checks["haproxy.service"][1])
+        self.assertIn("pid=42", checks["haproxy.service"][1])
+
 
 if __name__ == "__main__":
     unittest.main()

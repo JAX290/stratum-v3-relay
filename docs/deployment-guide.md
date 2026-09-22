@@ -513,3 +513,22 @@ GitHub 保存的是程序和部署方法，不保存每台服务器的秘密配�
 管理面板 3.2.18 起以 `stratum-admin` 低权限账户运行。必须由 root 完成的 HAProxy 应用、固定服务重启、防火墙放行、证书替换和升级操作，通过 `/run/stratum-admin-helper.sock` 交给白名单助手执行。助手校验 Unix 调用者身份，只接受固定操作和参数，不提供任意命令或任意路径写入接口。
 
 升级后可执行 `systemctl status stratum-admin-helper stratum-admin stratum-route-switch-monitor` 核对三个服务。`stratum-admin` 和 `stratum-route-switch-monitor` 应显示为 `stratum-admin` 用户，只有 `stratum-admin-helper` 由 root 运行。
+
+## 十七、VPS 自动恢复
+
+管理面板 3.2.19 起，`stratum-vps-watchdog.timer` 每分钟依次运行配置恢复守卫和健康看门狗。安装或升级脚本会把关键程序、systemd 单元和安全加固片段保存到仅 root 可读写的 `/var/lib/stratum-recovery`。运行中的文件被删除或内容改变时，守卫从可信副本原子恢复，执行 `daemon-reload`，并重启受影响服务。
+
+`/etc/stratum-v3.json`、检查器配置和 HAProxy 配置不使用静态副本覆盖。守卫先验证当前线路配置，再重新生成检查器和 HAProxy 配置；生成的 HAProxy 候选配置必须通过 `haproxy -c` 才能替换。当前线路配置损坏时，只允许回退到 `/var/lib/stratum-monitor/history` 中最近一份通过验证的版本，并把损坏文件保留在 root 恢复目录供排查。
+
+看门狗同时检查管理面板、只读面板、加密入口、HAProxy 路由和内部检查器的监听端口及健康状态。服务连续三次失败且距上次重启至少五分钟时才会自动重启，防止循环操作造成反复断线。如果服务未运行但预留端口被未知进程占用，系统会记录 `ss` 返回的占用者并发出汇总通知，不会结束该进程；这类冲突需要按 [VPS 多服务共存边界](vps-service-boundaries.md) 调整新服务端口。
+
+检查状态和最近动作：
+
+```bash
+systemctl status stratum-vps-watchdog.timer
+journalctl -u stratum-vps-watchdog.service -n 100 --no-pager
+cat /var/lib/stratum-monitor/recovery-guard.json
+cat /var/lib/stratum-monitor/vps-watchdog.json
+```
+
+可信基线只能由安装和升级脚本在新文件全部验证后更新。故障现场不能手工执行 `recovery_guard.py --initialize`，否则可能把被修改的文件登记为可信版本。

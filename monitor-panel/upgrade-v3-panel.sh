@@ -6,7 +6,7 @@ if [[ $(id -u) -ne 0 ]]; then
   exit 1
 fi
 cd "$(dirname "$0")"
-for file in stratum_admin_v3.py stratum_public_status.py stratum_inspector.py endpoint_monitor.py security_monitor.py v3_manager.py version_info.py admin_auth.py privileged_helper.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh install-public-status.sh; do
+for file in stratum_admin_v3.py stratum_public_status.py stratum_inspector.py endpoint_monitor.py security_monitor.py v3_manager.py version_info.py admin_auth.py privileged_helper.py route_switch_monitor.py vps_watchdog.py recovery_guard.py reset-panel-password.sh install-public-status.sh; do
   test -f "./$file"
 done
 test -f ./templates/v3_dashboard.html
@@ -44,7 +44,7 @@ if [[ -f /etc/stratum-v3-peer.json ]]; then cp -a /etc/stratum-v3-peer.json "$ba
 if [[ -f /etc/systemd/system/stratum-vps-watchdog.service ]]; then cp -a /etc/systemd/system/stratum-vps-watchdog.service "$backup/"; fi
 if [[ -f /etc/systemd/system/stratum-vps-watchdog.timer ]]; then cp -a /etc/systemd/system/stratum-vps-watchdog.timer "$backup/"; fi
 
-python3 -m py_compile ./stratum_admin_v3.py ./stratum_public_status.py ./stratum_inspector.py ./endpoint_monitor.py ./security_monitor.py ./v3_manager.py ./version_info.py ./admin_auth.py ./privileged_helper.py ./route_switch_monitor.py ./vps_watchdog.py "$secure_server" "$secure_monitor"
+python3 -m py_compile ./stratum_admin_v3.py ./stratum_public_status.py ./stratum_inspector.py ./endpoint_monitor.py ./security_monitor.py ./v3_manager.py ./version_info.py ./admin_auth.py ./privileged_helper.py ./route_switch_monitor.py ./vps_watchdog.py ./recovery_guard.py "$secure_server" "$secure_monitor"
 systemctl stop stratum-security-monitor.service
 systemctl stop stratum-admin.service
 systemctl stop stratum-route-switch-monitor.service 2>/dev/null || true
@@ -60,7 +60,8 @@ postconf -e 'mynetworks = 127.0.0.0/8 [::1]/128'
 postconf -e 'smtp_tls_security_level = may'
 systemctl enable postfix
 systemctl restart postfix
-install -m 0755 ./stratum_admin_v3.py ./stratum_public_status.py ./stratum_inspector.py ./endpoint_monitor.py ./operations_center.py ./high_risk_wizard.py ./privileged_helper.py ./security_monitor.py ./v3_manager.py ./version_info.py ./admin_auth.py ./route_switch_monitor.py ./vps_watchdog.py ./reset-panel-password.sh ./install-public-status.sh /opt/stratum-admin/
+install -d -o root -g root -m 0700 /var/lib/stratum-recovery
+install -m 0755 ./stratum_admin_v3.py ./stratum_public_status.py ./stratum_inspector.py ./endpoint_monitor.py ./operations_center.py ./high_risk_wizard.py ./privileged_helper.py ./security_monitor.py ./v3_manager.py ./version_info.py ./admin_auth.py ./route_switch_monitor.py ./vps_watchdog.py ./recovery_guard.py ./reset-panel-password.sh ./install-public-status.sh /opt/stratum-admin/
 install -o root -g root -m 0755 ./version_info.py /opt/version_info.py
 install -o root -g root -m 0644 ../version.json /etc/stratum-version.json
 if ! grep -q '^TAILSCALE_AUTO_LOGIN=' /etc/stratum-admin.env; then echo 'TAILSCALE_AUTO_LOGIN=1' >>/etc/stratum-admin.env; fi
@@ -318,13 +319,16 @@ Type=oneshot
 User=root
 Group=root
 Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/stratum-v3.env
+Environment=V3_CONFIG_FILE=/etc/stratum-v3.json
+ExecStart=-/usr/bin/python3 /opt/stratum-admin/recovery_guard.py --check
 ExecStart=/usr/bin/python3 /opt/stratum-admin/vps_watchdog.py
 TimeoutStartSec=90
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/stratum-monitor
+ReadWritePaths=/var/lib/stratum-monitor /var/lib/stratum-recovery /opt /etc/systemd/system /etc/haproxy /etc/stratum-version.json
 EOF
 
 cat >/etc/systemd/system/stratum-vps-watchdog.timer <<'EOF'
@@ -357,6 +361,7 @@ EOF
 cat >>/etc/systemd/system/stratum-inspector-v3.service.d/90-unattended.conf <<'EOF'
 LimitNOFILE=65536
 EOF
+python3 /opt/stratum-admin/recovery_guard.py --initialize
 systemctl daemon-reload
 systemctl enable stratum-admin-helper.service
 systemctl enable stratum-admin.service

@@ -6,7 +6,7 @@ if [[ $(id -u) -ne 0 ]]; then
   exit 1
 fi
 
-required=(v3-config.json v3_manager.py version_info.py admin_auth.py endpoint_monitor.py operations_center.py high_risk_wizard.py privileged_helper.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh install-public-status.sh)
+required=(v3-config.json v3_manager.py version_info.py admin_auth.py endpoint_monitor.py operations_center.py high_risk_wizard.py privileged_helper.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py recovery_guard.py reset-panel-password.sh install-public-status.sh)
 for file in "${required[@]}"; do
   test -f "./$file" || { echo "Missing $file" >&2; exit 1; }
 done
@@ -52,7 +52,8 @@ install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor/history
 install -d -o root -g stratum-admin -m 0750 /var/lib/stratum-monitor/candidates
 install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor/repair-backups
 install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor/config
-install -m 0755 v3_manager.py version_info.py admin_auth.py endpoint_monitor.py operations_center.py high_risk_wizard.py privileged_helper.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh install-public-status.sh /opt/stratum-admin/
+install -d -o root -g root -m 0700 /var/lib/stratum-recovery
+install -m 0755 v3_manager.py version_info.py admin_auth.py endpoint_monitor.py operations_center.py high_risk_wizard.py privileged_helper.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py recovery_guard.py reset-panel-password.sh install-public-status.sh /opt/stratum-admin/
 install -o root -g root -m 0644 ../version.json /etc/stratum-version.json
 install -m 0644 templates/v3_dashboard.html /opt/stratum-admin/templates/v3_dashboard.html
 install -m 0644 templates/public_status.html /opt/stratum-admin/templates/public_status.html
@@ -314,13 +315,16 @@ Type=oneshot
 User=root
 Group=root
 Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/stratum-v3.env
+Environment=V3_CONFIG_FILE=/etc/stratum-v3.json
+ExecStart=-/usr/bin/python3 /opt/stratum-admin/recovery_guard.py --check
 ExecStart=/usr/bin/python3 /opt/stratum-admin/vps_watchdog.py
 TimeoutStartSec=90
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/stratum-monitor
+ReadWritePaths=/var/lib/stratum-monitor /var/lib/stratum-recovery /opt /etc/systemd/system /etc/haproxy /etc/stratum-version.json
 EOF
 
 cat >/etc/systemd/system/stratum-vps-watchdog.timer <<'EOF'
@@ -337,6 +341,7 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
+python3 /opt/stratum-admin/recovery_guard.py --initialize
 systemctl daemon-reload
 systemctl enable --now stratum-admin-helper.service
 systemctl enable --now stratum-admin.service
