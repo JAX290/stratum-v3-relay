@@ -9,6 +9,10 @@ permissions:
 
 jobs:
   signed-client:
+    # The current publisher certificate has a non-exportable private key and
+    # releases are signed on the controlled Windows host. A tag must not create
+    # a known-failing run until a separate cloud-signing certificate is ready.
+    if: ${{ vars.ENABLE_CLOUD_SIGNING == 'true' }}
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4

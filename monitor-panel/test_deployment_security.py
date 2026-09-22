@@ -7,6 +7,14 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class DeploymentSecurityTest(unittest.TestCase):
+    def test_cloud_signing_workflow_is_opt_in_until_secrets_are_configured(self):
+        workflow = (ROOT / ".github" / "workflows" / "release-client.yml").read_text(encoding="utf-8")
+        guide = (ROOT / "docs" / "releasing.md").read_text(encoding="utf-8")
+        self.assertIn("vars.ENABLE_CLOUD_SIGNING == 'true'", workflow)
+        self.assertIn("WINDOWS_SIGNING_PFX_BASE64", workflow)
+        self.assertIn("ENABLE_CLOUD_SIGNING", guide)
+        self.assertIn("标签推送只会跳过该任务", guide)
+
     def test_one_click_deployer_updates_then_selects_safe_install_or_upgrade(self):
         script = (ROOT / "deploy.sh").read_text(encoding="utf-8")
         self.assertIn("git pull --ff-only origin main", script)
