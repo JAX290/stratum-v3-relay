@@ -2,11 +2,21 @@
 """Operational diagnostics and issue presentation for the V3 panel."""
 
 import hashlib
+import io
+import json
+import re
+import zipfile
 from datetime import datetime
 
 
 GROUPS = (("normal", "正常"), ("recovered", "已恢复"),
     ("repairable", "可自动修复"), ("manual", "需人工处理"))
+
+IPV4_RE = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
+URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.I)
+DOMAIN_RE = re.compile(r"(?<![\w.-])(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?![\w.-])", re.I)
+SECRET_LINE_RE = re.compile(r"(?im)^.*(?:password|passwd|secret|token|webhook|private[_ -]?key).*$")
+PRIVATE_KEY_RE = re.compile(r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----", re.S)
 
 
 def _percent(value):
@@ -160,6 +170,53 @@ def _duration(seconds):
     if seconds < 86400:
         return f"{seconds // 3600}小时{seconds % 3600 // 60}分钟"
     return f"{seconds // 86400}天{seconds % 86400 // 3600}小时"
+
+
+def redact_support_text(value, sensitive_values=()):
+    text = str(value or "")
+    text = PRIVATE_KEY_RE.sub("[SECRET REMOVED]", text)
+    text = SECRET_LINE_RE.sub("[SENSITIVE LINE REMOVED]", text)
+    for secret in sorted({str(item) for item in sensitive_values if len(str(item)) >= 4}, key=len, reverse=True):
+        text = text.replace(secret, "[SECRET REMOVED]")
+    text = URL_RE.sub("[PUBLIC URL REMOVED]", text)
+    text = IPV4_RE.sub("[IP REMOVED]", text)
+    return DOMAIN_RE.sub("[PUBLIC HOST REMOVED]", text)
+
+
+def create_support_bundle(versions, diagnostics, issue_registry, config, logs, sensitive_values=()):
+    """Return a redacted ZIP containing only whitelisted operational material."""
+    config_summary = {
+        "schema_version": config.get("version"),
+        "endpoint_count": len(config.get("endpoints", [])),
+        "pool_names": sorted({str(item.get("pool", "")) for item in config.get("endpoints", []) if item.get("pool")}),
+        "port_groups": [{"name": item.get("name", ""), "ports": list(item.get("ports", []))}
+            for item in config.get("port_groups", [])],
+        "fixed_ports": sorted(int(item.get("port", 0)) for item in config.get("fixed_routes", []) if item.get("port")),
+    }
+    issue_rows = [{key: item.get(key) for key in ("id", "title", "category", "ongoing", "miner_count", "duration")}
+        for item in issue_registry.get("rows", [])]
+    health = {"checked_at": diagnostics.get("checked_at"),
+        "checks": [{key: item.get(key) for key in ("key", "title", "category", "component")}
+            for item in diagnostics.get("items", [])], "issues": issue_rows}
+    files = {
+        "versions.json": json.dumps(versions, ensure_ascii=False, indent=2) + "\n",
+        "health.json": json.dumps(health, ensure_ascii=False, indent=2) + "\n",
+        "config-summary.json": json.dumps(config_summary, ensure_ascii=False, indent=2) + "\n",
+        "recent-logs.txt": str(logs.get("journal", ""))[-512 * 1024:] + "\n",
+    }
+    redacted = {name: redact_support_text(content, sensitive_values) for name, content in files.items()}
+    lowered = "\n".join(redacted.values()).lower()
+    forbidden = [str(item).lower() for item in sensitive_values if len(str(item)) >= 4]
+    if any(value in lowered for value in forbidden) or "-----begin" in lowered or "webhook" in lowered:
+        raise ValueError("support bundle redaction validation failed")
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, content in redacted.items():
+            archive.writestr(name, content)
+        manifest = "\n".join(f"{name}  {hashlib.sha256(content.encode('utf-8')).hexdigest()}"
+            for name, content in redacted.items()) + "\n"
+        archive.writestr("manifest.sha256", manifest)
+    return output.getvalue()
 
 
 def _route_map(config):

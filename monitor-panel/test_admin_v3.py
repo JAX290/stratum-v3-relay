@@ -2,9 +2,11 @@ import json
 import base64
 import hashlib
 import hmac
+import io
 import os
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 from werkzeug.security import generate_password_hash
@@ -345,6 +347,31 @@ class AdminV3Test(unittest.TestCase):
         result = admin.reconcile_issues({"items": []}, previous, [], 200)
         self.assertFalse(result["rows"][0]["ongoing"])
         self.assertEqual(result["rows"][0]["resolved_at"], 200)
+
+    def test_vps_support_bundle_is_whitelisted_and_redacted(self):
+        admin.ENV_FILE.write_text("WECHAT_WEBHOOK=https://hooks.example.com/secret-path\nSMTP_PASSWORD=topsecret\n", encoding="utf-8")
+        admin.SECURE_RELAY_CONFIG.write_text(json.dumps({"clients": [{"id": "mine-a", "token": "a" * 64}]}), encoding="utf-8")
+        with patch.object(admin, "detect_relay_public_ip", return_value={"ok": True, "host": "198.51.100.20", "source": "test", "message": ""}), \
+                patch.object(admin, "port_listening", return_value=True), \
+                patch.object(admin, "recent_logs", return_value={"journal": "connect 198.51.100.20\ntoken=" + "a" * 64,
+                    "entries": [], "attention": [], "events": ""}):
+            response = self.client.post("/downloads/support-bundle", data={"csrf": "token"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "application/zip")
+        with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+            self.assertEqual(set(archive.namelist()), {"versions.json", "health.json", "config-summary.json",
+                "recent-logs.txt", "manifest.sha256"})
+            combined = b"\n".join(archive.read(name) for name in archive.namelist()).decode("utf-8")
+        self.assertNotIn("198.51.100.20", combined)
+        self.assertNotIn("a" * 64, combined)
+        self.assertNotIn("topsecret", combined)
+        self.assertNotIn("hooks.example.com", combined)
+        self.assertIn("[IP REMOVED]", combined)
+
+    def test_support_bundle_rejects_failed_secret_scan(self):
+        with patch("operations_center.redact_support_text", side_effect=lambda value, sensitive: str(value)):
+            with self.assertRaises(ValueError):
+                admin.create_support_bundle({}, {"items": []}, {"rows": []}, {}, {"journal": "leaked-secret"}, ["leaked-secret"])
 
     def test_recovered_service_does_not_leave_an_old_problem_open(self):
         records = [

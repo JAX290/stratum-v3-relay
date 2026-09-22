@@ -5,6 +5,7 @@ import json
 import base64
 import hashlib
 import hmac
+import io
 import os
 import re
 import secrets
@@ -20,14 +21,14 @@ from ipaddress import ip_address
 from urllib.parse import urlsplit
 from pathlib import Path
 
-from flask import Flask, flash, jsonify, redirect, render_template, render_template_string, request, send_from_directory, session, url_for
+from flask import Flask, flash, jsonify, redirect, render_template, render_template_string, request, send_file, send_from_directory, session, url_for
 from werkzeug.security import check_password_hash
 
 from admin_auth import (LOGIN_FAILURES, LOGIN_FAILURES_LOCK, RequestAwareSessionInterface,
     login_attempt_key, login_retry_after, record_login_failure, tailscale_identity,
     trusted_https_request)
 from endpoint_monitor import Notifier, beijing_time, probe_stratum
-from operations_center import comprehensive_diagnostics, reconcile_issues
+from operations_center import comprehensive_diagnostics, create_support_bundle, reconcile_issues
 from security_monitor import atomic_write as write_integrity, load as load_integrity, snapshot
 from v3_manager import ConfigError, ConfigStore, append_bounded_jsonl, file_lock, render_haproxy_config, render_inspector_config, route_map, validate_config
 from version_info import load_versions
@@ -1515,6 +1516,30 @@ def download_disconnect_history(name):
     if not path.is_file():
         return "Not found", 404
     return send_from_directory(str(DISCONNECT_HISTORY_DIR), name, as_attachment=True, download_name=name)
+
+
+@app.route("/downloads/support-bundle", methods=["POST"])
+def download_support_bundle():
+    if not authorized() or not csrf_ok():
+        return "Forbidden", 403
+    context = build_page_context("logs")
+    relay = load_json(SECURE_RELAY_CONFIG, {})
+    env_values = read_env()
+    sensitive = [value for key, value in env_values.items()
+        if any(word in key.upper() for word in ("PASSWORD", "TOKEN", "SECRET", "WEBHOOK"))]
+    sensitive.extend(str(item.get("token", "")) for item in relay.get("clients", []) if isinstance(item, dict))
+    if relay.get("token"):
+        sensitive.append(str(relay["token"]))
+    try:
+        content = create_support_bundle(VERSIONS, context["diagnostics"], context["issue_registry"],
+            context["config"], context["logs"], sensitive)
+    except ValueError:
+        app.logger.exception("support bundle redaction validation failed")
+        return "Support bundle validation failed", 500
+    append_audit("导出脱敏VPS技术支持包")
+    name = "vps-support-" + datetime.now().strftime("%Y%m%d-%H%M%S") + ".zip"
+    return send_file(io.BytesIO(content), mimetype="application/zip", as_attachment=True, download_name=name,
+        max_age=0)
 
 
 @app.route("/group/<group_id>", methods=["POST"])
