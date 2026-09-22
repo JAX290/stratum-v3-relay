@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from ipaddress import ip_address
 from urllib.parse import urlsplit
@@ -74,6 +75,13 @@ JOURNAL_SERVICES = {
     "stratum-secure-monitor": "矿场在线监控",
     "stratum-admin": "管理面板",
     "stratum-vps-watchdog": "自动恢复",
+}
+
+SAFE_SERVICE_REPAIRS = {
+    "haproxy": "HAProxy", "stratum-inspector-v3": "协议检查器",
+    "stratum-endpoint-monitor": "稳定性监控", "stratum-route-switch-monitor": "自动切换",
+    "stratum-security-monitor": "安全监控", "stratum-secure-relay": "加密入口",
+    "stratum-secure-monitor": "矿场在线监控", "stratum-vps-watchdog.timer": "自动恢复",
 }
 
 app = Flask(__name__)
@@ -1253,7 +1261,8 @@ def build_page_context(page):
         current_client_version=CURRENT_CLIENT_VERSION, current_relay_version=CURRENT_RELAY_VERSION,
         relay_server_version=(sites[0]["server_version"] if sites else load_json(SECURE_RELAY_STATE, {}).get("server_version", "未上报")),
         client_access=access, tailscale_access_available=bool(tailscale_identity()),
-        remote_actions_available=current_tailscale_admin(), csrf=session["csrf"])
+        remote_actions_available=current_tailscale_admin(), safe_service_repairs=SAFE_SERVICE_REPAIRS,
+        csrf=session["csrf"])
 
 
 @app.route("/")
@@ -1540,6 +1549,125 @@ def download_support_bundle():
     name = "vps-support-" + datetime.now().strftime("%Y%m%d-%H%M%S") + ".zip"
     return send_file(io.BytesIO(content), mimetype="application/zip", as_attachment=True, download_name=name,
         max_age=0)
+
+
+def record_issue_attempt(keys, action, result):
+    now = int(time.time())
+    value = load_json(ISSUE_STATE_FILE, {"issues": {}})
+    issues = value.get("issues", {}) if isinstance(value.get("issues", {}), dict) else {}
+    for key in keys:
+        if key not in issues:
+            continue
+        attempts = list(issues[key].get("attempted_actions", []))
+        attempts.append({"time": now, "action": action, "result": str(result)[:200]})
+        issues[key]["attempted_actions"] = attempts[-10:]
+    ConfigStore._atomic_write(ISSUE_STATE_FILE,
+        json.dumps({"updated_at": now, "issues": issues}, ensure_ascii=False, indent=2) + "\n", mode=0o600)
+
+
+def retry_pending_peer_sync():
+    outbox = load_json(PEER_OUTBOX_FILE, {"items": []})
+    for item in outbox.get("items", []):
+        item["next_attempt"] = 0
+    ConfigStore._atomic_write(PEER_OUTBOX_FILE, json.dumps(outbox, ensure_ascii=False, indent=2) + "\n", mode=0o600)
+    from route_switch_monitor import flush_peer_outbox
+    return flush_peer_outbox(now=int(time.time()))
+
+
+def reprobe_active_endpoints(config):
+    endpoint_map = {item["id"]: item for item in config.get("endpoints", [])}
+    endpoint_ids = sorted({endpoint_id for _port, endpoint_id, _kind, _group in route_map(config)})
+    results = {}
+    with ThreadPoolExecutor(max_workers=min(5, max(1, len(endpoint_ids)))) as executor:
+        futures = {executor.submit(probe_stratum, endpoint_map[endpoint_id]): endpoint_id for endpoint_id in endpoint_ids}
+        for future in as_completed(futures):
+            endpoint_id = futures[future]
+            try:
+                results[endpoint_id] = future.result()
+            except OSError as exc:
+                results[endpoint_id] = {"ok": False, "checked_at": int(time.time()), "error": str(exc)[:200]}
+    state = load_json(STATE_FILE, {"endpoints": {}})
+    rows = state.setdefault("endpoints", {})
+    for endpoint_id, result in results.items():
+        row = rows.setdefault(endpoint_id, {})
+        row["last_check"] = int(result.get("checked_at", time.time()))
+        row["last_result"] = result
+    ConfigStore._atomic_write(STATE_FILE, json.dumps(state, ensure_ascii=False, indent=2) + "\n", mode=0o600)
+    return {"checked": len(results), "healthy": sum(bool(item.get("ok")) for item in results.values())}
+
+
+def clean_expired_project_logs(now=None):
+    now = int(now or time.time())
+    removed = 0
+    root = DISCONNECT_HISTORY_DIR.resolve()
+    if not root.exists():
+        return 0
+    for path in root.glob("disconnect-*.jsonl"):
+        try:
+            resolved = path.resolve()
+            if resolved.parent != root or now - int(path.stat().st_mtime) <= 7 * 86400:
+                continue
+            path.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+@app.route("/repairs/<action>", methods=["POST"])
+def run_safe_repair(action):
+    if not current_tailscale_admin():
+        return "Not found", 404
+    if not csrf_ok():
+        return "Forbidden", 403
+    issue_keys, label = [], ""
+    try:
+        if action == "restart-service":
+            service = request.form.get("service", "")
+            if service not in SAFE_SERVICE_REPAIRS:
+                return "Not found", 404
+            label = "重启" + SAFE_SERVICE_REPAIRS[service]
+            result = subprocess.run(["systemctl", "restart", service], capture_output=True, text=True,
+                timeout=30, check=False)
+            if result.returncode or service_state(service) != "active":
+                raise OSError((result.stderr or result.stdout or "服务复查未恢复 active")[-300:])
+            message = SAFE_SERVICE_REPAIRS[service] + "已重启，自动复查正常。"
+            issue_keys = ["service:" + SAFE_SERVICE_REPAIRS[service]]
+        elif action == "retry-sync":
+            label, issue_keys = "重试双 VPS 同步", ["peer"]
+            result = retry_pending_peer_sync()
+            if result.get("pending"):
+                raise OSError(f"仍有 {result['pending']} 项等待同步")
+            message = f"双 VPS 同步已重试，自动复查确认 {result.get('sent', 0)} 项完成。"
+        elif action == "reload-config":
+            label, issue_keys = "验证并重新加载配置", ["ports", "haproxy"]
+            config = store.load()
+            validate_config(config, resolve=True)
+            save_and_reload(config, "safe-repair-reload")
+            missing = [str(port) for port, _endpoint, _kind, _group in route_map(config) if not port_listening(port)]
+            if missing:
+                raise OSError("复查发现未监听端口：" + "、".join(missing))
+            message = "配置验证、平滑重新加载和端口复查均已通过。"
+        elif action == "reprobe":
+            label, issue_keys = "重新探测生产矿池", ["pools"]
+            result = reprobe_active_endpoints(store.load())
+            if result["healthy"] != result["checked"]:
+                raise OSError(f"{result['checked']} 个地址中仍有 {result['checked'] - result['healthy']} 个异常")
+            message = f"已重新探测 {result['checked']} 个生产地址，全部正常。"
+        elif action == "clean-logs":
+            label, issue_keys = "清理过期项目日志", ["disk"]
+            removed = clean_expired_project_logs()
+            message = f"已清理 {removed} 个超过 7 天的项目断线日志，并完成目录复查。"
+        else:
+            return "Not found", 404
+        record_issue_attempt(issue_keys, label, "成功")
+        append_audit("安全修复:" + action)
+        flash(message, "success")
+    except (ConfigError, OSError, subprocess.SubprocessError, ValueError) as exc:
+        record_issue_attempt(issue_keys, label or action, "失败：" + str(exc)[:160])
+        append_audit("安全修复失败:" + action)
+        flash("安全修复未完成：" + str(exc), "error")
+    return redirect(url_for("dashboard_page", page="logs"))
 
 
 @app.route("/group/<group_id>", methods=["POST"])

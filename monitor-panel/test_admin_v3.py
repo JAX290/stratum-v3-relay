@@ -5,6 +5,7 @@ import hmac
 import io
 import os
 import tempfile
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -372,6 +373,58 @@ class AdminV3Test(unittest.TestCase):
         with patch("operations_center.redact_support_text", side_effect=lambda value, sensitive: str(value)):
             with self.assertRaises(ValueError):
                 admin.create_support_bundle({}, {"items": []}, {"rows": []}, {}, {"journal": "leaked-secret"}, ["leaked-secret"])
+
+    def test_safe_service_repair_is_allowlisted_and_rechecked(self):
+        admin.ISSUE_STATE_FILE.write_text(json.dumps({"issues": {"service:加密入口": {
+            "attempted_actions": []}}}), encoding="utf-8")
+        with patch.object(admin, "current_tailscale_admin", return_value=True), \
+                patch.object(admin.subprocess, "run") as run, patch.object(admin, "service_state", return_value="active"):
+            run.return_value.returncode = 0
+            response = self.client.post("/repairs/restart-service",
+                data={"csrf": "token", "service": "stratum-secure-relay"})
+        self.assertEqual(response.status_code, 302)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["systemctl", "restart", "stratum-secure-relay"])
+        state = json.loads(admin.ISSUE_STATE_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(state["issues"]["service:加密入口"]["attempted_actions"][-1]["result"], "成功")
+        with patch.object(admin, "current_tailscale_admin", return_value=True):
+            self.assertEqual(self.client.post("/repairs/restart-service",
+                data={"csrf": "token", "service": "ssh"}).status_code, 404)
+
+    def test_verified_reload_rechecks_every_production_port(self):
+        checked = []
+        with patch.object(admin, "current_tailscale_admin", return_value=True), \
+                patch.object(admin, "save_and_reload") as reload_config, \
+                patch.object(admin, "validate_config") as validate, \
+                patch.object(admin, "port_listening", side_effect=lambda port: checked.append(port) or True):
+            response = self.client.post("/repairs/reload-config", data={"csrf": "token"})
+        self.assertEqual(response.status_code, 302)
+        validate.assert_called_once()
+        reload_config.assert_called_once()
+        self.assertEqual(len(checked), 24)
+
+    def test_reprobe_updates_endpoint_state(self):
+        config = admin.store.load()
+        with patch.object(admin, "probe_stratum", return_value={"ok": True, "checked_at": 123, "stratum_ms": 10}):
+            result = admin.reprobe_active_endpoints(config)
+        self.assertEqual(result, {"checked": 15, "healthy": 15})
+        state = json.loads(admin.STATE_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(len(state["endpoints"]), 15)
+        self.assertTrue(all(row["last_result"]["ok"] for row in state["endpoints"].values()))
+
+    def test_log_cleanup_only_removes_old_project_disconnect_logs(self):
+        admin.DISCONNECT_HISTORY_DIR.mkdir()
+        old = admin.DISCONNECT_HISTORY_DIR / "disconnect-2026-01-01.jsonl"
+        fresh = admin.DISCONNECT_HISTORY_DIR / "disconnect-2026-09-22.jsonl"
+        unrelated = admin.DISCONNECT_HISTORY_DIR / "other.log"
+        for path in (old, fresh, unrelated):
+            path.write_text("data", encoding="utf-8")
+        os.utime(old, (100, 100))
+        os.utime(fresh, (1_000_000, 1_000_000))
+        self.assertEqual(admin.clean_expired_project_logs(now=700_000), 1)
+        self.assertFalse(old.exists())
+        self.assertTrue(fresh.exists())
+        self.assertTrue(unrelated.exists())
 
     def test_recovered_service_does_not_leave_an_old_problem_open(self):
         records = [
