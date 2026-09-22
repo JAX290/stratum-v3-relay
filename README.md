@@ -4,7 +4,7 @@
 
 管理员可以通过 Tailscale 管理线路和矿场，也可以通过带账号密码的 HTTPS 只读面板日常查看状态。
 
-当前 Windows 客户端版本为 `2.3.12`，管理面板为 `3.2.16`，VPS 加密入口为 `2.2.4`。Windows 客户端设置页可在管理员控制的本机直接打开。VPS 总览可同时查看两台服务器状态，并显示每日巡检结论和最近 7 天地址稳定性；通知支持按严重级别选择渠道和设置免打扰。发布状态见[更新计划](docs/improvement-roadmap.md)，各组件版本定义见 [version.json](version.json)。
+当前 Windows 客户端版本为 `2.3.12`，管理面板为 `3.2.17`，VPS 加密入口为 `2.2.4`。Windows 客户端设置页可在管理员控制的本机直接打开。VPS 总览可同时查看两台服务器状态、每日巡检和 7 天稳定性；常用线路可收藏，切换前会展示来源、验证结果和预计影响。发布状态见[更新计划](docs/improvement-roadmap.md)，各组件版本定义见 [version.json](version.json)。
 
 ```text
 矿机 → Windows 值守电脑 → VPS → 矿池

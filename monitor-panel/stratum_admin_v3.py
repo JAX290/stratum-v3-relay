@@ -1293,12 +1293,21 @@ def build_page_context(page):
         result = health.get("last_result", {})
         stats = health.get("stats_24h", {})
         checked = health.get("last_check", 0)
+        source_value = str(endpoint.get("source", "")).strip()
+        source_host = urlsplit(source_value).hostname if source_value.startswith(("http://", "https://")) else ""
+        source_text = "管理面板手工添加" if source_value == "panel" else source_host or source_value or "配置文件"
+        verified_at = int(endpoint.get("verified_at", 0) or 0)
+        validation_text = ("10分钟试运行已通过" + (" · " + beijing_time(verified_at) if verified_at else "")) if endpoint.get("verified") else (
+            "最近探测正常 · " + beijing_time(checked) if result.get("ok") and checked else "尚未通过10分钟试运行")
         rows.append({**endpoint, "usage": "正在使用" if endpoint["id"] in active else "仅模板" if endpoint["id"] in template_ids else "地址库",
             "ok": bool(result.get("ok")), "alerting": bool(health.get("alerting")), "failures": health.get("consecutive_failures", 0),
             "last_check": beijing_time(checked) if checked else "等待检测",
             "success": f"{stats['success_percent']}%" if stats.get("success_percent") is not None else "-",
             "p95": f"{stats['p95_ms']} ms" if stats.get("p95_ms") is not None else "-",
-            "jitter": f"{stats['jitter_ms']} ms" if stats.get("jitter_ms") is not None else "-"})
+            "jitter": f"{stats['jitter_ms']} ms" if stats.get("jitter_ms") is not None else "-",
+            "source_text": source_text, "validation_text": validation_text, "favorite": bool(endpoint.get("favorite"))})
+    option_rows = sorted(({**row, "algorithm_value": endpoint_algorithm(config, row)} for row in rows),
+        key=lambda item: (not item.get("favorite"), item.get("pool", ""), item.get("region", "")))
     security = load_json(SECURITY_STATE_FILE, {"events": [], "active": {}})
     pools = stratum_pool_rows(config, inspector)
     active_pools, inactive_pools = prioritize_pools(pools)
@@ -1350,8 +1359,9 @@ def build_page_context(page):
         disconnect_history=disconnect_history_rows(),
         route_groups=route_groups, overview_routes=overview_routes, relay_status=relay_status,
         active_forwarding=active_forwarding, visible_forwarding=visible_forwarding, miner_ips=online_miner_ips(inspector),
-        endpoint_options=[{**endpoint, "algorithm_value": endpoint_algorithm(config, endpoint)} for endpoint in config["endpoints"]],
-        verified_endpoints=[{**endpoint, "algorithm_value": endpoint_algorithm(config, endpoint)} for endpoint in config["endpoints"] if endpoint.get("verified")],
+        endpoint_options=option_rows,
+        favorite_endpoints=[item for item in option_rows if item.get("favorite")],
+        verified_endpoints=[item for item in option_rows if item.get("verified") and not item.get("favorite")],
         route_history=route_history_rows(config), route_events=route_event_rows(),
         peer_settings=peer_settings, peer_pending=len(peer_outbox.get("items", [])), peer_status=peer_status,
         dual_vps_health=dual_vps_health,
@@ -2215,7 +2225,7 @@ def _queue_route_sync_locked(config, port, action, return_ids=False):
     endpoint_id = route_endpoint_id(config, port)
     endpoint = next(item for item in config["endpoints"] if item["id"] == endpoint_id)
     allowed = ("id", "pool", "region", "host", "port", "algorithm", "coins", "transport",
-        "source", "enabled", "verified", "verified_at", "verified_test")
+        "source", "enabled", "verified", "verified_at", "verified_test", "favorite")
     state = load_json(PEER_STATE_FILE, {"received": []})
     node_id = str(state.get("node_id", ""))
     if not re.fullmatch(r"[a-f0-9]{16,64}", node_id):
@@ -2347,7 +2357,7 @@ def _apply_peer_payload_locked(payload):
     locate_route(config, port)
     supplied = payload["endpoint"]
     allowed = ("id", "pool", "region", "host", "port", "algorithm", "coins", "transport",
-        "source", "enabled", "verified", "verified_at", "verified_test")
+        "source", "enabled", "verified", "verified_at", "verified_test", "favorite")
     endpoint = {key: supplied[key] for key in allowed if key in supplied}
     endpoint_id = str(endpoint.get("id", ""))
     if not endpoint_id or len(endpoint_id) > 100:
@@ -2729,6 +2739,23 @@ def edit_template(template_id):
         flash("模板操作已完成，相关地址检测范围已同步更新。")
     except (KeyError, ConfigError, OSError) as exc:
         flash(f"模板操作失败：{exc}")
+    return redirect(url_for("dashboard_page", page="settings"))
+
+
+@app.route("/endpoint/<endpoint_id>/favorite", methods=["POST"])
+def toggle_endpoint_favorite(endpoint_id):
+    if not authorized() or not csrf_ok():
+        return "Forbidden", 403
+    config = store.load()
+    try:
+        endpoint = next(item for item in config["endpoints"] if item["id"] == endpoint_id)
+        endpoint["favorite"] = not bool(endpoint.get("favorite"))
+        store.save(config, actor=actor(), action=f"endpoint-favorite:{endpoint_id}:{int(endpoint['favorite'])}")
+        approve_integrity([CONFIG_FILE])
+        flash(("已收藏常用线路：" if endpoint["favorite"] else "已取消收藏：")
+            + f"{endpoint['pool']} · {endpoint['region']}。")
+    except (KeyError, StopIteration, ConfigError, OSError) as exc:
+        flash(f"收藏线路失败：{exc}")
     return redirect(url_for("dashboard_page", page="settings"))
 
 

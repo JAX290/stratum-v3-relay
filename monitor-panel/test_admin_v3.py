@@ -1032,6 +1032,26 @@ class AdminV3Test(unittest.TestCase):
         self.assertIn("每日巡检与最近 7 天稳定性".encode(), response.data)
         self.assertIn("今日巡检正常，无需人工处理".encode(), response.data)
 
+    def test_endpoint_favorite_is_saved_and_prioritized_with_change_explanation(self):
+        endpoint_id = "f2pool-global"
+        response = self.client.post(f"/endpoint/{endpoint_id}/favorite", data={"csrf": "token"})
+        self.assertEqual(response.status_code, 302)
+        endpoint = next(item for item in admin.store.load()["endpoints"] if item["id"] == endpoint_id)
+        self.assertTrue(endpoint["favorite"])
+        with patch.object(admin, "detect_relay_public_ip", return_value={"ok": True,
+                "host": "93.184.216.34", "source": "test", "message": ""}):
+            overview = self.client.get("/overview")
+            settings = self.client.get("/settings")
+        self.assertIn("★ 常用线路".encode(), overview.data)
+        self.assertIn("来源：".encode(), overview.data)
+        self.assertIn("预计影响：".encode(), overview.data)
+        self.assertIn("地址与来源".encode(), settings.data)
+        self.assertIn("取消收藏".encode(), settings.data)
+        response = self.client.post(f"/endpoint/{endpoint_id}/favorite", data={"csrf": "token"})
+        self.assertEqual(response.status_code, 302)
+        endpoint = next(item for item in admin.store.load()["endpoints"] if item["id"] == endpoint_id)
+        self.assertFalse(endpoint["favorite"])
+
     def test_immediate_peer_sync_failure_is_reported_and_kept_for_retry(self):
         token = "f" * 64
         admin.PEER_SYNC_FILE.write_text(json.dumps({"enabled": True,
