@@ -253,6 +253,34 @@ class AdminV3Test(unittest.TestCase):
         page = self.client.get("/settings", headers=headers)
         self.assertNotIn(b"private", page.data)
 
+    def test_notification_policy_is_saved_and_rendered(self):
+        headers = {"Tailscale-User-Login": "owner@example.com"}
+        data = {"csrf": "token", "email_delivery": "direct",
+            "critical_channels": ["wechat", "email"], "warning_channels": ["dingtalk"],
+            "info_channels": ["email"], "quiet_start": "22:30", "quiet_end": "07:15"}
+        with patch.object(admin.subprocess, "run"), patch.object(admin, "approve_integrity"):
+            response = self.client.post("/notification-settings", data=data, headers=headers)
+        self.assertEqual(response.status_code, 302)
+        values = admin.read_env()
+        self.assertEqual(values["NOTIFY_CRITICAL_CHANNELS"], "wechat,email")
+        self.assertEqual(values["NOTIFY_WARNING_CHANNELS"], "dingtalk")
+        self.assertEqual(values["NOTIFY_INFO_CHANNELS"], "email")
+        self.assertEqual((values["NOTIFY_QUIET_START"], values["NOTIFY_QUIET_END"]), ("22:30", "07:15"))
+        page = self.client.get("/settings", headers=headers)
+        self.assertIn("通知策略".encode(), page.data)
+
+    def test_alert_page_keeps_all_channel_failure_warning_until_success(self):
+        admin.NOTIFICATION_RESULT_FILE.write_text(json.dumps({"last_delivery": {
+            "time": 100, "channels": ["wechat", "email"], "all_failed": True, "suppressed": False}}),
+            encoding="utf-8")
+        response = self.client.get("/alerts")
+        self.assertIn("所有通知渠道最近一次发送均失败".encode(), response.data)
+        admin.NOTIFICATION_RESULT_FILE.write_text(json.dumps({"last_delivery": {
+            "time": 200, "channels": ["email"], "all_failed": False, "suppressed": False}}),
+            encoding="utf-8")
+        response = self.client.get("/alerts")
+        self.assertNotIn("所有通知渠道最近一次发送均失败".encode(), response.data)
+
     def test_direct_email_only_requires_up_to_three_recipients(self):
         headers = {"Tailscale-User-Login": "owner@example.com"}
         data = {"csrf": "token", "email_delivery": "direct", "email_to_1": "one@example.com",

@@ -30,3 +30,5 @@
 @media(max-width:760px){.admin-brief{grid-template-columns:1fr}.admin-brief ol{padding-left:18px}.expiry-row{align-items:flex-start}}
 .action-toast{position:fixed;z-index:80;right:22px;top:82px;max-width:min(520px,calc(100vw - 28px));padding:12px 16px;border:1px solid #b9ddc8;border-left:5px solid var(--green);border-radius:7px;background:#f0faf4;color:#116a41;box-shadow:0 8px 28px rgba(21,35,44,.18);font-weight:650}.action-toast.danger{border-color:#edc6c6;border-left-color:var(--red);background:#fff2f2;color:#8f2424}.action-toast[hidden]{display:none}
 @media(max-width:680px){.action-toast{top:64px;right:10px;left:10px;max-width:none}}
+.policy-row{display:grid;grid-template-columns:minmax(90px,1fr) repeat(3,minmax(100px,auto));align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line)}.policy-row label{display:flex;align-items:center;gap:7px;margin:0}.notification-failure{border:2px solid var(--red);background:#fff0f0;color:#7d2020;margin-bottom:16px;box-shadow:0 4px 16px rgba(183,53,53,.12)}
+@media(max-width:650px){.policy-row{grid-template-columns:1fr}.policy-row b{margin-bottom:2px}}

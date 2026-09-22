@@ -381,7 +381,42 @@ class Notifier:
             # Logging must not take endpoint monitoring or route recovery down.
             pass
         content = self.enrich_message(event, self.format_message(event))
-        self.send(content)
+        channels = self.channels_for_event(event)
+        if self.in_quiet_hours(event) and self.event_severity(event) != "critical":
+            self._save_outcomes({channel: {"status": "suppressed", "sent": 0, "total": 0,
+                "error": "免打扰时段内已抑制"} for channel in channels}, all_failed=False)
+            return
+        self.send(content, only=channels)
+
+    @staticmethod
+    def event_severity(event):
+        kind = str(event.get("type", ""))
+        if kind in {"endpoint_down", "endpoint_still_down", "site_offline", "integrity_changed",
+                "expiry_warning", "canary_failed"}:
+            return "critical"
+        if kind in {"endpoint_protocol_degraded", "route_sync_failed", "worker_changed", "worker_mismatch", "unknown_job"}:
+            return "warning"
+        return "info"
+
+    def channels_for_event(self, event):
+        configured = self.configured_channels()
+        key = "NOTIFY_" + self.event_severity(event).upper() + "_CHANNELS"
+        raw = self.settings.get(key, "").strip().lower()
+        if not raw:
+            return configured
+        selected = [item.strip() for item in raw.split(",") if item.strip() in {"wechat", "dingtalk", "email"}]
+        return selected
+
+    def in_quiet_hours(self, event):
+        start = self.settings.get("NOTIFY_QUIET_START", "").strip()
+        end = self.settings.get("NOTIFY_QUIET_END", "").strip()
+        if not re.fullmatch(r"\d{2}:\d{2}", start) or not re.fullmatch(r"\d{2}:\d{2}", end) or start == end:
+            return False
+        try:
+            current = datetime.fromtimestamp(int(event.get("time", time.time())), BEIJING).strftime("%H:%M")
+            return start <= current < end if start < end else current >= start or current < end
+        except (OSError, OverflowError, ValueError):
+            return False
 
     def enrich_message(self, event, content):
         kind = str(event.get("type", "unknown"))
@@ -456,7 +491,8 @@ class Notifier:
         return self._unique(self._indexed_values("EMAIL_TO", "SMTP_TO"), case_insensitive=True)
 
     def send(self, content, only=None):
-        channels = [only] if only else self.configured_channels()
+        test_channel = isinstance(only, str)
+        channels = ([only] if test_channel else list(only)) if only is not None else self.configured_channels()
         errors = []
         outcomes = {}
         for channel in channels:
@@ -496,15 +532,16 @@ class Notifier:
                     channel_errors.append(str(exc)[:200])
             outcomes[channel] = {"status": "success" if not channel_errors else "partial" if channel_sent else "failed",
                 "sent": channel_sent, "total": len(targets), "error": "；".join(channel_errors)[:300]}
-        self._save_outcomes(outcomes)
-        if only and errors:
+        successful = sum(int(item.get("sent", 0)) for item in outcomes.values())
+        self._save_outcomes(outcomes, all_failed=bool(outcomes) and successful == 0)
+        if test_channel and errors:
             raise OSError("；".join(errors))
         target_count = sum(len(self._wechat_targets()) if channel == "wechat" else
             len(self._dingtalk_targets()) if channel == "dingtalk" else
             len(self._email_recipients()) if channel == "email" else 0 for channel in channels)
         return target_count - len(errors), errors
 
-    def _save_outcomes(self, outcomes):
+    def _save_outcomes(self, outcomes, all_failed=None):
         if not outcomes:
             return
         try:
@@ -513,6 +550,12 @@ class Notifier:
             now = int(time.time())
             for channel, result in outcomes.items():
                 channels[channel] = {**result, "time": now, "display_time": beijing_time(now)}
+            suppressed = bool(outcomes) and all(item.get("status") == "suppressed" for item in outcomes.values())
+            # Quiet-hours suppression is not a delivery attempt. Keep an earlier
+            # all-channel failure visible until at least one real target succeeds.
+            if not suppressed:
+                current["last_delivery"] = {"time": now, "channels": list(outcomes),
+                    "all_failed": bool(all_failed), "suppressed": False}
             self.result_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.result_path.with_suffix(".tmp")
             temporary.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

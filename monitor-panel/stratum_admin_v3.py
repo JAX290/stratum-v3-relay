@@ -151,7 +151,8 @@ def write_env(updates):
 
 
 NOTIFICATION_ENV_KEYS = ("WECHAT_WEBHOOK", "DINGTALK_WEBHOOK", "DINGTALK_SECRET", "SMTP_TO",
-    "EMAIL_DELIVERY", "SMTP_HOST", "SMTP_PORT", "SMTP_SECURITY", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM") + tuple(
+    "EMAIL_DELIVERY", "SMTP_HOST", "SMTP_PORT", "SMTP_SECURITY", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM",
+    "NOTIFY_CRITICAL_CHANNELS", "NOTIFY_WARNING_CHANNELS", "NOTIFY_INFO_CHANNELS", "NOTIFY_QUIET_START", "NOTIFY_QUIET_END") + tuple(
         f"{prefix}_{number}" for prefix in ("WECHAT_WEBHOOK", "DINGTALK_WEBHOOK", "DINGTALK_SECRET", "EMAIL_TO")
         for number in range(1, 4))
 
@@ -179,7 +180,11 @@ def notification_context():
         "direct_mail_available": Path("/usr/sbin/postfix").exists(),
         "smtp_host": values.get("SMTP_HOST", ""), "smtp_port": values.get("SMTP_PORT", "465"),
         "smtp_security": values.get("SMTP_SECURITY", "ssl"), "smtp_username": values.get("SMTP_USERNAME", ""),
-        "smtp_from": values.get("SMTP_FROM", "")}
+        "smtp_from": values.get("SMTP_FROM", ""),
+        "critical_channels": values.get("NOTIFY_CRITICAL_CHANNELS", "wechat,dingtalk,email").split(","),
+        "warning_channels": values.get("NOTIFY_WARNING_CHANNELS", "wechat,dingtalk,email").split(","),
+        "info_channels": values.get("NOTIFY_INFO_CHANNELS", "wechat,dingtalk,email").split(","),
+        "quiet_start": values.get("NOTIFY_QUIET_START", ""), "quiet_end": values.get("NOTIFY_QUIET_END", "")}
 
 
 def notification_result_rows():
@@ -197,6 +202,14 @@ def notification_result_rows():
         rows.append({**item, "key": key, "label": labels[key],
             "status_text": {"success": "发送成功", "partial": "部分成功", "failed": "发送失败"}.get(item.get("status"), "状态未知")})
     return rows
+
+
+def all_notification_channels_failed():
+    common = load_json(NOTIFICATION_RESULT_FILE, {}).get("last_delivery", {})
+    secure = load_json(SECURE_NOTIFICATION_RESULT_FILE, {})
+    if int(secure.get("time", 0) or 0) > int(common.get("time", 0) or 0):
+        return secure.get("status") == "failed"
+    return bool(common.get("all_failed")) and not common.get("suppressed")
 
 
 def clamp_int(value, minimum, maximum):
@@ -1281,6 +1294,7 @@ def build_page_context(page):
         security=security, sites=sites, reminders=reminders, admin_brief=administrator_brief(overview, services, sites, len([value for value in state.get("endpoints", {}).values() if value.get("alerting")]), reminders),
         maintenance=maintenance_center(services, logs), diagnostics=diagnostics, issue_registry=issue_registry,
         notification_settings=notification_context(), notification_results=notification_result_rows(),
+        notification_all_failed=all_notification_channels_failed(),
         operation_timeline=operation_timeline(security), panel_version=PANEL_VERSION,
         current_client_version=CURRENT_CLIENT_VERSION, current_relay_version=CURRENT_RELAY_VERSION,
         relay_server_version=(sites[0]["server_version"] if sites else load_json(SECURE_RELAY_STATE, {}).get("server_version", "未上报")),
@@ -2704,6 +2718,21 @@ def save_notification_settings():
             raise ValueError("收件邮箱格式不正确")
         if updates["EMAIL_DELIVERY"] not in {"smtp", "direct"}:
             raise ValueError("邮箱发送方式不正确")
+        allowed_channels = {"wechat", "dingtalk", "email"}
+        for severity in ("critical", "warning", "info"):
+            selected = [item for item in request.form.getlist(severity + "_channels") if item in allowed_channels]
+            if severity + "_channels" not in request.form:
+                raw_policy = updates.get("NOTIFY_" + severity.upper() + "_CHANNELS") or "wechat,dingtalk,email"
+                selected = [item for item in raw_policy.split(",") if item in allowed_channels]
+            if not selected:
+                raise ValueError("每个严重级别至少选择一种通知渠道")
+            updates["NOTIFY_" + severity.upper() + "_CHANNELS"] = ",".join(selected)
+        quiet_start = request.form.get("quiet_start", "").strip()
+        quiet_end = request.form.get("quiet_end", "").strip()
+        if bool(quiet_start) != bool(quiet_end) or any(value and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value)
+                for value in (quiet_start, quiet_end)):
+            raise ValueError("免打扰开始和结束时间必须同时填写有效的 24 小时时间")
+        updates["NOTIFY_QUIET_START"], updates["NOTIFY_QUIET_END"] = quiet_start, quiet_end
         if recipients and updates["EMAIL_DELIVERY"] == "smtp":
             if not (updates["SMTP_HOST"] and re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", updates["SMTP_FROM"])):
                 raise ValueError("使用邮箱服务商发送时，需要完整填写 SMTP 服务器和发件地址")

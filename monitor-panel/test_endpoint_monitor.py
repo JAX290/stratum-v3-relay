@@ -111,7 +111,7 @@ class EndpointMonitorTest(unittest.TestCase):
             notifier = Notifier(settings={"PANEL_URL": "https://relay.example.com"},
                 event_path=root / "events.jsonl", result_path=root / "results.json")
             messages = []
-            with patch.object(notifier, "send", side_effect=messages.append):
+            with patch.object(notifier, "send", side_effect=lambda content, only=None: messages.append(content)):
                 notifier({"type": "endpoint_down", "time": 100, "endpoint": "pool.example:3333",
                     "pool": "测试池", "port": 11301, "message": "连接超时"})
                 notifier({"type": "recovery", "time": 200, "endpoint": "pool.example:3333",
@@ -135,6 +135,51 @@ class EndpointMonitorTest(unittest.TestCase):
             self.assertEqual(result["status"], "partial")
             self.assertEqual((result["sent"], result["total"]), (1, 2))
             self.assertIn("timeout", result["error"])
+
+    def test_notification_policy_maps_severity_to_channels(self):
+        settings = {"WECHAT_WEBHOOK_1": "https://qyapi.example/send?key=one",
+            "EMAIL_DELIVERY": "direct", "EMAIL_TO_1": "ops@example.com",
+            "NOTIFY_CRITICAL_CHANNELS": "wechat", "NOTIFY_INFO_CHANNELS": "email"}
+        notifier = Notifier(settings=settings)
+        with patch.object(notifier, "send") as send:
+            notifier({"type": "endpoint_down", "time": 0, "endpoint": "critical.example:3333"})
+            notifier({"type": "recovery", "time": 0, "endpoint": "info.example:3333"})
+        self.assertEqual(send.call_args_list[0].kwargs["only"], ["wechat"])
+        self.assertEqual(send.call_args_list[1].kwargs["only"], ["email"])
+
+    def test_quiet_hours_suppress_info_but_never_critical(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result_path = Path(folder) / "results.json"
+            settings = {"WECHAT_WEBHOOK_1": "https://qyapi.example/send?key=one",
+                "NOTIFY_CRITICAL_CHANNELS": "wechat", "NOTIFY_INFO_CHANNELS": "wechat",
+                "NOTIFY_QUIET_START": "22:00", "NOTIFY_QUIET_END": "07:00"}
+            notifier = Notifier(settings=settings, result_path=result_path)
+            # 1969-12-31 16:00 UTC is midnight in Beijing.
+            with patch.object(notifier, "send") as send:
+                notifier({"type": "recovery", "time": -28800, "endpoint": "pool.example:3333"})
+                notifier({"type": "endpoint_down", "time": -28800, "endpoint": "pool.example:3333"})
+            send.assert_called_once()
+            self.assertEqual(send.call_args.kwargs["only"], ["wechat"])
+
+    def test_all_channel_failure_persists_through_suppression_and_clears_on_success(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "results.json"
+            notifier = Notifier(settings={}, result_path=path)
+            notifier._save_outcomes({"wechat": {"status": "failed", "sent": 0, "total": 1,
+                "error": "timeout"}}, all_failed=True)
+            notifier._save_outcomes({"wechat": {"status": "suppressed", "sent": 0, "total": 0,
+                "error": "免打扰时段内已抑制"}}, all_failed=False)
+            self.assertTrue(json.loads(path.read_text(encoding="utf-8"))["last_delivery"]["all_failed"])
+            notifier._save_outcomes({"email": {"status": "success", "sent": 1, "total": 1,
+                "error": ""}}, all_failed=False)
+            self.assertFalse(json.loads(path.read_text(encoding="utf-8"))["last_delivery"]["all_failed"])
+
+    def test_regular_multi_channel_delivery_does_not_raise_when_one_channel_fails(self):
+        notifier = Notifier(settings={"WECHAT_WEBHOOK_1": "https://qyapi.example/send?key=one"})
+        with patch.object(notifier, "_post_json"):
+            sent, errors = notifier.send("test", only=["wechat", "email"])
+        self.assertEqual(sent, 0)
+        self.assertEqual(len(errors), 1)
 
     def test_notification_sends_wechat_and_dingtalk_without_exposing_secrets(self):
         settings = {"WECHAT_WEBHOOK_1": "https://qyapi.example/send?key=private-1",
