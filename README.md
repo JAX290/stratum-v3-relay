@@ -4,6 +4,9 @@
 
 管理员可以通过 Tailscale 管理线路和矿场，也可以通过带账号密码的 HTTPS 只读面板日常查看状态。
 
+> [!IMPORTANT]
+> **同一台 VPS 部署其他服务前，必须先阅读 [VPS 多服务共存边界](docs/vps-service-boundaries.md)。** HAProxy、Tailscale Serve、Nginx、公网端口和中转账户都有明确归属，新的安装脚本不能直接覆盖或复用。仓库根目录的 [AGENTS.md](AGENTS.md) 对所有开发者和自动化工具同样生效。
+
 当前 Windows 客户端版本为 `2.3.13`，管理面板为 `3.2.18`，VPS 加密入口为 `2.2.4`。Windows 客户端设置页可在管理员控制的本机直接打开，配置由管理员手工填写并验证，不再提供接入文件导入和换机备份。VPS 总览包含双机状态、每日巡检和 7 天稳定性；管理面板以独立低权限账户运行，只有固定配置和服务动作交给本机特权助手执行。发布状态见[更新计划](docs/improvement-roadmap.md)，各组件版本定义见 [version.json](version.json)。
 
 ```text
@@ -20,6 +23,7 @@ TLS 加密覆盖值守电脑到 VPS 的链路；矿机到值守电脑、VPS 到�
 - [快速部署与升级](#快速部署与升级)：首次安装、保留配置升级及中断续装。
 - [管理员完整使用说明](docs/administrator-guide.md)：登录方式、页面指标、折叠明细原理、线路操作、矿场和通知管理。
 - [部署与维护指南](docs/deployment-guide.md)：Windows、备用 VPS、矿机设置及组件排障。
+- [VPS 多服务共存边界](docs/vps-service-boundaries.md)：在同一台 VPS 部署其他网站、API、容器或 Tailscale 服务前必须遵守的端口和配置规则。
 - [后续更新计划与进度](docs/improvement-roadmap.md)：按 VPS 端、Windows 客户端分别维护待办、进度和完成记录。
 
 ## 功能说明

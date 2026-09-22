@@ -7,6 +7,19 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class DeploymentSecurityTest(unittest.TestCase):
+    def test_vps_coexistence_boundaries_are_prominent_and_preserved(self):
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        deployment = (ROOT / "docs" / "deployment-guide.md").read_text(encoding="utf-8")
+        boundaries = (ROOT / "docs" / "vps-service-boundaries.md").read_text(encoding="utf-8")
+        for entry in (agents, readme, deployment):
+            self.assertIn("vps-service-boundaries.md", entry)
+        for rule in ("tailscale serve reset", "/etc/haproxy/haproxy.cfg", "127.0.0.1:12001:8080",
+                "20000-20299", "stratum-admin", "nginx -t"):
+            self.assertIn(rule, boundaries if rule == "127.0.0.1:12001:8080" else agents + boundaries)
+        self.assertIn("不得", agents)
+        self.assertIn("必须先读", boundaries)
+
     def test_cloud_signing_workflow_is_opt_in_until_secrets_are_configured(self):
         workflow = (ROOT / ".github" / "workflows" / "release-client.yml").read_text(encoding="utf-8")
         guide = (ROOT / "docs" / "releasing.md").read_text(encoding="utf-8")
