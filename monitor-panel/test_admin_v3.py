@@ -961,6 +961,45 @@ class AdminV3Test(unittest.TestCase):
         self.assertTrue(accepted.get_json()["stale"])
         self.assertEqual(admin.route_endpoint_id(admin.store.load(), 11301), "f2pool-global")
 
+    def test_authenticated_peer_health_summary_and_difference_detection(self):
+        token = "h" * 64
+        peer = "https://peer.tail1234.ts.net"
+        admin.PEER_SYNC_FILE.write_text(json.dumps({"enabled": True, "peers": [peer], "token": token}),
+            encoding="utf-8")
+        denied = self.client.get("/api/v3/health-summary")
+        self.assertEqual(denied.status_code, 404)
+        with patch.object(admin, "service_state", return_value="active"), \
+                patch.object(admin, "server_metrics", return_value={"memory": "20%", "disk": "30%"}):
+            accepted = self.client.get("/api/v3/health-summary",
+                headers={"Authorization": "Bearer " + token})
+        self.assertEqual(accepted.status_code, 200)
+        health = accepted.get_json()["health"]
+        self.assertEqual(health["panel_version"], admin.PANEL_VERSION)
+        self.assertEqual(health["services_active"], health["services_total"])
+
+        class Response:
+            def read(self):
+                return json.dumps({"ok": True, "health": {**health, "name": "peer-vps",
+                    "panel_version": "0.0.1", "route_digest": "different"}}).encode()
+            def close(self):
+                pass
+
+        services = {"HAProxy": "active", "管理面板": "active"}
+        with patch.object(admin.urllib.request, "urlopen", return_value=Response()):
+            summary = admin.dual_vps_health_summary(admin.store.load(), services,
+                {"memory": "20%", "disk": "30%"}, admin.load_peer_settings())
+        self.assertEqual(len(summary["nodes"]), 2)
+        self.assertIn("管理面板版本不一致", summary["differences"])
+        self.assertIn("线路配置不一致", summary["differences"])
+
+    def test_overview_renders_unified_dual_vps_health(self):
+        with patch.object(admin, "detect_relay_public_ip", return_value={"ok": True,
+                "host": "93.184.216.34", "source": "test", "message": ""}):
+            response = self.client.get("/overview")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("双 VPS 统一健康摘要".encode(), response.data)
+        self.assertIn("等待配置对端".encode(), response.data)
+
     def test_immediate_peer_sync_failure_is_reported_and_kept_for_retry(self):
         token = "f" * 64
         admin.PEER_SYNC_FILE.write_text(json.dumps({"enabled": True,

@@ -1258,6 +1258,7 @@ def build_page_context(page):
     access = client_access_context(config) if page == "access" else None
     logs = recent_logs() if page == "logs" else {"journal": "", "entries": [], "attention": [], "events": ""}
     metrics = server_metrics()
+    dual_vps_health = dual_vps_health_summary(config, services, metrics, peer_settings) if page == "overview" else None
     diagnostics = comprehensive_diagnostics(config, services, metrics, certificate, state,
         {**peer_settings, **peer_status, "pending": len(peer_outbox.get("items", []))}, sites, overview,
         logs, VERSIONS, port_listening) if page == "logs" else None
@@ -1284,6 +1285,7 @@ def build_page_context(page):
         verified_endpoints=[{**endpoint, "algorithm_value": endpoint_algorithm(config, endpoint)} for endpoint in config["endpoints"] if endpoint.get("verified")],
         route_history=route_history_rows(config), route_events=route_event_rows(),
         peer_settings=peer_settings, peer_pending=len(peer_outbox.get("items", [])), peer_status=peer_status,
+        dual_vps_health=dual_vps_health,
         route_event_labels={"canary_started": "测试已开始", "canary_passed": "测试通过并切换",
             "canary_failed": "测试失败并退回", "canary_stopped": "测试已提前停止",
             "verified_route_applied": "已验证地址切换", "route_restored": "历史线路已恢复",
@@ -2042,6 +2044,79 @@ def peer_sync_summary():
         "last_time": beijing_time(last.get("time", 0)) if last.get("time") else "尚未执行"}
 
 
+def route_configuration_digest(config):
+    routes = sorted((int(port), str(endpoint_id)) for port, endpoint_id, _, _ in route_map(config))
+    return hashlib.sha256(json.dumps(routes, separators=(",", ":")).encode()).hexdigest()[:16]
+
+
+def local_vps_health_summary(config=None, services=None, metrics=None):
+    config = config or store.load()
+    services = services or {"HAProxy": service_state("haproxy"),
+        "协议检查器": service_state("stratum-inspector-v3"),
+        "稳定性监控": service_state("stratum-endpoint-monitor"),
+        "自动切换": service_state("stratum-route-switch-monitor"),
+        "安全监控": service_state("stratum-security-monitor"),
+        "加密入口": service_state("stratum-secure-relay"),
+        "矿场在线监控": service_state("stratum-secure-monitor"),
+        "管理面板": service_state("stratum-admin"),
+        "自动恢复": service_state("stratum-vps-watchdog.timer")}
+    state = load_json(PEER_STATE_FILE, {})
+    received_times = [int(row.get("last_received_at", 0) or 0)
+        for row in state.get("route_versions", {}).values() if isinstance(row, dict)]
+    abnormal = [name for name, value in services.items() if value != "active"]
+    now = int(time.time())
+    last_received = max(received_times, default=0)
+    return {"name": socket.gethostname(), "checked_at": now, "panel_version": PANEL_VERSION,
+        "relay_version": CURRENT_RELAY_VERSION, "route_digest": route_configuration_digest(config),
+        "services_total": len(services), "services_active": len(services) - len(abnormal),
+        "abnormal_services": abnormal, "memory": (metrics or server_metrics()).get("memory", "-"),
+        "disk": (metrics or server_metrics()).get("disk", "-"), "last_peer_update": last_received,
+        "sync_age_seconds": max(0, now - last_received) if last_received else None}
+
+
+def fetch_peer_health(peer, token):
+    started = time.monotonic()
+    request_value = urllib.request.Request(validate_peer_url(peer) + "/api/v3/health-summary",
+        headers={"Authorization": "Bearer " + token, "Accept": "application/json"})
+    response = urllib.request.urlopen(request_value, timeout=4)
+    try:
+        result = json.loads(response.read())
+    finally:
+        response.close()
+    if not isinstance(result, dict) or not result.get("ok") or not isinstance(result.get("health"), dict):
+        raise OSError("对端返回的健康摘要不完整")
+    return {**result["health"], "peer": validate_peer_url(peer),
+        "reachable": True, "response_ms": round((time.monotonic() - started) * 1000)}
+
+
+def dual_vps_health_summary(config, services, metrics, peer_settings):
+    local = {**local_vps_health_summary(config, services, metrics), "peer": "本机", "reachable": True,
+        "response_ms": 0, "local": True}
+    nodes = [local]
+    if peer_settings.get("enabled") and len(peer_settings.get("token", "")) >= 32:
+        for peer in peer_settings.get("peers", []):
+            try:
+                nodes.append(fetch_peer_health(peer, peer_settings["token"]))
+            except (OSError, ValueError, ConfigError, json.JSONDecodeError) as exc:
+                nodes.append({"name": urlsplit(peer).hostname or peer, "peer": peer, "reachable": False,
+                    "response_ms": None, "error": str(exc)[:180], "abnormal_services": []})
+    differences = []
+    reachable = [item for item in nodes if item.get("reachable")]
+    if len(nodes) >= 2:
+        if any(not item.get("reachable") for item in nodes):
+            differences.append("有对端 VPS 无法读取健康状态")
+        if len({item.get("panel_version") for item in reachable}) > 1:
+            differences.append("管理面板版本不一致")
+        if len({item.get("relay_version") for item in reachable}) > 1:
+            differences.append("加密入口版本不一致")
+        if len({item.get("route_digest") for item in reachable}) > 1:
+            differences.append("线路配置不一致")
+        if any(item.get("abnormal_services") for item in reachable):
+            differences.append("至少一台 VPS 存在核心服务异常")
+    return {"nodes": nodes, "differences": differences,
+        "all_healthy": len(nodes) >= 2 and not differences}
+
+
 def validate_peer_url(value):
     parsed = urlsplit(str(value).strip().rstrip("/"))
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
@@ -2523,6 +2598,19 @@ def receive_route_sync():
         return jsonify({"ok": True, **result})
     except (KeyError, StopIteration, TypeError, ValueError, ConfigError, OSError) as exc:
         return jsonify({"ok": False, "error": str(exc)[:300]}), 400
+
+
+@app.route("/api/v3/health-summary")
+def receive_health_summary():
+    settings = load_peer_settings()
+    authorization = request.headers.get("Authorization", "")
+    supplied = authorization[7:] if authorization.startswith("Bearer ") else ""
+    if not settings["enabled"] or len(settings["token"]) < 32 or not secrets.compare_digest(settings["token"], supplied):
+        return "Not found", 404
+    try:
+        return jsonify({"ok": True, "health": local_vps_health_summary()})
+    except (OSError, ValueError, ConfigError) as exc:
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 500
 
 
 @app.route("/template/create", methods=["POST"])
