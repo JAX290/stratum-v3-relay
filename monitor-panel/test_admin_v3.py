@@ -53,6 +53,8 @@ class AdminV3Test(unittest.TestCase):
         admin.ACCESS_PACKAGE_DIR = root / "access-packages"
         admin.CLIENT_ACTION_FILE = root / "client-actions.json"
         admin.ISSUE_STATE_FILE = root / "issues.json"
+        admin.REPAIR_GUARD_FILE = root / "repair-guard.json"
+        admin.REPAIR_BACKUP_DIR = root / "repair-backups"
         admin.store = ConfigStore(config_path, root / "history", admin.AUDIT_FILE)
         admin.app.config.update(TESTING=True, SECRET_KEY="test")
         admin.LOGIN_FAILURES.clear()
@@ -425,6 +427,43 @@ class AdminV3Test(unittest.TestCase):
         self.assertFalse(old.exists())
         self.assertTrue(fresh.exists())
         self.assertTrue(unrelated.exists())
+
+    def test_repair_backup_restores_config_and_old_logs(self):
+        original = admin.CONFIG_FILE.read_bytes()
+        admin.DISCONNECT_HISTORY_DIR.mkdir()
+        old = admin.DISCONNECT_HISTORY_DIR / "disconnect-2026-01-01.jsonl"
+        old.write_text("old log", encoding="utf-8")
+        os.utime(old, (100, 100))
+        backup = admin.create_repair_backup("clean-logs", now=700_000)
+        admin.CONFIG_FILE.write_text("broken", encoding="utf-8")
+        old.unlink()
+        restored = admin.restore_repair_backup(backup)
+        self.assertEqual(admin.CONFIG_FILE.read_bytes(), original)
+        self.assertEqual(old.read_text(encoding="utf-8"), "old log")
+        self.assertIn("main-config", restored)
+        self.assertIn("log:" + old.name, restored)
+
+    def test_failed_repair_restores_backup_and_stops_after_three_failures(self):
+        original = admin.CONFIG_FILE.read_text(encoding="utf-8")
+        def break_reload(*args, **kwargs):
+            admin.CONFIG_FILE.write_text("broken", encoding="utf-8")
+            raise OSError("reload failed")
+        with patch.object(admin, "current_tailscale_admin", return_value=True), \
+                patch.object(admin, "validate_config"), patch.object(admin, "save_and_reload", side_effect=break_reload):
+            for _ in range(4):
+                response = self.client.post("/repairs/reload-config", data={"csrf": "token"})
+                self.assertEqual(response.status_code, 302)
+        self.assertEqual(admin.CONFIG_FILE.read_text(encoding="utf-8"), original)
+        guard = json.loads(admin.REPAIR_GUARD_FILE.read_text(encoding="utf-8"))["reload-config"]
+        self.assertEqual(guard["failures"], 3)
+        self.assertTrue(admin.REPAIR_BACKUP_DIR.exists())
+
+    def test_successful_repair_resets_failure_guard(self):
+        admin.REPAIR_GUARD_FILE.write_text(json.dumps({"clean-logs": {"failures": 2}}), encoding="utf-8")
+        with patch.object(admin, "current_tailscale_admin", return_value=True), \
+                patch.object(admin, "clean_expired_project_logs", return_value=0):
+            self.client.post("/repairs/clean-logs", data={"csrf": "token"})
+        self.assertEqual(admin.repair_guard("clean-logs")["failures"], 0)
 
     def test_recovered_service_does_not_leave_an_old_problem_open(self):
         records = [

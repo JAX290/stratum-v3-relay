@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from ipaddress import ip_address
@@ -60,6 +61,8 @@ SECURE_RELAY_EVENT_FILE = Path(os.getenv("SECURE_RELAY_EVENT_FILE", "/var/lib/st
 ACCESS_PACKAGE_DIR = Path(os.getenv("ACCESS_PACKAGE_DIR", "/var/lib/stratum-monitor/access-packages"))
 CLIENT_ACTION_FILE = Path(os.getenv("SECURE_RELAY_CLIENT_ACTIONS", "/var/lib/stratum-secure-relay/client-actions.json"))
 ISSUE_STATE_FILE = Path(os.getenv("V3_ISSUE_STATE_FILE", "/var/lib/stratum-monitor/issues.json"))
+REPAIR_GUARD_FILE = Path(os.getenv("V3_REPAIR_GUARD_FILE", "/var/lib/stratum-monitor/repair-guard.json"))
+REPAIR_BACKUP_DIR = Path(os.getenv("V3_REPAIR_BACKUP_DIR", "/var/lib/stratum-monitor/repair-backups"))
 VERSIONS = load_versions()
 PANEL_VERSION = VERSIONS["panel"]
 CURRENT_CLIENT_VERSION = VERSIONS["windows_client"]
@@ -1614,33 +1617,115 @@ def clean_expired_project_logs(now=None):
     return removed
 
 
+def repair_files():
+    return {"main-config": CONFIG_FILE, "inspector-config": INSPECTOR_CONFIG,
+        "haproxy-config": HAPROXY_CONFIG, "endpoint-state": STATE_FILE,
+        "peer-outbox": PEER_OUTBOX_FILE}
+
+
+def create_repair_backup(action, now=None):
+    REPAIR_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = int((now or time.time()) * 1000)
+    path = REPAIR_BACKUP_DIR / f"repair-{stamp}-{re.sub(r'[^a-z0-9-]', '-', action.lower())[:40]}.zip"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        members = []
+        for name, source in repair_files().items():
+            if source.is_file():
+                archive.writestr(name + ".bin", source.read_bytes())
+                members.append(name)
+        log_files = []
+        if action == "clean-logs" and DISCONNECT_HISTORY_DIR.exists():
+            cutoff = int((now or time.time())) - 7 * 86400
+            for source in DISCONNECT_HISTORY_DIR.glob("disconnect-*.jsonl"):
+                if int(source.stat().st_mtime) <= cutoff:
+                    archive.writestr("logs/" + source.name, source.read_bytes())
+                    log_files.append(source.name)
+        archive.writestr("manifest.json", json.dumps({"action": action, "created_at": stamp,
+            "members": members, "log_files": log_files}, ensure_ascii=False, indent=2))
+    os.chmod(path, 0o600)
+    backups = sorted(REPAIR_BACKUP_DIR.glob("repair-*.zip"), key=lambda item: item.stat().st_mtime, reverse=True)
+    for old in backups[10:]:
+        old.unlink(missing_ok=True)
+    return path
+
+
+def restore_repair_backup(path):
+    restored = []
+    with zipfile.ZipFile(path) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        allowed = repair_files()
+        for name in manifest.get("members", []):
+            if name not in allowed:
+                raise ValueError("repair backup contains an unsupported member")
+            target = allowed[name]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(target.name + ".repair-restore")
+            temporary.write_bytes(archive.read(name + ".bin"))
+            os.replace(temporary, target)
+            restored.append(name)
+        for name in manifest.get("log_files", []):
+            if not re.fullmatch(r"disconnect-\d{4}-\d{2}-\d{2}(?:\.\d+)?\.jsonl", str(name)):
+                raise ValueError("repair backup contains an unsupported log name")
+            DISCONNECT_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+            (DISCONNECT_HISTORY_DIR / name).write_bytes(archive.read("logs/" + name))
+            restored.append("log:" + name)
+    return restored
+
+
+def repair_guard(key):
+    row = load_json(REPAIR_GUARD_FILE, {}).get(key, {})
+    return {"failures": int(row.get("failures", 0) or 0), "blocked": int(row.get("failures", 0) or 0) >= 3,
+        "last_error": str(row.get("last_error", ""))}
+
+
+def record_repair_result(key, success, error=""):
+    state = load_json(REPAIR_GUARD_FILE, {})
+    previous = state.get(key, {}) if isinstance(state.get(key, {}), dict) else {}
+    failures = 0 if success else int(previous.get("failures", 0) or 0) + 1
+    state[key] = {"failures": failures, "last_time": int(time.time()),
+        "last_result": "success" if success else "failed", "last_error": str(error)[:300]}
+    ConfigStore._atomic_write(REPAIR_GUARD_FILE, json.dumps(state, ensure_ascii=False, indent=2) + "\n", mode=0o600)
+    return {"failures": failures, "blocked": failures >= 3}
+
+
 @app.route("/repairs/<action>", methods=["POST"])
 def run_safe_repair(action):
     if not current_tailscale_admin():
         return "Not found", 404
     if not csrf_ok():
         return "Forbidden", 403
-    issue_keys, label = [], ""
+    service = request.form.get("service", "") if action == "restart-service" else ""
+    if action not in {"restart-service", "retry-sync", "reload-config", "reprobe", "clean-logs"}:
+        return "Not found", 404
+    if action == "restart-service" and service not in SAFE_SERVICE_REPAIRS:
+        return "Not found", 404
+    labels = {"retry-sync": "重试双 VPS 同步", "reload-config": "验证并重新加载配置",
+        "reprobe": "重新探测生产矿池", "clean-logs": "清理过期项目日志"}
+    issue_map = {"retry-sync": ["peer"], "reload-config": ["ports", "haproxy"],
+        "reprobe": ["pools"], "clean-logs": ["disk"]}
+    label = "重启" + SAFE_SERVICE_REPAIRS[service] if service else labels[action]
+    issue_keys = ["service:" + SAFE_SERVICE_REPAIRS[service]] if service else issue_map[action]
+    guard_key = action + (":" + service if service else "")
+    guard = repair_guard(guard_key)
+    if guard["blocked"]:
+        record_issue_attempt(issue_keys, label, "已停止：连续失败 3 次")
+        flash("为防止反复断线，此修复已在连续失败 3 次后停止。请先人工检查原因。", "error")
+        return redirect(url_for("dashboard_page", page="logs"))
+    backup = None
     try:
+        backup = create_repair_backup(guard_key)
         if action == "restart-service":
-            service = request.form.get("service", "")
-            if service not in SAFE_SERVICE_REPAIRS:
-                return "Not found", 404
-            label = "重启" + SAFE_SERVICE_REPAIRS[service]
             result = subprocess.run(["systemctl", "restart", service], capture_output=True, text=True,
                 timeout=30, check=False)
             if result.returncode or service_state(service) != "active":
                 raise OSError((result.stderr or result.stdout or "服务复查未恢复 active")[-300:])
             message = SAFE_SERVICE_REPAIRS[service] + "已重启，自动复查正常。"
-            issue_keys = ["service:" + SAFE_SERVICE_REPAIRS[service]]
         elif action == "retry-sync":
-            label, issue_keys = "重试双 VPS 同步", ["peer"]
             result = retry_pending_peer_sync()
             if result.get("pending"):
                 raise OSError(f"仍有 {result['pending']} 项等待同步")
             message = f"双 VPS 同步已重试，自动复查确认 {result.get('sent', 0)} 项完成。"
         elif action == "reload-config":
-            label, issue_keys = "验证并重新加载配置", ["ports", "haproxy"]
             config = store.load()
             validate_config(config, resolve=True)
             save_and_reload(config, "safe-repair-reload")
@@ -1649,24 +1734,33 @@ def run_safe_repair(action):
                 raise OSError("复查发现未监听端口：" + "、".join(missing))
             message = "配置验证、平滑重新加载和端口复查均已通过。"
         elif action == "reprobe":
-            label, issue_keys = "重新探测生产矿池", ["pools"]
             result = reprobe_active_endpoints(store.load())
             if result["healthy"] != result["checked"]:
                 raise OSError(f"{result['checked']} 个地址中仍有 {result['checked'] - result['healthy']} 个异常")
             message = f"已重新探测 {result['checked']} 个生产地址，全部正常。"
         elif action == "clean-logs":
-            label, issue_keys = "清理过期项目日志", ["disk"]
             removed = clean_expired_project_logs()
             message = f"已清理 {removed} 个超过 7 天的项目断线日志，并完成目录复查。"
-        else:
-            return "Not found", 404
+        record_repair_result(guard_key, True)
         record_issue_attempt(issue_keys, label, "成功")
         append_audit("安全修复:" + action)
         flash(message, "success")
     except (ConfigError, OSError, subprocess.SubprocessError, ValueError) as exc:
-        record_issue_attempt(issue_keys, label or action, "失败：" + str(exc)[:160])
+        restored = []
+        if backup:
+            try:
+                restored = restore_repair_backup(backup)
+            except (OSError, ValueError, zipfile.BadZipFile) as restore_error:
+                app.logger.exception("repair rollback failed: %s", restore_error)
+        if action == "reload-config" and restored and os.getenv("V3_RELOAD_SERVICES", "0") == "1":
+            subprocess.run(["systemctl", "reload", "haproxy"], capture_output=True, timeout=15, check=False)
+        guard = record_repair_result(guard_key, False, str(exc))
+        suffix = "；已恢复操作前备份" if restored else "；没有文件需要恢复"
+        if guard["blocked"]:
+            suffix += "；连续失败 3 次，后续自动重试已停止"
+        record_issue_attempt(issue_keys, label, "失败：" + str(exc)[:140] + suffix)
         append_audit("安全修复失败:" + action)
-        flash("安全修复未完成：" + str(exc), "error")
+        flash("安全修复未完成：" + str(exc) + suffix, "error")
     return redirect(url_for("dashboard_page", page="logs"))
 
 
