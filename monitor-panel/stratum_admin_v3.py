@@ -65,6 +65,8 @@ ISSUE_STATE_FILE = Path(os.getenv("V3_ISSUE_STATE_FILE", "/var/lib/stratum-monit
 REPAIR_GUARD_FILE = Path(os.getenv("V3_REPAIR_GUARD_FILE", "/var/lib/stratum-monitor/repair-guard.json"))
 REPAIR_BACKUP_DIR = Path(os.getenv("V3_REPAIR_BACKUP_DIR", "/var/lib/stratum-monitor/repair-backups"))
 HIGH_RISK_CANDIDATE_DIR = Path(os.getenv("V3_CANDIDATE_DIR", "/var/lib/stratum-monitor/candidates"))
+NOTIFICATION_RESULT_FILE = Path(os.getenv("NOTIFICATION_RESULT_FILE", "/var/lib/stratum-monitor/notification-results.json"))
+SECURE_NOTIFICATION_RESULT_FILE = Path(os.getenv("SECURE_NOTIFICATION_RESULT_FILE", "/var/lib/stratum-secure-relay/notification-result.json"))
 VERSIONS = load_versions()
 PANEL_VERSION = VERSIONS["panel"]
 CURRENT_CLIENT_VERSION = VERSIONS["windows_client"]
@@ -178,6 +180,23 @@ def notification_context():
         "smtp_host": values.get("SMTP_HOST", ""), "smtp_port": values.get("SMTP_PORT", "465"),
         "smtp_security": values.get("SMTP_SECURITY", "ssl"), "smtp_username": values.get("SMTP_USERNAME", ""),
         "smtp_from": values.get("SMTP_FROM", "")}
+
+
+def notification_result_rows():
+    value = load_json(NOTIFICATION_RESULT_FILE, {"channels": {}})
+    channels = value.get("channels", {}) if isinstance(value.get("channels", {}), dict) else {}
+    secure = load_json(SECURE_NOTIFICATION_RESULT_FILE, {})
+    if secure.get("channel") == "wechat" and int(secure.get("time", 0) or 0) > int(channels.get("wechat", {}).get("time", 0) or 0):
+        channels["wechat"] = {**secure, "display_time": beijing_time(secure.get("time", 0))}
+    labels = {"wechat": "企业微信", "dingtalk": "钉钉", "email": "邮箱"}
+    rows = []
+    for key in ("wechat", "dingtalk", "email"):
+        item = channels.get(key, {})
+        if not item:
+            continue
+        rows.append({**item, "key": key, "label": labels[key],
+            "status_text": {"success": "发送成功", "partial": "部分成功", "failed": "发送失败"}.get(item.get("status"), "状态未知")})
+    return rows
 
 
 def clamp_int(value, minimum, maximum):
@@ -1261,7 +1280,7 @@ def build_page_context(page):
         algorithms={"scrypt": "Scrypt", "sha256d": "SHA-256", "other": "其他/自定义", "unknown": "算法待确认"},
         security=security, sites=sites, reminders=reminders, admin_brief=administrator_brief(overview, services, sites, len([value for value in state.get("endpoints", {}).values() if value.get("alerting")]), reminders),
         maintenance=maintenance_center(services, logs), diagnostics=diagnostics, issue_registry=issue_registry,
-        notification_settings=notification_context(),
+        notification_settings=notification_context(), notification_results=notification_result_rows(),
         operation_timeline=operation_timeline(security), panel_version=PANEL_VERSION,
         current_client_version=CURRENT_CLIENT_VERSION, current_relay_version=CURRENT_RELAY_VERSION,
         relay_server_version=(sites[0]["server_version"] if sites else load_json(SECURE_RELAY_STATE, {}).get("server_version", "未上报")),

@@ -9,6 +9,7 @@ pools rate-limit standalone mining.subscribe health checks.
 import argparse
 import base64
 import hmac
+import hashlib
 import json
 import math
 import os
@@ -33,6 +34,7 @@ STATE_FILE = Path(os.getenv("ENDPOINT_STATE_FILE", "/var/lib/stratum-monitor/end
 EVENT_FILE = Path(os.getenv("ENDPOINT_EVENT_FILE", "/var/log/stratum-endpoints.jsonl"))
 EVENT_MAX_BYTES = int(os.getenv("ENDPOINT_EVENT_MAX_BYTES", str(8 * 1024 * 1024)))
 EVENT_KEEP_LINES = int(os.getenv("ENDPOINT_EVENT_KEEP_LINES", "5000"))
+NOTIFICATION_RESULT_FILE = Path(os.getenv("NOTIFICATION_RESULT_FILE", "/var/lib/stratum-monitor/notification-results.json"))
 BEIJING = ZoneInfo("Asia/Shanghai")
 
 
@@ -355,10 +357,11 @@ class EndpointMonitor:
 
 
 class Notifier:
-    def __init__(self, webhook="", event_path=EVENT_FILE, settings=None):
+    def __init__(self, webhook="", event_path=EVENT_FILE, settings=None, result_path=NOTIFICATION_RESULT_FILE):
         self.webhook = webhook
         self.event_path = event_path
         self.settings = dict(os.environ if settings is None else settings)
+        self.result_path = Path(result_path)
         if webhook:
             self.settings["WECHAT_WEBHOOK"] = webhook
 
@@ -377,8 +380,26 @@ class Notifier:
         except OSError:
             # Logging must not take endpoint monitoring or route recovery down.
             pass
-        content = self.format_message(event)
+        content = self.enrich_message(event, self.format_message(event))
         self.send(content)
+
+    def enrich_message(self, event, content):
+        kind = str(event.get("type", "unknown"))
+        identity = str(event.get("client_id") or event.get("endpoint") or event.get("port") or kind)
+        issue_id = "VPS-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8].upper()
+        if event.get("miner_count"):
+            impact = f"{event.get('site', event.get('pool', '相关矿场'))}，约 {event['miner_count']} 台矿机"
+        elif event.get("port"):
+            impact = f"生产端口 {event['port']}"
+        else:
+            impact = event.get("pool") or event.get("endpoint") or "当前监控对象"
+        panel = str(self.settings.get("PANEL_URL", "")).rstrip("/")
+        handling = panel + "/logs" if panel.startswith("https://") else "管理面板 → 日志 → 统一问题与业务影响"
+        recovery = kind in {"recovery", "tcp_recovery_protocol_degraded", "site_recovered",
+            "integrity_recovery", "expiry_recovery", "route_sync_ok", "canary_passed"}
+        suffix = (f"\n问题编号：{issue_id}\n影响范围：{impact}\n处理入口：{handling}"
+            + ("\n闭环状态：本次异常已恢复，问题记录将保留用于回顾。" if recovery else ""))
+        return content + suffix
 
     def configured_channels(self):
         result = []
@@ -437,6 +458,7 @@ class Notifier:
     def send(self, content, only=None):
         channels = [only] if only else self.configured_channels()
         errors = []
+        outcomes = {}
         for channel in channels:
             targets = []
             if channel == "wechat":
@@ -447,7 +469,10 @@ class Notifier:
                 targets = self._email_recipients()
             if not targets:
                 errors.append(f"{channel}: 通知渠道未配置")
+                outcomes[channel] = {"status": "failed", "sent": 0, "total": 0, "error": "通知渠道未配置"}
                 continue
+            channel_errors = []
+            channel_sent = 0
             for position, target in enumerate(targets, 1):
                 try:
                     if channel == "wechat":
@@ -465,14 +490,36 @@ class Notifier:
                         self._send_email(content, target)
                     else:
                         raise ValueError("通知渠道未配置")
+                    channel_sent += 1
                 except (OSError, ValueError, smtplib.SMTPException) as exc:
                     errors.append(f"{channel} 第{position}条: {exc}")
+                    channel_errors.append(str(exc)[:200])
+            outcomes[channel] = {"status": "success" if not channel_errors else "partial" if channel_sent else "failed",
+                "sent": channel_sent, "total": len(targets), "error": "；".join(channel_errors)[:300]}
+        self._save_outcomes(outcomes)
         if only and errors:
             raise OSError("；".join(errors))
         target_count = sum(len(self._wechat_targets()) if channel == "wechat" else
             len(self._dingtalk_targets()) if channel == "dingtalk" else
             len(self._email_recipients()) if channel == "email" else 0 for channel in channels)
         return target_count - len(errors), errors
+
+    def _save_outcomes(self, outcomes):
+        if not outcomes:
+            return
+        try:
+            current = load_json(self.result_path, {"channels": {}})
+            channels = current.setdefault("channels", {})
+            now = int(time.time())
+            for channel, result in outcomes.items():
+                channels[channel] = {**result, "time": now, "display_time": beijing_time(now)}
+            self.result_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.result_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            os.chmod(temporary, 0o640)
+            os.replace(temporary, self.result_path)
+        except OSError:
+            pass
 
     @staticmethod
     def _post_json(url, data):

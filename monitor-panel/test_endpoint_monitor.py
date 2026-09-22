@@ -1,4 +1,6 @@
 import json
+import re
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -102,6 +104,37 @@ class EndpointMonitorTest(unittest.TestCase):
             "pool": "测试矿池", "region": "亚洲", "failures": 3, "last_ok": 0, "message": "连接超时"})
         self.assertIn("时间（北京时间）：1970-01-01 08:00:00", message)
         self.assertIn("不等同于现有矿工连接已经中断", message)
+
+    def test_notification_closure_keeps_issue_id_scope_and_handling_link(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            notifier = Notifier(settings={"PANEL_URL": "https://relay.example.com"},
+                event_path=root / "events.jsonl", result_path=root / "results.json")
+            messages = []
+            with patch.object(notifier, "send", side_effect=messages.append):
+                notifier({"type": "endpoint_down", "time": 100, "endpoint": "pool.example:3333",
+                    "pool": "测试池", "port": 11301, "message": "连接超时"})
+                notifier({"type": "recovery", "time": 200, "endpoint": "pool.example:3333",
+                    "pool": "测试池", "port": 11301, "message": "恢复"})
+        issue = re.search(r"问题编号：(VPS-[0-9A-F]+)", messages[0]).group(1)
+        self.assertIn("问题编号：" + issue, messages[1])
+        self.assertIn("影响范围：生产端口 11301", messages[0])
+        self.assertIn("处理入口：https://relay.example.com/logs", messages[0])
+        self.assertIn("闭环状态：本次异常已恢复", messages[1])
+
+    def test_notification_records_latest_result_per_channel(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "results.json"
+            notifier = Notifier(settings={"WECHAT_WEBHOOK_1": "https://one.example/send",
+                "WECHAT_WEBHOOK_2": "https://two.example/send"}, result_path=path)
+            with patch.object(notifier, "_post_json", side_effect=[None, OSError("timeout")]):
+                sent, errors = notifier.send("test")
+            self.assertEqual(sent, 1)
+            self.assertEqual(len(errors), 1)
+            result = json.loads(path.read_text(encoding="utf-8"))["channels"]["wechat"]
+            self.assertEqual(result["status"], "partial")
+            self.assertEqual((result["sent"], result["total"]), (1, 2))
+            self.assertIn("timeout", result["error"])
 
     def test_notification_sends_wechat_and_dingtalk_without_exposing_secrets(self):
         settings = {"WECHAT_WEBHOOK_1": "https://qyapi.example/send?key=private-1",

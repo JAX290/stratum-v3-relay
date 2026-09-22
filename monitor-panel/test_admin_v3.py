@@ -57,6 +57,8 @@ class AdminV3Test(unittest.TestCase):
         admin.REPAIR_BACKUP_DIR = root / "repair-backups"
         admin.HIGH_RISK_CANDIDATE_DIR = root / "candidates"
         admin.HIGH_RISK_CANDIDATE_DIR.mkdir()
+        admin.NOTIFICATION_RESULT_FILE = root / "notification-results.json"
+        admin.SECURE_NOTIFICATION_RESULT_FILE = root / "secure-notification-result.json"
         admin.store = ConfigStore(config_path, root / "history", admin.AUDIT_FILE)
         admin.app.config.update(TESTING=True, SECRET_KEY="test")
         admin.LOGIN_FAILURES.clear()
@@ -526,6 +528,15 @@ class AdminV3Test(unittest.TestCase):
         apply.assert_called_once()
         with self.client.session_transaction() as session:
             self.assertNotIn("high_risk_plan", session)
+
+    def test_notification_results_are_visible_without_exposing_settings(self):
+        admin.NOTIFICATION_RESULT_FILE.write_text(json.dumps({"channels": {"wechat": {
+            "status": "success", "sent": 2, "total": 2, "error": "", "display_time": "2026-09-22 12:00:00"}}}), encoding="utf-8")
+        with patch.object(admin, "detect_relay_public_ip", return_value={"ok": True, "host": "93.184.216.34", "source": "test", "message": ""}):
+            response = self.client.get("/alerts")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("各渠道最近发送结果".encode(), response.data)
+        self.assertIn("发送成功 · 2/2".encode(), response.data)
 
     def test_recovered_service_does_not_leave_an_old_problem_open(self):
         records = [

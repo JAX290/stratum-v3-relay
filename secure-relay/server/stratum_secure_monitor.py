@@ -2,6 +2,7 @@
 """Send actionable WeChat alerts when a known mine-site client goes offline."""
 
 import json
+import hashlib
 import os
 import time
 import urllib.request
@@ -15,7 +16,17 @@ MONITOR_FILE = Path(os.getenv("SECURE_RELAY_MONITOR_STATE", "/var/lib/stratum-se
 EVENT_FILE = Path(os.getenv("SECURE_RELAY_EVENT_FILE", "/var/lib/stratum-secure-relay/events.jsonl"))
 EVENT_MAX_BYTES = int(os.getenv("SECURE_RELAY_EVENT_MAX_BYTES", str(8 * 1024 * 1024)))
 EVENT_KEEP_LINES = int(os.getenv("SECURE_RELAY_EVENT_KEEP_LINES", "5000"))
+NOTIFICATION_RESULT_FILE = Path(os.getenv("SECURE_NOTIFICATION_RESULT_FILE", "/var/lib/stratum-secure-relay/notification-result.json"))
 ENV_FILE = Path("/etc/stratum-v3.env")
+
+
+def issue_id(client_id):
+    return "VPS-" + hashlib.sha256(str(client_id).encode("utf-8")).hexdigest()[:8].upper()
+
+
+def handling_link():
+    panel = os.getenv("PANEL_URL", "").rstrip("/")
+    return panel + "/logs" if panel.startswith("https://") else "管理面板 → 日志 → 统一问题与业务影响"
 
 
 def read_json(path, default):
@@ -40,11 +51,29 @@ def webhook():
 
 def notify(url, content):
     if not url:
+        save_notification_result("failed", "企业微信未配置")
         return
-    payload = json.dumps({"msgtype": "text", "text": {"content": content}}, ensure_ascii=False).encode("utf-8")
-    request = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=10) as response:
-        response.read()
+    try:
+        payload = json.dumps({"msgtype": "text", "text": {"content": content}}, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            response.read()
+        save_notification_result("success", "")
+    except OSError as exc:
+        save_notification_result("failed", str(exc)[:200])
+        raise
+
+
+def save_notification_result(status, error):
+    try:
+        NOTIFICATION_RESULT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temporary = NOTIFICATION_RESULT_FILE.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"channel": "wechat", "status": status, "sent": 1 if status == "success" else 0,
+            "total": 1, "error": error, "time": int(time.time())}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o640)
+        os.replace(temporary, NOTIFICATION_RESULT_FILE)
+    except OSError:
+        pass
 
 
 def save_monitor(value):
@@ -141,13 +170,18 @@ def check_once(now=None):
             pending.pop(client_id, None)
         if current == "offline" and previous != "offline":
             when = datetime.fromtimestamp(last_seen, timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S") if last_seen else "从未连接"
-            message = f"【木林森中转离线】\n矿场：{name}\n最后连接：{when}\n请检查值守电脑、流量卡和VPS线路。"
+            miners = int(site.get("last_miner_count", site.get("miner_count", 0)) or 0)
+            message = (f"【木林森中转离线】\n问题编号：{issue_id(client_id)}\n通俗原因：VPS 已超过设定时间没有收到值守电脑心跳。"
+                f"\n影响范围：{name}，断线前约 {miners} 台矿机\n最后连接：{when}"
+                f"\n处理入口：{handling_link()}\n建议：检查值守电脑、流量卡和 VPS 线路。")
             if not duplicate_notification(notifications, "site_offline", client_id, now, dedup_seconds):
                 events.append(message)
                 append_event("site_offline", client_id, name, message, now, site)
                 notifications[client_id] = {"kind": "site_offline", "time": now}
         elif current == "online" and previous == "offline":
-            message = f"【木林森中转恢复】\n矿场：{name}\n客户端心跳已经恢复。"
+            miners = int(site.get("miner_count", site.get("last_miner_count", 0)) or 0)
+            message = (f"【木林森中转恢复】\n问题编号：{issue_id(client_id)}\n矿场：{name}\n影响范围：约 {miners} 台矿机"
+                f"\n客户端心跳已经恢复。\n闭环状态：离线问题已恢复并保留记录。\n处理入口：{handling_link()}")
             if not duplicate_notification(notifications, "site_recovered", client_id, now, dedup_seconds):
                 events.append(message)
                 append_event("site_recovered", client_id, name, message, now, site)

@@ -189,6 +189,16 @@ class RelayFlowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MonitorTests(unittest.TestCase):
+    def test_notification_delivery_result_is_persisted(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "notification.json"
+            response = unittest.mock.MagicMock()
+            response.__enter__.return_value.read.return_value = b"{}"
+            with patch.object(monitor, "NOTIFICATION_RESULT_FILE", path), patch.object(monitor.urllib.request, "urlopen", return_value=response):
+                monitor.notify("https://example.com/hook", "test")
+            result = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual((result["channel"], result["status"], result["sent"]), ("wechat", "success", 1))
+
     def test_offline_and_recovery_transitions(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -207,12 +217,17 @@ class MonitorTests(unittest.TestCase):
                 events = monitor.check_once(now=230)
                 self.assertEqual(len(events), 1)
                 self.assertIn("离线", events[0])
+                self.assertIn("问题编号：VPS-", events[0])
+                self.assertIn("通俗原因", events[0])
+                offline_issue = next(line for line in events[0].splitlines() if line.startswith("问题编号："))
                 state.write_text(json.dumps({"sites": {"mine-a": {"last_seen": 235}}}), encoding="utf-8")
                 events = monitor.check_once(now=240)
                 self.assertEqual(events, [])
                 events = monitor.check_once(now=270)
                 self.assertEqual(len(events), 1)
                 self.assertIn("恢复", events[0])
+                self.assertIn(offline_issue, events[0])
+                self.assertIn("闭环状态", events[0])
                 records = [json.loads(line) for line in event_file.read_text(encoding="utf-8").splitlines()]
                 self.assertEqual([item["type"] for item in records], ["site_offline", "site_recovered"])
 
