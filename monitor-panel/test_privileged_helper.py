@@ -73,7 +73,7 @@ class PrivilegedHelperTest(unittest.TestCase):
             target = Path(folder) / "monitor.env"
             managed = {**helper.MANAGED_FILES,
                 "monitor_env": (target, 0o640, "text", "stratum-admin")}
-            with patch.object(helper, "MANAGED_FILES", managed):
+            with patch.object(helper, "MANAGED_FILES", managed), patch.object(helper, "grp", None):
                 helper.dispatch({"operation": "write_managed", "name": "monitor_env",
                     "content": "MIN_CONNECTIONS=2\nSMTP_HOST=smtp.example.com\n"})
                 self.assertIn("MIN_CONNECTIONS=2", target.read_text(encoding="utf-8"))
@@ -91,7 +91,7 @@ class PrivilegedHelperTest(unittest.TestCase):
             managed = {**helper.MANAGED_FILES,
                 "secure_relay_config": (target, 0o640, "json", "stratum-relay")}
             updated = {**original, "clients": [dict(original["clients"][0], name="B")]}
-            with patch.object(helper, "MANAGED_FILES", managed):
+            with patch.object(helper, "MANAGED_FILES", managed), patch.object(helper, "grp", None):
                 helper.dispatch({"operation": "write_managed", "name": "secure_relay_config",
                     "content": json.dumps(updated)})
                 changed = dict(updated, listen_port=22)

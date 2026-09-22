@@ -179,6 +179,7 @@
 - 2026-09-22：Windows 2.3.9 正式版发布于 https://github.com/JAX290/stratum-v3-relay/releases/tag/client-v2.3.9 。签名附件与远端摘要复核一致；桌面版摘要 `ADA0722A67ED7B8F69FAA0FE9FDC07735076F27101B4EFBB374C10B6CD1C307F`，服务版摘要 `4B5C66CE31EA8D9E49F8DCCD1B9C3D2AE9CC21F4C2D65323A6F6AF7CC3924FBD`；发布源码 300c3c3，主分支完整 CI 通过。
 - 2026-09-22：Windows 2.3.10 正式版发布于 https://github.com/JAX290/stratum-v3-relay/releases/tag/client-v2.3.10 。签名附件与远端摘要复核一致；桌面版摘要 `03A01F36335C3228668494167E48BDFA32A48DBC2F3F1D75729F31FA311E13BE`，服务版摘要 `EF287801281CE0040E05F15CFE48ABA5562D3011F651AB1ABB1B07A833F244DC`；发布源码 d227774，主分支完整 CI 通过。
 - 2026-09-22：Windows 2.3.12 正式版发布于 https://github.com/JAX290/stratum-v3-relay/releases/tag/client-v2.3.12 。桌面、服务和安装脚本均通过固定发布者签名验证，远端 4 个附件摘要与统一清单一致；桌面版摘要 `C5BDD14F06B970CB52A416C032F4D93B183844E9BDBB3ED3ABE8757AAF205528`，服务版摘要 `300CA060C1F9E41400D3406DBE2B93DD2809787EF79C3DCD65A344A708D90090`；发布源码 a315f02，完整客户端测试通过。
+- 2026-09-22：Windows 2.3.13 正式版发布于 https://github.com/JAX290/stratum-v3-relay/releases/tag/client-v2.3.13 。桌面、服务和发布脚本均通过固定发布者签名验证，远端 5 个附件摘要与统一清单一致；桌面版摘要 `630B3D516D29572F1B9E2B82A82BD2072AD61546975261A4A2FA5FB45BC271DF`，服务版摘要 `92571F4C051CEC5FBEA2ADCE6A486120259D4F790BFC8ABEC55A717C4C0FE7EE`；发布源码 0170e26，完整客户端测试通过。
 - WIN-P01 继续：新增原子保存、备份和全局互斥适配器，15 项存储检查通过；策略 29 项与客户端 50 项回归通过。修复东八区初始空时间序列化问题。仍未接入服务宿主、进程看门狗和安装迁移。
 - WIN-P01 安装阶段：实现机器级 DPAPI 配置迁移、受限 ACL、签名与固定指纹检查、准备／激活／回退／卸载脚本及隔离实机验收。127 项隔离检查通过；SCM 以 LocalService 启停、自动启动配置、工作进程崩溃拉起和故障安装哈希回退均通过。修复 Windows PowerShell 5 中文脚本编码、`sc.exe` 参数拆分、待验证 EXE 扩展名及并发心跳时间竞态。仍需签名正式包和电脑重启后的无登录验收。
 
