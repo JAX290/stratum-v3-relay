@@ -292,6 +292,35 @@ class AdminV3Test(unittest.TestCase):
         self.assertEqual(center["bad"], 1)
         self.assertIn("加密入口没有正常运行", center["issues"][0]["title"])
 
+    def test_comprehensive_diagnostics_groups_all_required_checks(self):
+        config = admin.store.load()
+        endpoints = {item["id"]: {"last_result": {"ok": True}} for item in config["endpoints"]}
+        result = admin.comprehensive_diagnostics(config,
+            {"HAProxy": "active", "加密入口": "active", "管理面板": "failed"},
+            {"disk": "91.0%", "memory": "42.0%"},
+            {"available": True, "days_left": 30}, {"endpoints": endpoints},
+            {"enabled": True, "pending": 1, "last_status": "failed"},
+            [{"name": "一号矿场", "status": "offline", "client_outdated": False,
+              "server_outdated": False, "last_share": "尚无"}],
+            {"submitted": 10, "accepted": 9},
+            {"entries": [{"level": "good", "title": "服务已经恢复", "service": "安全监控",
+                "display_time": "今天", "message": "Service recovered"}]},
+            {"panel": "3.2.7", "secure_relay": "2.2.3", "windows_client": "2.3.11"},
+            lambda port: port != 11303, now=1_700_000_000)
+        self.assertEqual(set(result["counts"]), {"normal", "recovered", "repairable", "manual"})
+        self.assertGreater(result["counts"]["repairable"], 0)
+        self.assertGreater(result["counts"]["manual"], 0)
+        self.assertEqual(result["counts"]["recovered"], 1)
+        self.assertIn("未监听端口：11303", next(item for item in result["items"] if item["key"] == "ports")["detail"])
+
+    def test_logs_page_shows_comprehensive_diagnostics(self):
+        with patch.object(admin, "detect_relay_public_ip", return_value={"ok": True, "host": "93.184.216.34", "source": "test", "message": ""}), \
+                patch.object(admin, "port_listening", return_value=True):
+            response = self.client.get("/logs")
+        self.assertEqual(response.status_code, 200)
+        for label in ("一键全面诊断", "TLS 加密入口", "双 VPS 同步", "Windows 心跳", "最近 Share", "需人工处理"):
+            self.assertIn(label.encode(), response.data)
+
     def test_recovered_service_does_not_leave_an_old_problem_open(self):
         records = [
             {"_SYSTEMD_UNIT": "haproxy.service", "PRIORITY": "3", "MESSAGE": "Connection failed"},

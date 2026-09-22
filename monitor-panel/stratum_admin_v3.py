@@ -27,6 +27,7 @@ from admin_auth import (LOGIN_FAILURES, LOGIN_FAILURES_LOCK, RequestAwareSession
     login_attempt_key, login_retry_after, record_login_failure, tailscale_identity,
     trusted_https_request)
 from endpoint_monitor import Notifier, beijing_time, probe_stratum
+from operations_center import comprehensive_diagnostics
 from security_monitor import atomic_write as write_integrity, load as load_integrity, snapshot
 from v3_manager import ConfigError, ConfigStore, append_bounded_jsonl, file_lock, render_haproxy_config, render_inspector_config, route_map, validate_config
 from version_info import load_versions
@@ -1209,9 +1210,13 @@ def build_page_context(page):
     peer_status = peer_sync_summary()
     access = client_access_context(config) if page == "access" else None
     logs = recent_logs() if page == "logs" else {"journal": "", "entries": [], "attention": [], "events": ""}
+    metrics = server_metrics()
+    diagnostics = comprehensive_diagnostics(config, services, metrics, certificate, state,
+        {**peer_settings, **peer_status, "pending": len(peer_outbox.get("items", []))}, sites, overview,
+        logs, VERSIONS, port_listening) if page == "logs" else None
     return dict(page=page, config=config, endpoint_map=endpoint_map, endpoint_rows=rows,
         online=sum(1 for row in rows if row["ok"]), alerting=sum(1 for value in state.get("endpoints", {}).values() if value.get("alerting")),
-        services=services, server=server_metrics(), pools=pools, active_pools=active_pools,
+        services=services, server=metrics, pools=pools, active_pools=active_pools,
         inactive_pools=inactive_pools, overview=overview, logs=logs,
         alert_settings=alert_settings, wechat_configured=read_env().get("WECHAT_WEBHOOK", "").startswith("https://"),
         notifications_configured=bool(Notifier(settings=read_env()).configured_channels()),
@@ -1231,7 +1236,7 @@ def build_page_context(page):
             "route_sync_received": "已接收VPS同步"},
         algorithms={"scrypt": "Scrypt", "sha256d": "SHA-256", "other": "其他/自定义", "unknown": "算法待确认"},
         security=security, sites=sites, reminders=reminders, admin_brief=administrator_brief(overview, services, sites, len([value for value in state.get("endpoints", {}).values() if value.get("alerting")]), reminders),
-        maintenance=maintenance_center(services, logs), notification_settings=notification_context(),
+        maintenance=maintenance_center(services, logs), diagnostics=diagnostics, notification_settings=notification_context(),
         operation_timeline=operation_timeline(security), panel_version=PANEL_VERSION,
         current_client_version=CURRENT_CLIENT_VERSION, current_relay_version=CURRENT_RELAY_VERSION,
         relay_server_version=(sites[0]["server_version"] if sites else load_json(SECURE_RELAY_STATE, {}).get("server_version", "未上报")),
