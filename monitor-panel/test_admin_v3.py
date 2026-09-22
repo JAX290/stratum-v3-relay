@@ -1052,6 +1052,19 @@ class AdminV3Test(unittest.TestCase):
         endpoint = next(item for item in admin.store.load()["endpoints"] if item["id"] == endpoint_id)
         self.assertFalse(endpoint["favorite"])
 
+    def test_unprivileged_mode_delegates_root_operations_to_helper(self):
+        config = admin.store.load()
+        with patch.dict(admin.os.environ, {"V3_PRIVILEGED_HELPER_SOCKET": "/run/test-helper.sock",
+                "V3_RELOAD_SERVICES": "1"}), patch.object(admin, "request_helper", return_value={"output": "ok"}) as helper:
+            admin.save_and_reload(config, "helper-test", actor_value="test")
+            admin.write_env({"NOTIFY_QUIET_START": "22:00", "NOTIFY_QUIET_END": "07:00"})
+            result = admin.privileged_service("restart", "haproxy")
+        operations = [call.args[0] for call in helper.call_args_list]
+        self.assertIn("haproxy_apply", operations)
+        self.assertIn("write_managed", operations)
+        self.assertIn("service", operations)
+        self.assertEqual(result.returncode, 0)
+
     def test_immediate_peer_sync_failure_is_reported_and_kept_for_retry(self):
         token = "f" * 64
         admin.PEER_SYNC_FILE.write_text(json.dumps({"enabled": True,

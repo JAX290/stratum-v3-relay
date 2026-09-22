@@ -48,10 +48,29 @@ class DeploymentSecurityTest(unittest.TestCase):
             self.assertIn("/var/lib/stratum-monitor/config/stratum-inspector.json", script)
             self.assertIn("/var/lib/stratum-monitor/config/stratum-audit.jsonl", script)
             self.assertIn("ln -sfn", script)
-            self.assertIn("ReadWritePaths=/etc/stratum-v3.json /etc/stratum-inspector.json /etc/haproxy /var/lib/stratum-monitor", script)
+            self.assertIn("ReadWritePaths=/var/lib/stratum-monitor -/var/lib/stratum-secure-relay", script)
             self.assertNotIn("ReadWritePaths=/etc /var/lib/stratum-monitor", script)
         self.assertIn("Path(config_path).resolve()", manager)
         self.assertIn("Path(path).resolve()", manager)
+
+    def test_admin_panel_is_unprivileged_and_root_helper_is_allowlisted(self):
+        helper = (ROOT / "monitor-panel" / "privileged_helper.py").read_text(encoding="utf-8")
+        self.assertIn("ALLOWED_SERVICES", helper)
+        self.assertIn("SO_PEERCRED", helper)
+        self.assertIn("require_root_owned_tree", helper)
+        self.assertIn("build_haproxy_config()", helper)
+        self.assertNotIn("shell=True", helper)
+        for name in ("install-v3.sh", "upgrade-v3-panel.sh"):
+            script = (ROOT / "monitor-panel" / name).read_text(encoding="utf-8")
+            unit = re.search(r"cat >/etc/systemd/system/stratum-admin\.service <<'EOF'\n(.*?)\nEOF", script, re.S)
+            self.assertIsNotNone(unit)
+            self.assertIn("User=stratum-admin", unit.group(1))
+            self.assertNotIn("User=root", unit.group(1))
+            self.assertIn("Requires=stratum-admin-helper.service", unit.group(1))
+            self.assertIn("V3_PRIVILEGED_HELPER_SOCKET", unit.group(1))
+            self.assertIn("privileged_helper.py --serve", script)
+            self.assertIn("root -g stratum-admin -m 0750 /var/lib/stratum-monitor/candidates", script)
+            self.assertIn("chmod 0660 /var/lib/stratum-monitor/integrity.json", script)
 
     def test_dashboard_posts_update_content_without_losing_scroll_position(self):
         template = (ROOT / "monitor-panel" / "templates" / "v3_dashboard.html").read_text(encoding="utf-8")

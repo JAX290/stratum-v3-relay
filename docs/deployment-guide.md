@@ -504,3 +504,9 @@ cd /root/stratum-v3/monitor-panel
 - 面板密码哈希、SSH 私钥、日志和服务器备份包
 
 GitHub 保存的是程序和部署方法，不保存每台服务器的秘密配置。更换 Windows 电脑时，可通过 Tailscale 在面板“设置 → 客户端接入资料”找回该 VPS 的客户端配置。重建 VPS 时仍应由安装脚本生成新证书和新密钥，再把新信息填入 Windows 客户端；证书私钥不能从网页导出。
+
+## 十六、低权限管理面板和特权助手
+
+管理面板 3.2.18 起以 `stratum-admin` 低权限账户运行。必须由 root 完成的 HAProxy 应用、固定服务重启、防火墙放行、证书替换和升级操作，通过 `/run/stratum-admin-helper.sock` 交给白名单助手执行。助手校验 Unix 调用者身份，只接受固定操作和参数，不提供任意命令或任意路径写入接口。
+
+升级后可执行 `systemctl status stratum-admin-helper stratum-admin stratum-route-switch-monitor` 核对三个服务。`stratum-admin` 和 `stratum-route-switch-monitor` 应显示为 `stratum-admin` 用户，只有 `stratum-admin-helper` 由 root 运行。

@@ -250,7 +250,15 @@ class ConfigStore:
                 handle.write(text)
             os.chmod(temporary, mode)
             if owner and hasattr(os, "chown"):
-                os.chown(temporary, owner[0], owner[1])
+                # An unprivileged writer cannot retain a root owner, but it can
+                # retain an allowed supplementary group so sibling services keep
+                # read access after the atomic replace.
+                current_uid = os.geteuid() if hasattr(os, "geteuid") else owner[0]
+                current_gid = os.getegid() if hasattr(os, "getegid") else owner[1]
+                groups = os.getgroups() if hasattr(os, "getgroups") else [owner[1]]
+                target_uid = owner[0] if current_uid == 0 else current_uid
+                target_gid = owner[1] if owner[1] in groups or current_uid == 0 else current_gid
+                os.chown(temporary, target_uid, target_gid)
             os.replace(temporary, path)
         finally:
             if os.path.exists(temporary):

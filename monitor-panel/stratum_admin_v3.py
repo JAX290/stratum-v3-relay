@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from ipaddress import ip_address
 from urllib.parse import urlsplit
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from flask import Flask, flash, jsonify, redirect, render_template, render_template_string, request, send_file, send_from_directory, session, url_for
@@ -33,6 +34,7 @@ from admin_auth import (LOGIN_FAILURES, LOGIN_FAILURES_LOCK, RequestAwareSession
 from endpoint_monitor import Notifier, beijing_time, probe_stratum
 from high_risk_wizard import validate_plan
 from operations_center import comprehensive_diagnostics, create_support_bundle, reconcile_issues
+from privileged_helper import request_helper
 from security_monitor import atomic_write as write_integrity, load as load_integrity, snapshot
 from v3_manager import ConfigError, ConfigStore, append_bounded_jsonl, file_lock, render_haproxy_config, render_inspector_config, route_map, validate_config
 from version_info import load_versions
@@ -124,6 +126,25 @@ def load_json(path, fallback):
         return fallback
 
 
+def privileged_helper_enabled():
+    return bool(os.getenv("V3_PRIVILEGED_HELPER_SOCKET", "").strip())
+
+
+def privileged_service(action, service, timeout=30):
+    if privileged_helper_enabled():
+        result = request_helper("service", action=action, service=service)
+        return SimpleNamespace(returncode=0, stdout=result.get("output", ""), stderr="")
+    return subprocess.run(["systemctl", action, service], capture_output=True, text=True,
+        timeout=timeout, check=False)
+
+
+def write_managed_file(name, path, content, mode):
+    if privileged_helper_enabled():
+        request_helper("write_managed", name=name, content=content)
+    else:
+        ConfigStore._atomic_write(path, content, mode=mode)
+
+
 def read_env():
     values = {}
     if not ENV_FILE.exists():
@@ -150,7 +171,7 @@ def write_env(updates):
         else:
             output.append(line)
     output.extend(f"{key}={value}" for key, value in updates.items() if key not in seen)
-    ConfigStore._atomic_write(ENV_FILE, "\n".join(output) + "\n", mode=0o600)
+    write_managed_file("monitor_env", ENV_FILE, "\n".join(output) + "\n", 0o600)
 
 
 NOTIFICATION_ENV_KEYS = ("WECHAT_WEBHOOK", "DINGTALK_WEBHOOK", "DINGTALK_SECRET", "SMTP_TO",
@@ -232,7 +253,10 @@ def monitor_enabled():
 def set_monitor_enabled(enabled):
     content = "SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
     content += "* * * * * root /root/stratum-monitor.sh\n" if enabled else "# Monitoring paused from V3 panel\n"
-    ConfigStore._atomic_write(CRON_FILE, content, mode=0o644)
+    if privileged_helper_enabled():
+        request_helper("toggle_monitor", enabled=bool(enabled))
+    else:
+        ConfigStore._atomic_write(CRON_FILE, content, mode=0o644)
 
 
 def server_metrics():
@@ -1158,7 +1182,7 @@ def save_and_reload(config, action, actor_value=None):
     previous_inspector = render_inspector_config(previous)
     next_inspector = render_inspector_config(config)
     rendered_haproxy = render_haproxy_config(config)
-    if os.getenv("V3_RELOAD_SERVICES", "0") == "1":
+    if os.getenv("V3_RELOAD_SERVICES", "0") == "1" and not privileged_helper_enabled():
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".cfg", delete=False) as handle:
             handle.write(rendered_haproxy)
             candidate = handle.name
@@ -1173,7 +1197,16 @@ def save_and_reload(config, action, actor_value=None):
     # compare token must refer to the generation just written above.
     previous["_generation_token"] = config.get("_generation_token", previous.get("_generation_token"))
     ConfigStore._atomic_write(INSPECTOR_CONFIG, json.dumps(next_inspector, ensure_ascii=False, indent=2) + "\n")
-    ConfigStore._atomic_write(HAPROXY_CONFIG, rendered_haproxy, mode=0o644)
+    if privileged_helper_enabled():
+        try:
+            request_helper("haproxy_apply")
+        except OSError as exc:
+            store.save(previous, actor="automatic", action=f"auto-rollback:{action}")
+            ConfigStore._atomic_write(INSPECTOR_CONFIG,
+                json.dumps(previous_inspector, ensure_ascii=False, indent=2) + "\n")
+            raise ConfigError(f"特权助手未能应用配置，已自动回滚：{exc}") from exc
+    else:
+        ConfigStore._atomic_write(HAPROXY_CONFIG, rendered_haproxy, mode=0o644)
     if os.getenv("V3_RELOAD_SERVICES", "0") == "1":
         previous_ids = {item["id"] for item in previous_inspector["relays"]}
         new_ports = [item["listen_port"] for item in next_inspector["relays"] if item["id"] not in previous_ids]
@@ -1187,15 +1220,22 @@ def save_and_reload(config, action, actor_value=None):
                     if time.monotonic() >= deadline:
                         store.save(previous, actor="automatic", action=f"auto-rollback:{action}")
                         ConfigStore._atomic_write(INSPECTOR_CONFIG, json.dumps(previous_inspector, ensure_ascii=False, indent=2) + "\n")
-                        ConfigStore._atomic_write(HAPROXY_CONFIG, render_haproxy_config(previous), mode=0o644)
+                        if privileged_helper_enabled():
+                            request_helper("haproxy_apply")
+                        else:
+                            ConfigStore._atomic_write(HAPROXY_CONFIG, render_haproxy_config(previous), mode=0o644)
                         raise ConfigError(f"新的内部检查器端口 {port} 未能启动，配置未切换")
                     time.sleep(0.25)
-        result = subprocess.run(["systemctl", "reload", "haproxy"], capture_output=True, text=True, timeout=15, check=False)
+        result = SimpleNamespace(returncode=0, stderr="") if privileged_helper_enabled() else subprocess.run(
+            ["systemctl", "reload", "haproxy"], capture_output=True, text=True, timeout=15, check=False)
         if result.returncode:
             store.save(previous, actor="automatic", action=f"auto-rollback:{action}")
             ConfigStore._atomic_write(INSPECTOR_CONFIG, json.dumps(render_inspector_config(previous), ensure_ascii=False, indent=2) + "\n")
-            ConfigStore._atomic_write(HAPROXY_CONFIG, render_haproxy_config(previous), mode=0o644)
-            subprocess.run(["systemctl", "reload", "haproxy"], capture_output=True, timeout=15, check=False)
+            if privileged_helper_enabled():
+                request_helper("haproxy_apply")
+            else:
+                ConfigStore._atomic_write(HAPROXY_CONFIG, render_haproxy_config(previous), mode=0o644)
+                subprocess.run(["systemctl", "reload", "haproxy"], capture_output=True, timeout=15, check=False)
             raise ConfigError((result.stderr or "HAProxy 平滑重载失败，已自动回滚")[-500:])
     if INTEGRITY_BASELINE.exists():
         baseline = load_integrity(INTEGRITY_BASELINE, {})
@@ -1437,7 +1477,7 @@ def manage_relay_client(client_id=None):
         flash("请填写 1-64 个字符的矿场名称，不要包含换行等控制字符。", "error")
         return redirect(url_for("dashboard_page", page="access"))
     try:
-        with file_lock(SECURE_RELAY_CONFIG):
+        with file_lock(RELAY_CONTROL_FILE.parent / "secure-relay-config"):
             relay = json.loads(SECURE_RELAY_CONFIG.read_text(encoding="utf-8"))
             clients = relay.get("clients", [])
             if not isinstance(clients, list):
@@ -1464,10 +1504,11 @@ def manage_relay_client(client_id=None):
             relay["clients"] = clients
             # Preserve the owner/group so the dedicated relay service can read
             # the replaced file. Keep one private recovery copy before saving.
-            ConfigStore._atomic_write(SECURE_RELAY_CONFIG.with_suffix(".json.backup"),
-                SECURE_RELAY_CONFIG.read_text(encoding="utf-8"), mode=0o600)
-            ConfigStore._atomic_write(SECURE_RELAY_CONFIG,
-                json.dumps(relay, ensure_ascii=False, indent=2) + "\n", mode=0o640)
+            if not privileged_helper_enabled():
+                ConfigStore._atomic_write(SECURE_RELAY_CONFIG.with_suffix(".json.backup"),
+                    SECURE_RELAY_CONFIG.read_text(encoding="utf-8"), mode=0o600)
+            write_managed_file("secure_relay_config", SECURE_RELAY_CONFIG,
+                json.dumps(relay, ensure_ascii=False, indent=2) + "\n", 0o640)
         append_audit(action + client_id)
         flash(message, "success")
     except (OSError, ValueError, TypeError, AttributeError):
@@ -1575,7 +1616,7 @@ def delete_relay_client(client_id):
         flash("删除未执行：请重新打开确认页，完整输入矿场名称并确认风险。", "error")
         return redirect(url_for("dashboard_page", page="access"))
     try:
-        with file_lock(SECURE_RELAY_CONFIG):
+        with file_lock(RELAY_CONTROL_FILE.parent / "secure-relay-config"):
             relay = json.loads(SECURE_RELAY_CONFIG.read_text(encoding="utf-8"))
             clients = relay.get("clients", [])
             if not isinstance(clients, list):
@@ -1592,9 +1633,11 @@ def delete_relay_client(client_id):
                 return redirect(url_for("dashboard_page", page="access"))
             relay["clients"] = [item for item in clients if str(item.get("id", "")) != client_id]
             relay.pop("token", None)  # Never resurrect a deleted legacy credential.
-            ConfigStore._atomic_write(SECURE_RELAY_CONFIG.with_suffix(".json.backup"),
-                SECURE_RELAY_CONFIG.read_text(encoding="utf-8"), mode=0o600)
-            ConfigStore._atomic_write(SECURE_RELAY_CONFIG, json.dumps(relay, ensure_ascii=False, indent=2) + "\n", mode=0o640)
+            if not privileged_helper_enabled():
+                ConfigStore._atomic_write(SECURE_RELAY_CONFIG.with_suffix(".json.backup"),
+                    SECURE_RELAY_CONFIG.read_text(encoding="utf-8"), mode=0o600)
+            write_managed_file("secure_relay_config", SECURE_RELAY_CONFIG,
+                json.dumps(relay, ensure_ascii=False, indent=2) + "\n", 0o640)
         session.pop("delete_client_confirmation", None)
         if session.get("revealed_client_id") == client_id:
             session.pop("revealed_client_id", None)
@@ -1775,9 +1818,14 @@ def restore_repair_backup(path):
             if name not in allowed:
                 raise ValueError("repair backup contains an unsupported member")
             target = allowed[name]
+            content = archive.read(name + ".bin")
+            if name == "haproxy-config" and privileged_helper_enabled():
+                request_helper("haproxy_apply", content=content.decode("utf-8"))
+                restored.append(name)
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_name(target.name + ".repair-restore")
-            temporary.write_bytes(archive.read(name + ".bin"))
+            temporary.write_bytes(content)
             os.replace(temporary, target)
             restored.append(name)
         for name in manifest.get("log_files", []):
@@ -1882,21 +1930,29 @@ def execute_high_risk_operation():
             save_and_reload(config, f"wizard-route:{port}:{previous}->{endpoint_id}")
             sync_routes_immediately(config, [(port, "wizard-route")])
         elif operation == "certificate":
-            relay = load_json(SECURE_RELAY_CONFIG, {})
-            target = Path(str(relay.get("certificate", "")))
-            if not target.is_file():
-                raise ValueError("当前证书路径不存在，不能安全替换")
-            REPAIR_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(target, REPAIR_BACKUP_DIR / ("certificate-before-" + str(int(time.time())) + ".pem"))
-            candidate = (HIGH_RISK_CANDIDATE_DIR / plan["data"]["candidate"]).resolve()
-            shutil.copy2(candidate, target)
-            result = subprocess.run(["systemctl", "restart", "stratum-secure-relay"], timeout=30, check=False)
+            if privileged_helper_enabled():
+                request_helper("certificate_apply", candidate=plan["data"]["candidate"])
+                result = SimpleNamespace(returncode=0)
+            else:
+                relay = load_json(SECURE_RELAY_CONFIG, {})
+                target = Path(str(relay.get("certificate", "")))
+                if not target.is_file():
+                    raise ValueError("当前证书路径不存在，不能安全替换")
+                REPAIR_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, REPAIR_BACKUP_DIR / ("certificate-before-" + str(int(time.time())) + ".pem"))
+                candidate = (HIGH_RISK_CANDIDATE_DIR / plan["data"]["candidate"]).resolve()
+                shutil.copy2(candidate, target)
+                result = subprocess.run(["systemctl", "restart", "stratum-secure-relay"], timeout=30, check=False)
             if result.returncode or service_state("stratum-secure-relay") != "active":
                 raise OSError("证书替换后加密入口复查失败；操作前证书保留在修复备份目录")
         elif operation == "firewall":
             for port in plan["data"]["ports"]:
-                result = subprocess.run(["ufw", "allow", f"{int(port)}/tcp"], capture_output=True, text=True,
-                    timeout=15, check=False)
+                if privileged_helper_enabled():
+                    request_helper("firewall_allow", port=int(port))
+                    result = SimpleNamespace(returncode=0, stdout="", stderr="")
+                else:
+                    result = subprocess.run(["ufw", "allow", f"{int(port)}/tcp"], capture_output=True, text=True,
+                        timeout=15, check=False)
                 if result.returncode:
                     raise OSError((result.stderr or result.stdout or "防火墙规则应用失败")[-300:])
         elif operation == "dns":
@@ -1906,9 +1962,13 @@ def execute_high_risk_operation():
             store.save(config, actor=actor(), action="wizard-dns")
         elif operation == "upgrade":
             directory = (HIGH_RISK_CANDIDATE_DIR / plan["data"]["candidate"]).resolve()
-            script = directory / "monitor-panel" / "upgrade-v3-panel.sh"
-            result = subprocess.run(["/bin/bash", str(script)], cwd=str(directory / "monitor-panel"),
-                capture_output=True, text=True, timeout=600, check=False)
+            if privileged_helper_enabled():
+                request_helper("upgrade", directory=str(directory))
+                result = SimpleNamespace(returncode=0, stdout="", stderr="")
+            else:
+                script = directory / "monitor-panel" / "upgrade-v3-panel.sh"
+                result = subprocess.run(["/bin/bash", str(script)], cwd=str(directory / "monitor-panel"),
+                    capture_output=True, text=True, timeout=600, check=False)
             if result.returncode:
                 raise OSError((result.stderr or result.stdout or "升级脚本失败")[-500:])
         else:
@@ -1949,8 +2009,7 @@ def run_safe_repair(action):
     try:
         backup = create_repair_backup(guard_key)
         if action == "restart-service":
-            result = subprocess.run(["systemctl", "restart", service], capture_output=True, text=True,
-                timeout=30, check=False)
+            result = privileged_service("restart", service, timeout=30)
             if result.returncode or service_state(service) != "active":
                 raise OSError((result.stderr or result.stdout or "服务复查未恢复 active")[-300:])
             message = SAFE_SERVICE_REPAIRS[service] + "已重启，自动复查正常。"
@@ -1987,7 +2046,7 @@ def run_safe_repair(action):
             except (OSError, ValueError, zipfile.BadZipFile) as restore_error:
                 app.logger.exception("repair rollback failed: %s", restore_error)
         if action == "reload-config" and restored and os.getenv("V3_RELOAD_SERVICES", "0") == "1":
-            subprocess.run(["systemctl", "reload", "haproxy"], capture_output=True, timeout=15, check=False)
+            privileged_service("reload", "haproxy", timeout=15)
         guard = record_repair_result(guard_key, False, str(exc))
         suffix = "；已恢复操作前备份" if restored else "；没有文件需要恢复"
         if guard["blocked"]:
@@ -2639,9 +2698,9 @@ def save_peer_settings():
             token = secrets.token_hex(32)
         if enabled and (len(token) < 32 or not peers):
             raise ConfigError("启用同步时必须填写对端地址和至少32位的共享同步密钥")
-        ConfigStore._atomic_write(PEER_SYNC_FILE,
+        write_managed_file("peer_config", PEER_SYNC_FILE,
             json.dumps({"enabled": enabled, "peers": peers, "token": token}, ensure_ascii=False, indent=2) + "\n",
-            mode=0o600)
+            0o600)
         approve_integrity([PEER_SYNC_FILE])
         flash("VPS双向同步设置已保存。请确保另一台VPS填写相同同步密钥，并把本机地址填为其对端。")
     except (ValueError, ConfigError, OSError) as exc:
@@ -2928,7 +2987,7 @@ def save_notification_settings():
         approve_integrity([ENV_FILE])
         failed_services = []
         for service in ("stratum-endpoint-monitor", "stratum-security-monitor", "stratum-route-switch-monitor"):
-            result = subprocess.run(["systemctl", "try-restart", service], check=False, timeout=15)
+            result = privileged_service("try-restart", service, timeout=15)
             if result.returncode:
                 failed_services.append(service)
         append_audit("更新通知渠道配置")

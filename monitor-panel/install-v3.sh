@@ -6,7 +6,7 @@ if [[ $(id -u) -ne 0 ]]; then
   exit 1
 fi
 
-required=(v3-config.json v3_manager.py version_info.py admin_auth.py endpoint_monitor.py operations_center.py high_risk_wizard.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh install-public-status.sh)
+required=(v3-config.json v3_manager.py version_info.py admin_auth.py endpoint_monitor.py operations_center.py high_risk_wizard.py privileged_helper.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh install-public-status.sh)
 for file in "${required[@]}"; do
   test -f "./$file" || { echo "Missing $file" >&2; exit 1; }
 done
@@ -42,14 +42,17 @@ systemctl enable postfix
 systemctl restart postfix
 id stratum-proxy >/dev/null 2>&1 || useradd --system --home /nonexistent --shell /usr/sbin/nologin stratum-proxy
 id stratum-relay >/dev/null 2>&1 || useradd --system --home /nonexistent --shell /usr/sbin/nologin stratum-relay
+getent group stratum-admin >/dev/null 2>&1 || groupadd --system stratum-admin
+id stratum-admin >/dev/null 2>&1 || useradd --system --gid stratum-admin --home /nonexistent --shell /usr/sbin/nologin stratum-admin
 install -d -m 0755 /opt/stratum-admin
 install -d -m 0755 /opt/stratum-admin/templates /opt/stratum-admin/static
 install -d -o stratum-proxy -g stratum-proxy -m 0750 /var/lib/stratum-inspector
-install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor
-install -d -m 0750 /var/lib/stratum-monitor/history
-install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor/candidates /var/lib/stratum-monitor/repair-backups
+install -d -o root -g stratum-proxy -m 1770 /var/lib/stratum-monitor
+install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor/history
+install -d -o root -g stratum-admin -m 0750 /var/lib/stratum-monitor/candidates
+install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor/repair-backups
 install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor/config
-install -m 0755 v3_manager.py version_info.py admin_auth.py endpoint_monitor.py operations_center.py high_risk_wizard.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh install-public-status.sh /opt/stratum-admin/
+install -m 0755 v3_manager.py version_info.py admin_auth.py endpoint_monitor.py operations_center.py high_risk_wizard.py privileged_helper.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py reset-panel-password.sh install-public-status.sh /opt/stratum-admin/
 install -o root -g root -m 0644 ../version.json /etc/stratum-version.json
 install -m 0644 templates/v3_dashboard.html /opt/stratum-admin/templates/v3_dashboard.html
 install -m 0644 templates/public_status.html /opt/stratum-admin/templates/public_status.html
@@ -60,10 +63,11 @@ install -o root -g stratum-proxy -m 0640 v3-config.json /var/lib/stratum-monitor
 ln -sfn /var/lib/stratum-monitor/config/stratum-v3.json /etc/stratum-v3.json
 ln -sfn /var/lib/stratum-monitor/config/stratum-inspector.json /etc/stratum-inspector.json
 if [[ -f /var/log/stratum-audit.jsonl && ! -L /var/log/stratum-audit.jsonl ]]; then
-  install -o root -g stratum-proxy -m 0640 /var/log/stratum-audit.jsonl /var/lib/stratum-monitor/config/stratum-audit.jsonl
+  install -o root -g stratum-proxy -m 0660 /var/log/stratum-audit.jsonl /var/lib/stratum-monitor/config/stratum-audit.jsonl
 elif [[ ! -f /var/lib/stratum-monitor/config/stratum-audit.jsonl ]]; then
-  install -o root -g stratum-proxy -m 0640 /dev/null /var/lib/stratum-monitor/config/stratum-audit.jsonl
+  install -o root -g stratum-proxy -m 0660 /dev/null /var/lib/stratum-monitor/config/stratum-audit.jsonl
 fi
+chmod 0660 /var/lib/stratum-monitor/config/stratum-audit.jsonl
 ln -sfn /var/lib/stratum-monitor/config/stratum-audit.jsonl /var/log/stratum-audit.jsonl
 
 python3 /opt/stratum-admin/v3_manager.py --config /etc/stratum-v3.json --inspector /etc/stratum-inspector.json --haproxy /etc/haproxy/stratum-v3.cfg --resolve
@@ -75,6 +79,8 @@ if [[ ! -f /etc/stratum-admin.env ]]; then
   echo "Missing /etc/stratum-admin.env. Install phase 1 first to create the panel password." >&2
   exit 1
 fi
+chown root:stratum-admin /etc/stratum-admin.env
+chmod 0640 /etc/stratum-admin.env
 if [[ -f /etc/stratum-v3.env ]]; then
   :
 elif [[ -f /etc/stratum-monitor.env ]]; then
@@ -84,6 +90,8 @@ else
 fi
 chmod 0640 /etc/stratum-v3.env
 chown root:stratum-proxy /etc/stratum-v3.env
+if [[ -f /etc/stratum-monitor.env ]]; then chown root:stratum-admin /etc/stratum-monitor.env; chmod 0640 /etc/stratum-monitor.env; fi
+if [[ -f /etc/stratum-v3-peer.json ]]; then chown root:stratum-admin /etc/stratum-v3-peer.json; chmod 0640 /etc/stratum-v3-peer.json; fi
 
 cat >/etc/systemd/system/stratum-inspector-v3.service <<'EOF'
 [Unit]
@@ -170,20 +178,23 @@ EOF
 cat >/etc/systemd/system/stratum-route-switch-monitor.service <<'EOF'
 [Unit]
 Description=Stratum timed single-miner route switch monitor
-After=network-online.target stratum-inspector-v3.service stratum-secure-relay.service
+After=network-online.target stratum-inspector-v3.service stratum-secure-relay.service stratum-admin-helper.service
 Wants=network-online.target
+Requires=stratum-admin-helper.service
 StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=stratum-admin
+Group=stratum-admin
+SupplementaryGroups=stratum-proxy stratum-relay
 EnvironmentFile=-/etc/stratum-v3.env
 Environment=V3_CONFIG_FILE=/etc/stratum-v3.json
 Environment=INSPECTOR_STATE_FILE=/var/lib/stratum-inspector/state.json
 Environment=INSPECTOR_CONFIG_FILE=/etc/stratum-inspector.json
 Environment=HAPROXY_V3_CONFIG=/etc/haproxy/haproxy.cfg
 Environment=V3_RELOAD_SERVICES=1
+Environment=V3_PRIVILEGED_HELPER_SOCKET=/run/stratum-admin-helper.sock
 ExecStart=/usr/bin/python3 /opt/stratum-admin/route_switch_monitor.py
 Restart=always
 RestartSec=3
@@ -192,7 +203,30 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/etc/stratum-v3.json /etc/stratum-inspector.json /etc/haproxy /var/lib/stratum-monitor -/var/lib/stratum-secure-relay -/var/log/stratum-audit.jsonl
+ReadWritePaths=/var/lib/stratum-monitor -/var/lib/stratum-secure-relay -/var/log/stratum-audit.jsonl
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat >/etc/systemd/system/stratum-admin-helper.service <<'EOF'
+[Unit]
+Description=Stratum administration privileged helper
+After=local-fs.target
+Before=stratum-admin.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/stratum-admin
+Environment=V3_PRIVILEGED_HELPER_SOCKET=/run/stratum-admin-helper.sock
+ExecStart=/usr/bin/python3 /opt/stratum-admin/privileged_helper.py --serve
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target
@@ -201,12 +235,17 @@ EOF
 cat >/etc/systemd/system/stratum-admin.service <<'EOF'
 [Unit]
 Description=Stratum V3 administration panel
-After=network-online.target
+After=network-online.target stratum-admin-helper.service
 Wants=network-online.target
+Requires=stratum-admin-helper.service
 StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+User=stratum-admin
+Group=stratum-admin
+SupplementaryGroups=stratum-proxy stratum-relay
+WorkingDirectory=/opt/stratum-admin
 EnvironmentFile=/etc/stratum-admin.env
 EnvironmentFile=-/etc/stratum-v3.env
 Environment=V3_CONFIG_FILE=/etc/stratum-v3.json
@@ -214,15 +253,17 @@ Environment=ENDPOINT_STATE_FILE=/var/lib/stratum-monitor/endpoints.json
 Environment=INSPECTOR_CONFIG_FILE=/etc/stratum-inspector.json
 Environment=HAPROXY_V3_CONFIG=/etc/haproxy/haproxy.cfg
 Environment=V3_RELOAD_SERVICES=1
+Environment=V3_PRIVILEGED_HELPER_SOCKET=/run/stratum-admin-helper.sock
 ExecStart=/usr/bin/python3 /opt/stratum-admin/stratum_admin_v3.py
 Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
-User=root
-Group=root
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectHome=read-only
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/stratum-monitor -/var/lib/stratum-secure-relay -/var/log/stratum-audit.jsonl
 
 [Install]
 WantedBy=multi-user.target
@@ -297,6 +338,8 @@ WantedBy=timers.target
 EOF
 
 systemctl daemon-reload
+systemctl enable --now stratum-admin-helper.service
+systemctl enable --now stratum-admin.service
 systemctl enable --now stratum-inspector-v3.service
 systemctl enable --now stratum-endpoint-monitor.service
 systemctl enable --now stratum-route-switch-monitor.service
@@ -311,6 +354,8 @@ systemctl reload haproxy
 systemctl restart stratum-admin.service
 
 python3 /opt/stratum-admin/security_monitor.py --initialize
+chown root:stratum-proxy /var/lib/stratum-monitor/integrity.json
+chmod 0660 /var/lib/stratum-monitor/integrity.json
 systemctl enable --now stratum-security-monitor.service
-systemctl --no-pager --full status stratum-inspector-v3.service stratum-endpoint-monitor.service stratum-route-switch-monitor.service stratum-security-monitor.service stratum-admin.service stratum-public-status.service stratum-vps-watchdog.timer haproxy
+systemctl --no-pager --full status stratum-inspector-v3.service stratum-endpoint-monitor.service stratum-route-switch-monitor.service stratum-security-monitor.service stratum-admin-helper.service stratum-admin.service stratum-public-status.service stratum-vps-watchdog.timer haproxy
 echo "V3 installed. Backup: $backup"
