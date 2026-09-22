@@ -49,6 +49,7 @@ class AdminV3Test(unittest.TestCase):
         admin.SECURE_RELAY_EVENT_FILE = root / "relay-events.jsonl"
         admin.ACCESS_PACKAGE_DIR = root / "access-packages"
         admin.CLIENT_ACTION_FILE = root / "client-actions.json"
+        admin.ISSUE_STATE_FILE = root / "issues.json"
         admin.store = ConfigStore(config_path, root / "history", admin.AUDIT_FILE)
         admin.app.config.update(TESTING=True, SECRET_KEY="test")
         admin.LOGIN_FAILURES.clear()
@@ -320,6 +321,30 @@ class AdminV3Test(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         for label in ("一键全面诊断", "TLS 加密入口", "双 VPS 同步", "Windows 心跳", "最近 Share", "需人工处理"):
             self.assertIn(label.encode(), response.data)
+
+    def test_issue_registry_keeps_id_impact_duration_and_attempts(self):
+        diagnostics = {"items": [{"key": "heartbeat", "title": "Windows 心跳",
+            "detail": "一号矿场离线", "category": "manual"}]}
+        sites = [{"name": "一号矿场", "status": "offline", "miner_count": 0, "impact_miner_count": 12}]
+        first = admin.reconcile_issues(diagnostics, {}, sites, 1000)
+        issue = first["rows"][0]
+        issue["attempted_actions"] = [{"time": 1030, "action": "重新探测", "result": "失败"}]
+        second = admin.reconcile_issues(diagnostics, {"issues": {"heartbeat": issue}}, sites, 1120)
+        current = second["rows"][0]
+        self.assertEqual(current["id"], issue["id"])
+        self.assertEqual(current["affected_sites"], ["一号矿场"])
+        self.assertEqual(current["miner_count"], 12)
+        self.assertEqual(current["duration"], "2分钟")
+        self.assertTrue(current["ongoing"])
+        self.assertEqual(current["attempted_actions"][0]["action"], "重新探测")
+
+    def test_issue_registry_marks_missing_problem_resolved(self):
+        previous = {"issues": {"ports": {"id": "VPS-ABC", "key": "ports", "title": "端口",
+            "first_seen": 100, "last_seen": 120, "ongoing": True, "affected_sites": [],
+            "miner_count": 0, "attempted_actions": []}}}
+        result = admin.reconcile_issues({"items": []}, previous, [], 200)
+        self.assertFalse(result["rows"][0]["ongoing"])
+        self.assertEqual(result["rows"][0]["resolved_at"], 200)
 
     def test_recovered_service_does_not_leave_an_old_problem_open(self):
         records = [

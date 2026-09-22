@@ -27,7 +27,7 @@ from admin_auth import (LOGIN_FAILURES, LOGIN_FAILURES_LOCK, RequestAwareSession
     login_attempt_key, login_retry_after, record_login_failure, tailscale_identity,
     trusted_https_request)
 from endpoint_monitor import Notifier, beijing_time, probe_stratum
-from operations_center import comprehensive_diagnostics
+from operations_center import comprehensive_diagnostics, reconcile_issues
 from security_monitor import atomic_write as write_integrity, load as load_integrity, snapshot
 from v3_manager import ConfigError, ConfigStore, append_bounded_jsonl, file_lock, render_haproxy_config, render_inspector_config, route_map, validate_config
 from version_info import load_versions
@@ -57,6 +57,7 @@ SECURE_RELAY_MONITOR_STATE = Path(os.getenv("SECURE_RELAY_MONITOR_STATE", "/var/
 SECURE_RELAY_EVENT_FILE = Path(os.getenv("SECURE_RELAY_EVENT_FILE", "/var/lib/stratum-secure-relay/events.jsonl"))
 ACCESS_PACKAGE_DIR = Path(os.getenv("ACCESS_PACKAGE_DIR", "/var/lib/stratum-monitor/access-packages"))
 CLIENT_ACTION_FILE = Path(os.getenv("SECURE_RELAY_CLIENT_ACTIONS", "/var/lib/stratum-secure-relay/client-actions.json"))
+ISSUE_STATE_FILE = Path(os.getenv("V3_ISSUE_STATE_FILE", "/var/lib/stratum-monitor/issues.json"))
 VERSIONS = load_versions()
 PANEL_VERSION = VERSIONS["panel"]
 CURRENT_CLIENT_VERSION = VERSIONS["windows_client"]
@@ -1214,6 +1215,15 @@ def build_page_context(page):
     diagnostics = comprehensive_diagnostics(config, services, metrics, certificate, state,
         {**peer_settings, **peer_status, "pending": len(peer_outbox.get("items", []))}, sites, overview,
         logs, VERSIONS, port_listening) if page == "logs" else None
+    issue_registry = None
+    if diagnostics:
+        issue_registry = reconcile_issues(diagnostics, load_json(ISSUE_STATE_FILE, {}), sites, int(time.time()))
+        try:
+            ConfigStore._atomic_write(ISSUE_STATE_FILE,
+                json.dumps({"updated_at": issue_registry["updated_at"], "issues": issue_registry["issues"]},
+                    ensure_ascii=False, indent=2) + "\n", mode=0o600)
+        except OSError:
+            app.logger.exception("cannot persist issue registry")
     return dict(page=page, config=config, endpoint_map=endpoint_map, endpoint_rows=rows,
         online=sum(1 for row in rows if row["ok"]), alerting=sum(1 for value in state.get("endpoints", {}).values() if value.get("alerting")),
         services=services, server=metrics, pools=pools, active_pools=active_pools,
@@ -1236,7 +1246,8 @@ def build_page_context(page):
             "route_sync_received": "已接收VPS同步"},
         algorithms={"scrypt": "Scrypt", "sha256d": "SHA-256", "other": "其他/自定义", "unknown": "算法待确认"},
         security=security, sites=sites, reminders=reminders, admin_brief=administrator_brief(overview, services, sites, len([value for value in state.get("endpoints", {}).values() if value.get("alerting")]), reminders),
-        maintenance=maintenance_center(services, logs), diagnostics=diagnostics, notification_settings=notification_context(),
+        maintenance=maintenance_center(services, logs), diagnostics=diagnostics, issue_registry=issue_registry,
+        notification_settings=notification_context(),
         operation_timeline=operation_timeline(security), panel_version=PANEL_VERSION,
         current_client_version=CURRENT_CLIENT_VERSION, current_relay_version=CURRENT_RELAY_VERSION,
         relay_server_version=(sites[0]["server_version"] if sites else load_json(SECURE_RELAY_STATE, {}).get("server_version", "未上报")),

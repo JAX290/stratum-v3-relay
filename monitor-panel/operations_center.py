@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Operational diagnostics and issue presentation for the V3 panel."""
 
+import hashlib
 from datetime import datetime
 
 
@@ -97,6 +98,68 @@ def comprehensive_diagnostics(config, services, metrics, certificate, endpoint_s
         for key, label in GROUPS]
     return {"checked_at": checked.strftime("%Y-%m-%d %H:%M:%S"), "items": items, "groups": grouped,
         "counts": {key: sum(item["category"] == key for item in items) for key, _label in GROUPS}}
+
+
+def reconcile_issues(diagnostics, previous, sites, now):
+    """Keep stable issue IDs and attach administrator-facing business impact."""
+    previous = previous if isinstance(previous, dict) else {}
+    old = previous.get("issues", {}) if isinstance(previous.get("issues", {}), dict) else {}
+    current_items = {item["key"]: item for item in diagnostics.get("items", [])
+        if item.get("category") in {"repairable", "manual"}}
+    online_sites = [site for site in sites if site.get("status") != "disabled"]
+    records = {}
+    for key, item in current_items.items():
+        prior = old.get(key, {}) if isinstance(old.get(key, {}), dict) else {}
+        first_seen = int(prior.get("first_seen", now) or now)
+        impacted = _impacted_sites(key, online_sites)
+        records[key] = {"id": prior.get("id") or _issue_id(key), "key": key,
+            "title": item.get("title", key), "detail": item.get("detail", ""),
+            "category": item.get("category"), "first_seen": first_seen, "last_seen": now,
+            "ongoing": True, "affected_sites": [site.get("name", "未命名矿场") for site in impacted],
+            "miner_count": sum(_site_miners(site) for site in impacted),
+            "duration": _duration(now - first_seen),
+            "attempted_actions": list(prior.get("attempted_actions", []))[-10:]}
+    for key, prior in old.items():
+        if key in records or not isinstance(prior, dict):
+            continue
+        resolved_at = int(prior.get("resolved_at", now) or now)
+        if prior.get("ongoing", True):
+            resolved_at = now
+        if now - resolved_at > 7 * 86400:
+            continue
+        records[key] = {**prior, "ongoing": False, "resolved_at": resolved_at,
+            "duration": _duration(resolved_at - int(prior.get("first_seen", resolved_at) or resolved_at))}
+    issues = sorted(records.values(), key=lambda item: (not item.get("ongoing"), -int(item.get("last_seen", 0))))
+    return {"updated_at": now, "issues": records, "rows": issues}
+
+
+def _issue_id(key):
+    return "VPS-" + hashlib.sha256(str(key).encode("utf-8")).hexdigest()[:8].upper()
+
+
+def _site_miners(site):
+    return int(site.get("miner_count", site.get("impact_miner_count", 0)) or site.get("impact_miner_count", 0) or 0)
+
+
+def _impacted_sites(key, sites):
+    if key == "heartbeat":
+        return [site for site in sites if site.get("status") == "offline"]
+    if key == "versions":
+        return [site for site in sites if site.get("client_outdated") or site.get("server_outdated")]
+    if key in {"disk", "memory", "certificate", "peer"}:
+        return []
+    return sites
+
+
+def _duration(seconds):
+    seconds = max(0, int(seconds or 0))
+    if seconds < 60:
+        return "不足1分钟"
+    if seconds < 3600:
+        return f"{seconds // 60}分钟"
+    if seconds < 86400:
+        return f"{seconds // 3600}小时{seconds % 3600 // 60}分钟"
+    return f"{seconds // 86400}天{seconds % 86400 // 3600}小时"
 
 
 def _route_map(config):
