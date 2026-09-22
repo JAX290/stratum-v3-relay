@@ -9,6 +9,9 @@ $version=(Get-Content -LiteralPath $versionFile -Raw -Encoding UTF8 | ConvertFro
 $mainFormSource=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'MainForm.cs') -Raw -Encoding UTF8
 if($mainFormSource-match'AdminLoginForm|AdminAccessPolicy|管理员解锁|授权已到期') { throw 'Desktop settings must not require a separate administrator password.' }
 if($mainFormSource-notmatch'admin\.Click\+=delegate\{pages\.SelectedTab=settingsPage;\}') { throw 'Desktop settings button must open settings directly.' }
+foreach($removedText in @('导入加密接入文件','导出换机备份','导入换机备份','ImportAccessPackage','ExportMigrationBackup','ImportMigrationBackup')) {
+  if($mainFormSource.Contains($removedText)) { throw "Removed configuration workflow remains in MainForm.cs: $removedText" }
+}
 $relayExe=Join-Path $testDirectory ("木林森中转{0}测试版.exe" -f $version)
 $testExe=Join-Path $testDirectory 'client-core-tests.exe'
 & $compiler /nologo /target:exe /out:$testExe /reference:$relayExe (Join-Path $PSScriptRoot 'test_core.cs')
@@ -18,7 +21,7 @@ if($LASTEXITCODE-ne 0){throw 'Client regression tests failed.'}
 
 # Compile the same core without WinForms/Drawing or any UI source files.
 $coreSources=@('AppIdentity.cs','ConfigModels.cs','SystemStatus.cs','RelayManager.cs',
-  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','DutyStatus.cs','AccessPackage.cs','MigrationBackup.cs','SignedUpdate.cs','RemoteControl.cs','SupportBundle.cs','NetworkHelper.cs','NetworkRecovery.cs','ClientRepair.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs','FailoverPolicy.cs','RelayFailoverController.cs') |
+  'RelayStatus.cs','MinerStatistics.cs','MinerHistoryStore.cs','DutyStatus.cs','SignedUpdate.cs','RemoteControl.cs','SupportBundle.cs','NetworkHelper.cs','NetworkRecovery.cs','ClientRepair.cs','LastKnownGoodConfiguration.cs','CompleteConfigurationValidator.cs','ConfigurationRollback.cs','FailoverPolicy.cs','RelayFailoverController.cs') |
   ForEach-Object { Join-Path $PSScriptRoot $_ }
 $coreLibrary=Join-Path $testDirectory 'RelayCore.dll'
 $coreAssemblyInfo=Join-Path $testDirectory 'CoreVersion.cs'
@@ -81,18 +84,6 @@ $dutyStatusTestExe=Join-Path $testDirectory 'duty-status-tests.exe'
 if($LASTEXITCODE-ne 0){throw 'Duty status tests failed to compile.'}
 & $dutyStatusTestExe
 if($LASTEXITCODE-ne 0){throw 'Duty status tests failed.'}
-
-$accessPackageTestExe=Join-Path $testDirectory 'access-package-tests.exe'
-& $compiler /nologo /target:exe /out:$accessPackageTestExe /reference:$coreLibrary (Join-Path $PSScriptRoot 'test_access_package.cs')
-if($LASTEXITCODE-ne 0){throw 'Access package tests failed to compile.'}
-& $accessPackageTestExe
-if($LASTEXITCODE-ne 0){throw 'Access package tests failed.'}
-
-$migrationTestExe=Join-Path $testDirectory 'migration-backup-tests.exe'
-& $compiler /nologo /target:exe /out:$migrationTestExe /reference:$coreLibrary (Join-Path $PSScriptRoot 'test_migration_backup.cs')
-if($LASTEXITCODE-ne 0){throw 'Migration backup tests failed to compile.'}
-& $migrationTestExe
-if($LASTEXITCODE-ne 0){throw 'Migration backup tests failed.'}
 
 $signedUpdateTestExe=Join-Path $testDirectory 'signed-update-tests.exe'
 & $compiler /nologo /target:exe /out:$signedUpdateTestExe /reference:$coreLibrary (Join-Path $PSScriptRoot 'test_signed_update.cs')

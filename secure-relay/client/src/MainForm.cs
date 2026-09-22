@@ -142,9 +142,6 @@ public sealed class MainForm : Form
         Button save = new Button(); save.Text = "保存设置"; save.AutoSize = true; save.Click += delegate { SaveConfig(true); };
         validateConfig.Text = "验证并设为可用配置"; validateConfig.AutoSize = true; validateConfig.Click += delegate { ValidateAndPromoteConfig(); };
         Button backups = new Button(); backups.Text = "备用 VPS 设置"; backups.AutoSize = true; backups.Click += delegate { EditBackups(); };
-        Button importAccess=new Button();importAccess.Text="导入加密接入文件";importAccess.AutoSize=true;importAccess.Click+=delegate{ImportAccessPackage();};
-        Button exportMigration=new Button();exportMigration.Text="导出换机备份";exportMigration.AutoSize=true;exportMigration.Click+=delegate{ExportMigrationBackup();};
-        Button importMigration=new Button();importMigration.Text="导入换机备份";importMigration.AutoSize=true;importMigration.Click+=delegate{ImportMigrationBackup();};
         Button updateClient=new Button();updateClient.Text="检查并升级";updateClient.AutoSize=true;updateClient.Click+=delegate{CheckAndInstallUpdate(updateClient,null);};
         Button miners = new Button(); miners.Text="矿机状态"; miners.AutoSize=true; miners.Click+=delegate{new MinerStatusForm(manager).Show(this);};
         diagnostics.Text="一键诊断"; diagnostics.AutoSize=true; diagnostics.Click+=delegate{RunDiagnostics();};
@@ -152,7 +149,7 @@ public sealed class MainForm : Form
         Button help = new Button(); help.Text = "各项说明"; help.AutoSize = true; help.Click += delegate { ShowHelp(); };
         start.Text = "启动中转"; start.AutoSize = true; start.Click += delegate { StartRelay(); };
         stop.Text = "停止"; stop.AutoSize = true; stop.Enabled = false; stop.Click += delegate { relayRequested=false;manager.Stop();manager.SetRecoveryState("","");SetRunning(false); };
-        settingsButtons.Controls.Add(save); settingsButtons.Controls.Add(validateConfig); settingsButtons.Controls.Add(backups);settingsButtons.Controls.Add(importAccess);settingsButtons.Controls.Add(exportMigration);settingsButtons.Controls.Add(importMigration);settingsButtons.Controls.Add(updateClient);settingsButtons.Controls.Add(help);
+        settingsButtons.Controls.Add(save); settingsButtons.Controls.Add(validateConfig); settingsButtons.Controls.Add(backups);settingsButtons.Controls.Add(updateClient);settingsButtons.Controls.Add(help);
         settingsPage.Controls.Add(settingsButtons);settingsButtons.BringToFront();
 
         FlowLayoutPanel dutyButtons=new FlowLayoutPanel();dutyButtons.Dock=DockStyle.Top;dutyButtons.Height=92;dutyButtons.Padding=new Padding(18,10,0,0);dutyButtons.WrapContents=true;
@@ -388,41 +385,6 @@ public sealed class MainForm : Form
     private void EditBackups()
     {
         using (BackupForm form = new BackupForm(backupProfiles,manager,siteName.Text.Trim())) if (form.ShowDialog(this) == DialogResult.OK) backupProfiles = form.Profiles;
-    }
-
-    private async void ImportAccessPackage()
-    {
-        using(OpenFileDialog file=new OpenFileDialog()){file.Filter="木林森加密接入文件|*.msrelay|所有文件|*.*";file.Title="选择加密接入文件";if(file.ShowDialog(this)!=DialogResult.OK)return;
-            using(AccessPackageCodeForm code=new AccessPackageCodeForm()){if(code.ShowDialog(this)!=DialogResult.OK)return;
-                try{string json=File.ReadAllText(file.FileName,Encoding.UTF8);AccessPackageData package=AccessPackageCodec.Decrypt(json,code.ImportCode,DateTime.UtcNow);UsedAccessPackageStore used=new UsedAccessPackageStore(ConfigStore.Folder);if(used.IsUsed(package.PackageId))throw new InvalidOperationException("这个一次性接入文件已经导入过。");AppConfig imported=AccessPackageCodec.Apply(CurrentConfig(),package);CompleteConfigurationValidator validator=new CompleteConfigurationValidator();ConfigurationValidationEvidence evidence=await validator.ValidateAsync(imported,delegate(ServerProfile profile,string name,CancellationToken cancellation){return manager.TestProfileAsync(profile,name,cancellation);},CancellationToken.None);used.MarkUsed(package.PackageId);ConfigStore.Save(imported);new LastKnownGoodStore(ConfigStore.Folder).Promote(imported,evidence);ApplyConfig(imported);Log("加密接入文件已导入并通过完整验证："+package.SiteName+"。");MessageBox.Show(this,"接入资料已自动填写并通过本地端口、TLS 证书、共享密钥和 VPS 连通性验证。\r\n\r\n此一次性文件已在本机标记为使用。","导入成功",MessageBoxButtons.OK,MessageBoxIcon.Information);}
-                catch(Exception ex){Log("加密接入文件导入失败："+ex.Message);MessageBox.Show(this,"接入文件没有导入。\r\n\r\n"+ex.Message,"导入失败",MessageBoxButtons.OK,MessageBoxIcon.Warning);}
-            }
-        }
-    }
-
-    private void ExportMigrationBackup()
-    {
-        try{
-            AppConfig config=CurrentConfig();
-            using(MigrationPasswordForm password=new MigrationPasswordForm(true)){if(password.ShowDialog(this)!=DialogResult.OK)return;
-                using(SaveFileDialog file=new SaveFileDialog()){file.Filter="木林森换机备份|*.msbackup";file.DefaultExt="msbackup";file.AddExtension=true;file.FileName="木林森中转换机备份-"+DateTime.Now.ToString("yyyyMMdd-HHmm")+".msbackup";if(file.ShowDialog(this)!=DialogResult.OK)return;
-                    string package=MigrationBackupCodec.Export(config,password.MigrationPassword,NetworkHelper.GetLanIPv4(),DateTime.UtcNow,72);string temporary=file.FileName+".tmp";File.WriteAllText(temporary,package,Encoding.UTF8);if(File.Exists(file.FileName))File.Replace(temporary,file.FileName,null);else File.Move(temporary,file.FileName);Log("换机备份已加密导出："+file.FileName);MessageBox.Show(this,"换机备份已加密保存，有效期 72 小时。\r\n\r\n请把备份文件和迁移密码分开传给新电脑。新电脑完成全部验证前，不要修改矿机地址。","导出完成",MessageBoxButtons.OK,MessageBoxIcon.Information);
-                }
-            }
-        }catch(Exception ex){Log("换机备份导出失败："+ex.Message);MessageBox.Show(this,ex.Message,"无法导出换机备份",MessageBoxButtons.OK,MessageBoxIcon.Warning);}
-    }
-
-    private async void ImportMigrationBackup()
-    {
-        if(manager.IsRunning){MessageBox.Show(this,"请先停止这台新电脑上的中转，再导入换机备份，以便验证本地端口没有被占用。","请先停止中转",MessageBoxButtons.OK,MessageBoxIcon.Information);return;}
-        using(OpenFileDialog file=new OpenFileDialog()){file.Filter="木林森换机备份|*.msbackup|所有文件|*.*";file.Title="选择旧电脑导出的换机备份";if(file.ShowDialog(this)!=DialogResult.OK)return;
-            using(MigrationPasswordForm password=new MigrationPasswordForm(false)){if(password.ShowDialog(this)!=DialogResult.OK)return;
-                try{
-                    MigrationBackupData backup=MigrationBackupCodec.Import(File.ReadAllText(file.FileName,Encoding.UTF8),password.MigrationPassword,DateTime.UtcNow);CompleteConfigurationValidator validator=new CompleteConfigurationValidator();Log("开始在新电脑验证迁移配置的端口、证书、共享密钥和 VPS 连通性。");ConfigurationValidationEvidence evidence=await validator.ValidateAsync(backup.Config,delegate(ServerProfile profile,string name,CancellationToken cancellation){return manager.TestProfileAsync(profile,name,cancellation);},CancellationToken.None);MigrationSwitchPlan plan=MigrationSwitchPlan.Create(backup,NetworkHelper.GetLanIPv4(),evidence);ConfigStore.Save(backup.Config);SetAutoStart(backup.Config.AutoStart);new LastKnownGoodStore(ConfigStore.Folder).Promote(backup.Config,evidence);ApplyConfig(backup.Config);
-                    StringBuilder addresses=new StringBuilder();foreach(string address in plan.MinerAddresses)addresses.AppendLine(address);Log("换机备份导入并完整验证通过，新电脑局域网 IP："+plan.NewLanIp);MessageBox.Show(this,"新电脑迁移验证全部通过。\r\n\r\n本地端口：通过\r\nVPS 证书：通过\r\n共享密钥：通过\r\nVPS 连通性：通过\r\n\r\n旧电脑 IP："+(String.IsNullOrWhiteSpace(plan.OldLanIp)?"未记录":plan.OldLanIp)+"\r\n新电脑矿机地址：\r\n"+addresses+"\r\n现在可以启动新电脑中转，停止旧电脑中转，再逐台切换矿机地址。切换完成后请安全删除迁移备份。","可以开始换机",MessageBoxButtons.OK,MessageBoxIcon.Information);
-                }catch(Exception ex){Log("换机备份导入失败："+ex.Message);MessageBox.Show(this,"迁移没有生效，矿机地址不要切换。\r\n\r\n"+ex.Message,"迁移验证失败",MessageBoxButtons.OK,MessageBoxIcon.Warning);}
-            }
-        }
     }
 
     private void HandleRemoteAction(RemoteClientAction action)
