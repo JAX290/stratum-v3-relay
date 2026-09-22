@@ -30,6 +30,7 @@ from admin_auth import (LOGIN_FAILURES, LOGIN_FAILURES_LOCK, RequestAwareSession
     login_attempt_key, login_retry_after, record_login_failure, tailscale_identity,
     trusted_https_request)
 from endpoint_monitor import Notifier, beijing_time, probe_stratum
+from high_risk_wizard import validate_plan
 from operations_center import comprehensive_diagnostics, create_support_bundle, reconcile_issues
 from security_monitor import atomic_write as write_integrity, load as load_integrity, snapshot
 from v3_manager import ConfigError, ConfigStore, append_bounded_jsonl, file_lock, render_haproxy_config, render_inspector_config, route_map, validate_config
@@ -63,6 +64,7 @@ CLIENT_ACTION_FILE = Path(os.getenv("SECURE_RELAY_CLIENT_ACTIONS", "/var/lib/str
 ISSUE_STATE_FILE = Path(os.getenv("V3_ISSUE_STATE_FILE", "/var/lib/stratum-monitor/issues.json"))
 REPAIR_GUARD_FILE = Path(os.getenv("V3_REPAIR_GUARD_FILE", "/var/lib/stratum-monitor/repair-guard.json"))
 REPAIR_BACKUP_DIR = Path(os.getenv("V3_REPAIR_BACKUP_DIR", "/var/lib/stratum-monitor/repair-backups"))
+HIGH_RISK_CANDIDATE_DIR = Path(os.getenv("V3_CANDIDATE_DIR", "/var/lib/stratum-monitor/candidates"))
 VERSIONS = load_versions()
 PANEL_VERSION = VERSIONS["panel"]
 CURRENT_CLIENT_VERSION = VERSIONS["windows_client"]
@@ -1265,6 +1267,7 @@ def build_page_context(page):
         relay_server_version=(sites[0]["server_version"] if sites else load_json(SECURE_RELAY_STATE, {}).get("server_version", "未上报")),
         client_access=access, tailscale_access_available=bool(tailscale_identity()),
         remote_actions_available=current_tailscale_admin(), safe_service_repairs=SAFE_SERVICE_REPAIRS,
+        high_risk_plan=session.get("high_risk_plan"),
         csrf=session["csrf"])
 
 
@@ -1686,6 +1689,123 @@ def record_repair_result(key, success, error=""):
         "last_result": "success" if success else "failed", "last_error": str(error)[:300]}
     ConfigStore._atomic_write(REPAIR_GUARD_FILE, json.dumps(state, ensure_ascii=False, indent=2) + "\n", mode=0o600)
     return {"failures": failures, "blocked": failures >= 3}
+
+
+def validate_candidate_certificate(path):
+    result = certificate_summary(str(path))
+    if result.get("available"):
+        try:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(str(path))
+        except (OSError, ssl.SSLError) as exc:
+            raise ValueError("候选 PEM 必须包含匹配的证书和私钥：" + str(exc))
+    return result
+
+
+def high_risk_values(operation, source):
+    if operation == "route":
+        return {"port": source.get("port", ""), "endpoint_id": source.get("endpoint_id", "")}
+    if operation == "certificate":
+        return {"candidate": source.get("candidate", "")}
+    if operation == "firewall":
+        ports = source.get("ports", "")
+        return {"ports": ",".join(map(str, ports)) if isinstance(ports, list) else ports}
+    if operation == "dns":
+        return {"hostname": source.get("hostname", "")}
+    if operation == "upgrade":
+        return {"candidate": source.get("candidate", "")}
+    return {}
+
+
+def build_high_risk_plan(operation, values):
+    return validate_plan(operation, high_risk_values(operation, values), store.load(),
+        load_json(SECURE_RELAY_CONFIG, {}), VERSIONS, HIGH_RISK_CANDIDATE_DIR,
+        validate_config, validate_candidate_certificate, probe_stratum)
+
+
+@app.route("/high-risk/validate", methods=["POST"])
+def validate_high_risk_operation():
+    if not current_tailscale_admin():
+        return "Not found", 404
+    if not csrf_ok():
+        return "Forbidden", 403
+    operation = request.form.get("operation", "")
+    try:
+        plan = build_high_risk_plan(operation, request.form)
+        session["high_risk_plan"] = plan
+        append_audit("高风险候选验证:" + operation)
+        flash("候选方案验证通过。请核对影响范围后，在 10 分钟内执行。", "success")
+    except (ConfigError, OSError, ValueError, json.JSONDecodeError) as exc:
+        session.pop("high_risk_plan", None)
+        flash("候选方案未通过，不能执行：" + str(exc), "error")
+    return redirect(url_for("dashboard_page", page="settings") + "#high-risk-wizard")
+
+
+@app.route("/high-risk/execute", methods=["POST"])
+def execute_high_risk_operation():
+    if not current_tailscale_admin():
+        return "Not found", 404
+    if not csrf_ok():
+        return "Forbidden", 403
+    plan = session.get("high_risk_plan") if isinstance(session.get("high_risk_plan"), dict) else {}
+    if not plan or not secrets.compare_digest(str(plan.get("id", "")), request.form.get("plan_id", "")):
+        return "Plan not found", 404
+    if int(plan.get("expires_at", 0)) < int(time.time()):
+        session.pop("high_risk_plan", None)
+        flash("候选方案已超过 10 分钟，请重新验证。", "error")
+        return redirect(url_for("dashboard_page", page="settings") + "#high-risk-wizard")
+    operation = str(plan.get("operation", ""))
+    try:
+        # Re-run every validation against the current files and network to close the
+        # gap between preview and execution.
+        build_high_risk_plan(operation, plan.get("data", {}))
+        backup = create_repair_backup("high-risk-" + operation)
+        if operation == "route":
+            config = store.load()
+            port, endpoint_id = int(plan["data"]["port"]), plan["data"]["endpoint_id"]
+            previous = set_route_endpoint(config, port, endpoint_id)
+            remember_route_change(config, port, previous, endpoint_id)
+            save_and_reload(config, f"wizard-route:{port}:{previous}->{endpoint_id}")
+            sync_routes_immediately(config, [(port, "wizard-route")])
+        elif operation == "certificate":
+            relay = load_json(SECURE_RELAY_CONFIG, {})
+            target = Path(str(relay.get("certificate", "")))
+            if not target.is_file():
+                raise ValueError("当前证书路径不存在，不能安全替换")
+            REPAIR_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(target, REPAIR_BACKUP_DIR / ("certificate-before-" + str(int(time.time())) + ".pem"))
+            candidate = (HIGH_RISK_CANDIDATE_DIR / plan["data"]["candidate"]).resolve()
+            shutil.copy2(candidate, target)
+            result = subprocess.run(["systemctl", "restart", "stratum-secure-relay"], timeout=30, check=False)
+            if result.returncode or service_state("stratum-secure-relay") != "active":
+                raise OSError("证书替换后加密入口复查失败；操作前证书保留在修复备份目录")
+        elif operation == "firewall":
+            for port in plan["data"]["ports"]:
+                result = subprocess.run(["ufw", "allow", f"{int(port)}/tcp"], capture_output=True, text=True,
+                    timeout=15, check=False)
+                if result.returncode:
+                    raise OSError((result.stderr or result.stdout or "防火墙规则应用失败")[-300:])
+        elif operation == "dns":
+            config = store.load()
+            config.setdefault("settings", {})["relay_public_host"] = plan["data"]["hostname"]
+            validate_config(config, resolve=True)
+            store.save(config, actor=actor(), action="wizard-dns")
+        elif operation == "upgrade":
+            directory = (HIGH_RISK_CANDIDATE_DIR / plan["data"]["candidate"]).resolve()
+            script = directory / "monitor-panel" / "upgrade-v3-panel.sh"
+            result = subprocess.run(["/bin/bash", str(script)], cwd=str(directory / "monitor-panel"),
+                capture_output=True, text=True, timeout=600, check=False)
+            if result.returncode:
+                raise OSError((result.stderr or result.stdout or "升级脚本失败")[-500:])
+        else:
+            return "Plan not found", 404
+        session.pop("high_risk_plan", None)
+        append_audit("高风险操作执行:" + operation)
+        flash("高风险操作已按验证方案执行并完成复查。操作前备份：" + backup.name, "success")
+    except (ConfigError, OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        append_audit("高风险操作失败:" + operation)
+        flash("高风险操作未完成：" + str(exc), "error")
+    return redirect(url_for("dashboard_page", page="settings") + "#high-risk-wizard")
 
 
 @app.route("/repairs/<action>", methods=["POST"])

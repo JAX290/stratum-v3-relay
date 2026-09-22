@@ -60,7 +60,7 @@ postconf -e 'mynetworks = 127.0.0.0/8 [::1]/128'
 postconf -e 'smtp_tls_security_level = may'
 systemctl enable postfix
 systemctl restart postfix
-install -m 0755 ./stratum_admin_v3.py ./stratum_public_status.py ./stratum_inspector.py ./endpoint_monitor.py ./operations_center.py ./security_monitor.py ./v3_manager.py ./version_info.py ./admin_auth.py ./route_switch_monitor.py ./vps_watchdog.py ./reset-panel-password.sh ./install-public-status.sh /opt/stratum-admin/
+install -m 0755 ./stratum_admin_v3.py ./stratum_public_status.py ./stratum_inspector.py ./endpoint_monitor.py ./operations_center.py ./high_risk_wizard.py ./security_monitor.py ./v3_manager.py ./version_info.py ./admin_auth.py ./route_switch_monitor.py ./vps_watchdog.py ./reset-panel-password.sh ./install-public-status.sh /opt/stratum-admin/
 install -o root -g root -m 0755 ./version_info.py /opt/version_info.py
 install -o root -g root -m 0644 ../version.json /etc/stratum-version.json
 if ! grep -q '^TAILSCALE_AUTO_LOGIN=' /etc/stratum-admin.env; then echo 'TAILSCALE_AUTO_LOGIN=1' >>/etc/stratum-admin.env; fi
@@ -80,6 +80,7 @@ canonical_config=/var/lib/stratum-monitor/config/stratum-v3.json
 canonical_inspector=/var/lib/stratum-monitor/config/stratum-inspector.json
 canonical_audit=/var/lib/stratum-monitor/config/stratum-audit.jsonl
 install -d -o root -g stratum-proxy -m 0770 "$(dirname "$canonical_config")"
+install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor/candidates /var/lib/stratum-monitor/repair-backups
 current_config=$(readlink -f /etc/stratum-v3.json)
 if [[ "$current_config" != "$canonical_config" ]]; then
   install -o root -g stratum-proxy -m 0640 "$current_config" "$canonical_config"

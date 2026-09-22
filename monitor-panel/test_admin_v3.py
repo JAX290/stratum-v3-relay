@@ -55,6 +55,8 @@ class AdminV3Test(unittest.TestCase):
         admin.ISSUE_STATE_FILE = root / "issues.json"
         admin.REPAIR_GUARD_FILE = root / "repair-guard.json"
         admin.REPAIR_BACKUP_DIR = root / "repair-backups"
+        admin.HIGH_RISK_CANDIDATE_DIR = root / "candidates"
+        admin.HIGH_RISK_CANDIDATE_DIR.mkdir()
         admin.store = ConfigStore(config_path, root / "history", admin.AUDIT_FILE)
         admin.app.config.update(TESTING=True, SECRET_KEY="test")
         admin.LOGIN_FAILURES.clear()
@@ -464,6 +466,66 @@ class AdminV3Test(unittest.TestCase):
                 patch.object(admin, "clean_expired_project_logs", return_value=0):
             self.client.post("/repairs/clean-logs", data={"csrf": "token"})
         self.assertEqual(admin.repair_guard("clean-logs")["failures"], 0)
+
+    def test_high_risk_route_plan_validates_config_probe_and_impact(self):
+        config = admin.store.load()
+        with patch.object(admin, "validate_config") as validate, \
+                patch.object(admin, "probe_stratum", return_value={"ok": True}):
+            plan = admin.build_high_risk_plan("route", {"port": "11301", "endpoint_id": "f2pool-global"})
+        validate.assert_called_once()
+        self.assertTrue(plan["validated"])
+        self.assertEqual(plan["affected_ports"], [11301])
+        self.assertEqual(plan["data"]["endpoint_id"], "f2pool-global")
+
+    def test_high_risk_firewall_requires_all_production_ports(self):
+        config = admin.store.load()
+        relay = {"listen_port": 452}
+        required = sorted({22, 452} | {port for port, _endpoint, _kind, _group in admin.route_map(config)})
+        plan = admin.validate_plan("firewall", {"ports": ",".join(map(str, required))}, config, relay,
+            admin.VERSIONS, admin.HIGH_RISK_CANDIDATE_DIR, admin.validate_config,
+            admin.validate_candidate_certificate, admin.probe_stratum, now=100)
+        self.assertEqual(plan["data"]["ports"], required)
+        with self.assertRaises(ValueError):
+            admin.validate_plan("firewall", {"ports": "22,452"}, config, relay, admin.VERSIONS,
+                admin.HIGH_RISK_CANDIDATE_DIR, admin.validate_config,
+                admin.validate_candidate_certificate, admin.probe_stratum, now=100)
+
+    def test_high_risk_dns_and_upgrade_candidates_are_staged(self):
+        config = admin.store.load()
+        dns = admin.validate_plan("dns", {"hostname": "relay.example.com"}, config, {}, admin.VERSIONS,
+            admin.HIGH_RISK_CANDIDATE_DIR, admin.validate_config, admin.validate_candidate_certificate,
+            admin.probe_stratum, resolver=lambda host: ["93.184.216.34"], now=100)
+        self.assertEqual(dns["data"]["hostname"], "relay.example.com")
+        upgrade = admin.HIGH_RISK_CANDIDATE_DIR / "release-4"
+        (upgrade / "monitor-panel").mkdir(parents=True)
+        (upgrade / "version.json").write_text(json.dumps({**admin.VERSIONS, "panel": "9.0.0"}), encoding="utf-8")
+        (upgrade / "monitor-panel" / "upgrade-v3-panel.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+        plan = admin.validate_plan("upgrade", {"candidate": "release-4"}, config, {}, admin.VERSIONS,
+            admin.HIGH_RISK_CANDIDATE_DIR, admin.validate_config, admin.validate_candidate_certificate,
+            admin.probe_stratum, now=100)
+        self.assertEqual(plan["data"]["versions"]["panel"], "9.0.0")
+        with self.assertRaises(ValueError):
+            admin.validate_plan("upgrade", {"candidate": "../outside"}, config, {}, admin.VERSIONS,
+                admin.HIGH_RISK_CANDIDATE_DIR, admin.validate_config, admin.validate_candidate_certificate,
+                admin.probe_stratum, now=100)
+
+    def test_high_risk_execute_requires_matching_unexpired_plan_and_revalidates(self):
+        plan = {"id": "a" * 24, "operation": "route", "created_at": int(time.time()),
+            "expires_at": int(time.time()) + 600, "data": {"port": 11301, "endpoint_id": "f2pool-global"},
+            "summary": "test", "checks": [], "affected_ports": [11301], "validated": True}
+        with self.client.session_transaction() as session:
+            session["high_risk_plan"] = plan
+        backup = admin.REPAIR_BACKUP_DIR / "backup.zip"
+        with patch.object(admin, "current_tailscale_admin", return_value=True), \
+                patch.object(admin, "build_high_risk_plan", return_value=plan) as revalidate, \
+                patch.object(admin, "create_repair_backup", return_value=backup), \
+                patch.object(admin, "save_and_reload") as apply, patch.object(admin, "sync_routes_immediately"):
+            response = self.client.post("/high-risk/execute", data={"csrf": "token", "plan_id": plan["id"]})
+        self.assertEqual(response.status_code, 302)
+        revalidate.assert_called_once()
+        apply.assert_called_once()
+        with self.client.session_transaction() as session:
+            self.assertNotIn("high_risk_plan", session)
 
     def test_recovered_service_does_not_leave_an_old_problem_open(self):
         records = [
