@@ -84,7 +84,18 @@ getent group stratum-admin >/dev/null 2>&1 || groupadd --system stratum-admin
 id stratum-admin >/dev/null 2>&1 || useradd --system --gid stratum-admin --home /nonexistent --shell /usr/sbin/nologin stratum-admin
 chown root:stratum-admin /etc/stratum-admin.env
 chmod 0640 /etc/stratum-admin.env
-if [[ -f /etc/stratum-monitor.env ]]; then chown root:stratum-admin /etc/stratum-monitor.env; chmod 0640 /etc/stratum-monitor.env; fi
+test -f /etc/stratum-v3.env || : >/etc/stratum-v3.env
+if [[ -f /etc/stratum-monitor.env ]]; then
+  while IFS= read -r line; do
+    key=${line%%=*}
+    if [[ "$line" == *=* && "$key" =~ ^(WECHAT_WEBHOOK(_[1-3])?|DINGTALK_(WEBHOOK|SECRET)(_[1-3])?|EMAIL_(DELIVERY|TO_[1-3])|SMTP_(TO|HOST|PORT|SECURITY|USERNAME|PASSWORD|FROM)|NOTIFY_(CRITICAL|WARNING|INFO)_CHANNELS|NOTIFY_QUIET_(START|END)|NOTIFY_CLUSTER_MODE|PANEL_URL|MIN_CONNECTIONS|MEM_THRESHOLD|DISK_THRESHOLD|ALERT_INTERVAL)$ ]] && ! grep -q "^${key}=" /etc/stratum-v3.env; then
+      printf '%s\n' "$line" >>/etc/stratum-v3.env
+    fi
+  done </etc/stratum-monitor.env
+fi
+chown root:stratum-proxy /etc/stratum-v3.env
+chmod 0640 /etc/stratum-v3.env
+if [[ -f /etc/stratum-monitor.env ]]; then chown root:root /etc/stratum-monitor.env; chmod 0600 /etc/stratum-monitor.env; fi
 if [[ -f /etc/stratum-v3-peer.json ]]; then chown root:stratum-admin /etc/stratum-v3-peer.json; chmod 0640 /etc/stratum-v3-peer.json; fi
 install -d -o root -g stratum-proxy -m 1770 /var/lib/stratum-monitor
 install -d -o root -g stratum-proxy -m 0770 "$(dirname "$canonical_config")"

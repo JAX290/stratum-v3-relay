@@ -48,7 +48,7 @@ AUDIT_FILE = Path(os.getenv("V3_AUDIT_FILE", "/var/log/stratum-audit.jsonl"))
 INSPECTOR_CONFIG = Path(os.getenv("INSPECTOR_CONFIG_FILE", "/etc/stratum-inspector.json"))
 HAPROXY_CONFIG = Path(os.getenv("HAPROXY_V3_CONFIG", "/etc/haproxy/stratum-v3.cfg"))
 INTEGRITY_BASELINE = Path(os.getenv("INTEGRITY_BASELINE_FILE", "/var/lib/stratum-monitor/integrity.json"))
-ENV_FILE = Path(os.getenv("MONITOR_ENV_FILE", "/etc/stratum-monitor.env"))
+ENV_FILE = Path(os.getenv("MONITOR_ENV_FILE", "/etc/stratum-v3.env"))
 CRON_FILE = Path(os.getenv("MONITOR_CRON_FILE", "/etc/cron.d/stratum-monitor"))
 ENDPOINT_EVENT_FILE = Path(os.getenv("ENDPOINT_EVENT_FILE", "/var/lib/stratum-monitor/endpoint-events.jsonl"))
 SECURITY_STATE_FILE = Path(os.getenv("INTEGRITY_STATE_FILE", "/var/lib/stratum-monitor/security-state.json"))
@@ -69,6 +69,7 @@ REPAIR_GUARD_FILE = Path(os.getenv("V3_REPAIR_GUARD_FILE", "/var/lib/stratum-mon
 REPAIR_BACKUP_DIR = Path(os.getenv("V3_REPAIR_BACKUP_DIR", "/var/lib/stratum-monitor/repair-backups"))
 HIGH_RISK_CANDIDATE_DIR = Path(os.getenv("V3_CANDIDATE_DIR", "/var/lib/stratum-monitor/candidates"))
 NOTIFICATION_RESULT_FILE = Path(os.getenv("NOTIFICATION_RESULT_FILE", "/var/lib/stratum-monitor/notification-results.json"))
+NOTIFICATION_COORDINATOR_FILE = Path(os.getenv("NOTIFICATION_COORDINATOR_FILE", "/var/lib/stratum-monitor/notification-coordinator.json"))
 SECURE_NOTIFICATION_RESULT_FILE = Path(os.getenv("SECURE_NOTIFICATION_RESULT_FILE", "/var/lib/stratum-secure-relay/notification-result.json"))
 DAILY_INSPECTION_FILE = Path(os.getenv("DAILY_INSPECTION_FILE", "/var/lib/stratum-monitor/daily-inspections.json"))
 VERSIONS = load_versions()
@@ -176,7 +177,8 @@ def write_env(updates):
 
 NOTIFICATION_ENV_KEYS = ("WECHAT_WEBHOOK", "DINGTALK_WEBHOOK", "DINGTALK_SECRET", "SMTP_TO",
     "EMAIL_DELIVERY", "SMTP_HOST", "SMTP_PORT", "SMTP_SECURITY", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM",
-    "NOTIFY_CRITICAL_CHANNELS", "NOTIFY_WARNING_CHANNELS", "NOTIFY_INFO_CHANNELS", "NOTIFY_QUIET_START", "NOTIFY_QUIET_END") + tuple(
+    "NOTIFY_CRITICAL_CHANNELS", "NOTIFY_WARNING_CHANNELS", "NOTIFY_INFO_CHANNELS", "NOTIFY_QUIET_START", "NOTIFY_QUIET_END",
+    "NOTIFY_CLUSTER_MODE") + tuple(
         f"{prefix}_{number}" for prefix in ("WECHAT_WEBHOOK", "DINGTALK_WEBHOOK", "DINGTALK_SECRET", "EMAIL_TO")
         for number in range(1, 4))
 
@@ -195,6 +197,7 @@ def notification_context():
     delivery = values.get("EMAIL_DELIVERY", "smtp")
     email_ready = bool([item for item in recipients if item]) and (delivery == "direct" or
         bool(values.get("SMTP_HOST") and values.get("SMTP_FROM")))
+    coordinator = load_json(NOTIFICATION_COORDINATOR_FILE, {})
     return {"wechat": bool([item for item in wechat if item]), "wechat_count": len([item for item in wechat if item]),
         "wechat_slots": [{"number": number, "configured": bool(wechat[number - 1])} for number in range(1, 4)],
         "dingtalk": bool([item for item in dingtalk if item]), "dingtalk_count": len([item for item in dingtalk if item]),
@@ -208,7 +211,10 @@ def notification_context():
         "critical_channels": values.get("NOTIFY_CRITICAL_CHANNELS", "wechat,dingtalk,email").split(","),
         "warning_channels": values.get("NOTIFY_WARNING_CHANNELS", "wechat,dingtalk,email").split(","),
         "info_channels": values.get("NOTIFY_INFO_CHANNELS", "wechat,dingtalk,email").split(","),
-        "quiet_start": values.get("NOTIFY_QUIET_START", ""), "quiet_end": values.get("NOTIFY_QUIET_END", "")}
+        "quiet_start": values.get("NOTIFY_QUIET_START", ""), "quiet_end": values.get("NOTIFY_QUIET_END", ""),
+        "cluster_mode": values.get("NOTIFY_CLUSTER_MODE", "auto"),
+        "cluster_role": coordinator.get("role", "未判定"),
+        "cluster_message": coordinator.get("message", "等待双 VPS 协调状态")}
 
 
 def notification_result_rows():
@@ -224,7 +230,8 @@ def notification_result_rows():
         if not item:
             continue
         rows.append({**item, "key": key, "label": labels[key],
-            "status_text": {"success": "发送成功", "partial": "部分成功", "failed": "发送失败"}.get(item.get("status"), "状态未知")})
+            "status_text": {"success": "发送成功", "partial": "部分成功", "failed": "发送失败",
+                "suppressed": "本轮未发送"}.get(item.get("status"), "状态未知")})
     return rows
 
 
@@ -2170,6 +2177,18 @@ def load_peer_settings():
         "token": str(value.get("token", ""))}
 
 
+def ensure_local_node_id():
+    with file_lock(PEER_STATE_FILE.parent / "peer-sync"):
+        state = load_json(PEER_STATE_FILE, {"received": []})
+        node_id = str(state.get("node_id", ""))
+        if not re.fullmatch(r"[a-f0-9]{32}", node_id):
+            node_id = secrets.token_hex(16)
+            state["node_id"] = node_id
+            ConfigStore._atomic_write(PEER_STATE_FILE,
+                json.dumps(state, ensure_ascii=False, indent=2) + "\n", mode=0o640)
+        return node_id
+
+
 def peer_sync_summary():
     state = load_json(PEER_STATE_FILE, {})
     acknowledgements = state.get("acknowledgements", {})
@@ -2204,7 +2223,7 @@ def local_vps_health_summary(config=None, services=None, metrics=None):
     abnormal = [name for name, value in services.items() if value != "active"]
     now = int(time.time())
     last_received = max(received_times, default=0)
-    return {"name": socket.gethostname(), "checked_at": now, "panel_version": PANEL_VERSION,
+    return {"name": socket.gethostname(), "node_id": ensure_local_node_id(), "checked_at": now, "panel_version": PANEL_VERSION,
         "relay_version": CURRENT_RELAY_VERSION, "route_digest": route_configuration_digest(config),
         "services_total": len(services), "services_active": len(services) - len(abnormal),
         "abnormal_services": abnormal, "memory": (metrics or server_metrics()).get("memory", "-"),
@@ -2287,7 +2306,7 @@ def _queue_route_sync_locked(config, port, action, return_ids=False):
         "source", "enabled", "verified", "verified_at", "verified_test", "favorite")
     state = load_json(PEER_STATE_FILE, {"received": []})
     node_id = str(state.get("node_id", ""))
-    if not re.fullmatch(r"[a-f0-9]{16,64}", node_id):
+    if not re.fullmatch(r"[a-f0-9]{32}", node_id):
         node_id = secrets.token_hex(16)
         state["node_id"] = node_id
     sequences = state.setdefault("local_sequences", {})
@@ -2976,6 +2995,10 @@ def save_notification_settings():
                 for value in (quiet_start, quiet_end)):
             raise ValueError("免打扰开始和结束时间必须同时填写有效的 24 小时时间")
         updates["NOTIFY_QUIET_START"], updates["NOTIFY_QUIET_END"] = quiet_start, quiet_end
+        cluster_mode = request.form.get("cluster_mode", updates.get("NOTIFY_CLUSTER_MODE") or "auto").strip()
+        if cluster_mode not in {"auto", "always", "off"}:
+            raise ValueError("双 VPS 通知方式不正确")
+        updates["NOTIFY_CLUSTER_MODE"] = cluster_mode
         if recipients and updates["EMAIL_DELIVERY"] == "smtp":
             if not (updates["SMTP_HOST"] and re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", updates["SMTP_FROM"])):
                 raise ValueError("使用邮箱服务商发送时，需要完整填写 SMTP 服务器和发件地址")

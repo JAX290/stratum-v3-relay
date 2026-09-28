@@ -189,6 +189,20 @@ class RelayFlowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MonitorTests(unittest.TestCase):
+    def test_secure_monitor_uses_indexed_webhooks_and_cluster_role(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            env = root / "v3.env"
+            coordinator = root / "coordinator.json"
+            env.write_text("WECHAT_WEBHOOK_1=https://one.example/hook\nWECHAT_WEBHOOK_2=https://one.example/hook\n"
+                "WECHAT_WEBHOOK_3=https://two.example/hook\nNOTIFY_CLUSTER_MODE=auto\n", encoding="utf-8")
+            coordinator.write_text(json.dumps({"updated_at": 100, "active": False}), encoding="utf-8")
+            with patch.object(monitor, "ENV_FILE", env), patch.object(monitor, "NOTIFICATION_COORDINATOR_FILE", coordinator), \
+                    patch.dict(monitor.os.environ, {}, clear=True):
+                self.assertEqual(monitor.webhooks(), ["https://one.example/hook", "https://two.example/hook"])
+                self.assertFalse(monitor.notification_allowed(now=110))
+                self.assertTrue(monitor.notification_allowed(now=300))
+
     def test_notification_delivery_result_is_persisted(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "notification.json"

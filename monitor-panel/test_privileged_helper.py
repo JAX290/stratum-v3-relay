@@ -75,7 +75,7 @@ class PrivilegedHelperTest(unittest.TestCase):
                 "monitor_env": (target, 0o640, "text", "stratum-admin")}
             with patch.object(helper, "MANAGED_FILES", managed), patch.object(helper, "grp", None):
                 helper.dispatch({"operation": "write_managed", "name": "monitor_env",
-                    "content": "MIN_CONNECTIONS=2\nSMTP_HOST=smtp.example.com\n"})
+                    "content": "MIN_CONNECTIONS=2\nSMTP_HOST=smtp.example.com\nNOTIFY_CLUSTER_MODE=auto\n"})
                 self.assertIn("MIN_CONNECTIONS=2", target.read_text(encoding="utf-8"))
                 with self.assertRaises(ValueError):
                     helper.dispatch({"operation": "write_managed", "name": "monitor_env",

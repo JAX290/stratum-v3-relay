@@ -32,14 +32,14 @@ ALLOWED_SERVICES = {"haproxy", "stratum-secure-relay", "stratum-endpoint-monitor
 ALLOWED_SERVICES.add("stratum-vps-watchdog.timer")
 ALLOWED_ACTIONS = {"reload", "restart", "try-restart"}
 MANAGED_FILES = {
-    "monitor_env": (Path("/etc/stratum-monitor.env"), 0o640, "text", "stratum-admin"),
+    "monitor_env": (Path("/etc/stratum-v3.env"), 0o640, "text", "stratum-proxy"),
     "peer_config": (Path("/etc/stratum-v3-peer.json"), 0o640, "json", "stratum-admin"),
     "secure_relay_config": (Path("/etc/stratum-secure-relay.json"), 0o640, "json", "stratum-relay"),
 }
 MONITOR_ENV_KEY = __import__("re").compile(
     r"^(?:WECHAT_WEBHOOK(?:_[1-3])?|DINGTALK_(?:WEBHOOK|SECRET)(?:_[1-3])?|"
     r"EMAIL_(?:DELIVERY|TO_[1-3])|SMTP_(?:TO|HOST|PORT|SECURITY|USERNAME|PASSWORD|FROM)|"
-    r"NOTIFY_(?:CRITICAL|WARNING|INFO)_CHANNELS|NOTIFY_QUIET_(?:START|END)|"
+    r"NOTIFY_(?:CRITICAL|WARNING|INFO)_CHANNELS|NOTIFY_QUIET_(?:START|END)|NOTIFY_CLUSTER_MODE|"
     r"PANEL_URL|MIN_CONNECTIONS|MEM_THRESHOLD|DISK_THRESHOLD|ALERT_INTERVAL)$")
 
 

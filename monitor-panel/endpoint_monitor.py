@@ -35,6 +35,7 @@ EVENT_FILE = Path(os.getenv("ENDPOINT_EVENT_FILE", "/var/log/stratum-endpoints.j
 EVENT_MAX_BYTES = int(os.getenv("ENDPOINT_EVENT_MAX_BYTES", str(8 * 1024 * 1024)))
 EVENT_KEEP_LINES = int(os.getenv("ENDPOINT_EVENT_KEEP_LINES", "5000"))
 NOTIFICATION_RESULT_FILE = Path(os.getenv("NOTIFICATION_RESULT_FILE", "/var/lib/stratum-monitor/notification-results.json"))
+NOTIFICATION_COORDINATOR_FILE = Path(os.getenv("NOTIFICATION_COORDINATOR_FILE", "/var/lib/stratum-monitor/notification-coordinator.json"))
 BEIJING = ZoneInfo("Asia/Shanghai")
 
 
@@ -380,6 +381,11 @@ class Notifier:
         except OSError:
             # Logging must not take endpoint monitoring or route recovery down.
             pass
+        if not self.cluster_notification_allowed(event):
+            channels = self.channels_for_event(event)
+            self._save_outcomes({channel: {"status": "suppressed", "sent": 0, "total": 0,
+                "error": "双 VPS 通知由另一台节点负责"} for channel in channels}, all_failed=False)
+            return
         content = self.enrich_message(event, self.format_message(event))
         channels = self.channels_for_event(event)
         if self.in_quiet_hours(event) and self.event_severity(event) != "critical":
@@ -387,6 +393,23 @@ class Notifier:
                 "error": "免打扰时段内已抑制"} for channel in channels}, all_failed=False)
             return
         self.send(content, only=channels)
+
+    def cluster_notification_allowed(self, event=None):
+        mode = self.settings.get("NOTIFY_CLUSTER_MODE", "auto").strip().lower()
+        if mode == "always":
+            return True
+        if mode == "off":
+            return False
+        try:
+            value = json.loads(NOTIFICATION_COORDINATOR_FILE.read_text(encoding="utf-8"))
+            updated = int(value.get("updated_at", 0) or 0)
+            event_time = int((event or {}).get("time", time.time()) or time.time())
+            # Fail open when coordination is stale so a peer outage cannot silence alerts.
+            if updated <= 0 or abs(event_time - updated) > 150:
+                return True
+            return bool(value.get("active", True))
+        except (OSError, ValueError, TypeError):
+            return True
 
     @staticmethod
     def event_severity(event):

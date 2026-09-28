@@ -74,6 +74,16 @@ class DeploymentSecurityTest(unittest.TestCase):
         self.assertIn("Path(config_path).resolve()", manager)
         self.assertIn("Path(path).resolve()", manager)
 
+    def test_notification_settings_use_the_runtime_environment_and_migrate_legacy_values(self):
+        admin = (ROOT / "monitor-panel" / "stratum_admin_v3.py").read_text(encoding="utf-8")
+        helper = (ROOT / "monitor-panel" / "privileged_helper.py").read_text(encoding="utf-8")
+        self.assertIn('MONITOR_ENV_FILE", "/etc/stratum-v3.env"', admin)
+        self.assertIn('"monitor_env": (Path("/etc/stratum-v3.env")', helper)
+        for name in ("install-v3.sh", "upgrade-v3-panel.sh"):
+            script = (ROOT / "monitor-panel" / name).read_text(encoding="utf-8")
+            self.assertIn("NOTIFY_CLUSTER_MODE", script)
+            self.assertIn("</etc/stratum-monitor.env", script)
+
     def test_admin_panel_is_unprivileged_and_root_helper_is_allowlisted(self):
         helper = (ROOT / "monitor-panel" / "privileged_helper.py").read_text(encoding="utf-8")
         self.assertIn("ALLOWED_SERVICES", helper)

@@ -17,6 +17,7 @@ EVENT_FILE = Path(os.getenv("SECURE_RELAY_EVENT_FILE", "/var/lib/stratum-secure-
 EVENT_MAX_BYTES = int(os.getenv("SECURE_RELAY_EVENT_MAX_BYTES", str(8 * 1024 * 1024)))
 EVENT_KEEP_LINES = int(os.getenv("SECURE_RELAY_EVENT_KEEP_LINES", "5000"))
 NOTIFICATION_RESULT_FILE = Path(os.getenv("SECURE_NOTIFICATION_RESULT_FILE", "/var/lib/stratum-secure-relay/notification-result.json"))
+NOTIFICATION_COORDINATOR_FILE = Path(os.getenv("NOTIFICATION_COORDINATOR_FILE", "/var/lib/stratum-monitor/notification-coordinator.json"))
 ENV_FILE = Path("/etc/stratum-v3.env")
 
 
@@ -36,17 +37,37 @@ def read_json(path, default):
         return default
 
 
-def webhook():
-    value = os.getenv("WECHAT_WEBHOOK", "")
-    if value:
-        return value
+def webhooks():
+    values = {key: value for key, value in os.environ.items() if key.startswith("WECHAT_WEBHOOK")}
     try:
         for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
-            if line.startswith("WECHAT_WEBHOOK="):
-                return line.split("=", 1)[1].strip()
+            if "=" in line and not line.lstrip().startswith("#"):
+                key, value = line.split("=", 1)
+                if key == "WECHAT_WEBHOOK" or key.startswith("WECHAT_WEBHOOK_"):
+                    values[key] = value.strip()
     except OSError:
         pass
-    return ""
+    indexed = [values.get(f"WECHAT_WEBHOOK_{number}", "") for number in range(1, 4)]
+    selected = indexed if any(indexed) else [values.get("WECHAT_WEBHOOK", "")]
+    return list(dict.fromkeys(value for value in selected if value.startswith("https://")))
+
+
+def notification_allowed(now=None):
+    mode = os.getenv("NOTIFY_CLUSTER_MODE", "").strip().lower()
+    if not mode:
+        try:
+            mode = next((line.split("=", 1)[1].strip() for line in ENV_FILE.read_text(encoding="utf-8").splitlines()
+                if line.startswith("NOTIFY_CLUSTER_MODE=")), "auto")
+        except OSError:
+            mode = "auto"
+    if mode == "always":
+        return True
+    if mode == "off":
+        return False
+    value = read_json(NOTIFICATION_COORDINATOR_FILE, {})
+    current = int(now or time.time())
+    updated = int(value.get("updated_at", 0) or 0)
+    return updated <= 0 or abs(current - updated) > 150 or bool(value.get("active", True))
 
 
 def notify(url, content):
@@ -195,7 +216,9 @@ def main():
     while True:
         try:
             for event in check_once():
-                notify(webhook(), event)
+                if notification_allowed():
+                    for url in webhooks():
+                        notify(url, event)
         except Exception as exc:
             print(f"monitor error: {exc}", flush=True)
         time.sleep(30)

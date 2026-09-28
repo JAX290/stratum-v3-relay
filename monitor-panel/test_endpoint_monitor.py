@@ -1,4 +1,5 @@
 import json
+import json
 import re
 import tempfile
 import unittest
@@ -146,6 +147,20 @@ class EndpointMonitorTest(unittest.TestCase):
             notifier({"type": "recovery", "time": 0, "endpoint": "info.example:3333"})
         self.assertEqual(send.call_args_list[0].kwargs["only"], ["wechat"])
         self.assertEqual(send.call_args_list[1].kwargs["only"], ["email"])
+
+    def test_cluster_standby_suppresses_automatic_but_stale_state_fails_open(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            coordinator = root / "coordinator.json"
+            notifier = Notifier(settings={"WECHAT_WEBHOOK_1": "https://qyapi.example/send?key=one"},
+                event_path=root / "events.jsonl", result_path=root / "result.json")
+            coordinator.write_text(json.dumps({"updated_at": 100, "active": False}), encoding="utf-8")
+            with patch("endpoint_monitor.NOTIFICATION_COORDINATOR_FILE", coordinator), \
+                    patch.object(notifier, "send") as send:
+                notifier({"type": "endpoint_down", "time": 110, "endpoint": "pool:3333"})
+                send.assert_not_called()
+                notifier({"type": "endpoint_down", "time": 300, "endpoint": "pool:3333"})
+                send.assert_called_once()
 
     def test_quiet_hours_suppress_info_but_never_critical(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -33,6 +33,7 @@ class RouteSwitchMonitorTest(unittest.TestCase):
         admin.PEER_SYNC_FILE = root / "peer.json"
         admin.PEER_OUTBOX_FILE = root / "peer-outbox.json"
         admin.PEER_STATE_FILE = root / "peer-state.json"
+        admin.NOTIFICATION_COORDINATOR_FILE = root / "notification-coordinator.json"
         admin.store = ConfigStore(config_path, root / "history", root / "audit.jsonl")
         self.events = []
 
@@ -136,6 +137,28 @@ class RouteSwitchMonitorTest(unittest.TestCase):
         self.assertEqual([item["payload"]["version"]["sequence"] for item in items], [1, 2])
         self.assertEqual(items[0]["payload"]["version"]["node_id"], items[1]["payload"]["version"]["node_id"])
         self.assertNotIn("revision", items[0]["payload"])
+
+    def test_notification_coordinator_elects_one_sender_and_fails_over(self):
+        token = "f" * 64
+        admin.PEER_SYNC_FILE.write_text(json.dumps({"enabled": True,
+            "peers": ["https://peer.tail1234.ts.net"], "token": token}), encoding="utf-8")
+        admin.PEER_STATE_FILE.write_text(json.dumps({"node_id": "f" * 32}), encoding="utf-8")
+
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return json.dumps({"ok": True, "health": {
+                "node_id": "a" * 32, "name": "peer"}}).encode()
+
+        with patch.dict(switcher.os.environ, {"NOTIFY_CLUSTER_MODE": "auto"}, clear=False):
+            standby = switcher.refresh_notification_coordinator(now=1000,
+                opener=lambda request, timeout: Response())
+            active = switcher.refresh_notification_coordinator(now=1201,
+                opener=lambda request, timeout: (_ for _ in ()).throw(OSError("offline")))
+        self.assertFalse(standby["active"])
+        self.assertEqual(standby["role"], "通知备用节点")
+        self.assertTrue(active["active"])
+        self.assertEqual(active["role"], "通知主节点")
 
 
 if __name__ == "__main__":

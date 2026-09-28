@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -12,6 +13,59 @@ from pathlib import Path
 
 import stratum_admin_v3 as admin
 from endpoint_monitor import Notifier
+
+
+PEER_ACTIVE_SECONDS = 120
+
+
+def refresh_notification_coordinator(now=None, opener=None):
+    """Elect one notification sender while peers are reachable; fail open on isolation."""
+    now = int(now or time.time())
+    opener = opener or urllib.request.urlopen
+    settings = admin.load_peer_settings()
+    mode = os.getenv("NOTIFY_CLUSTER_MODE", "auto").strip().lower()
+    if mode not in {"auto", "always", "off"}:
+        mode = "auto"
+    local_id = admin.ensure_local_node_id()
+    state = admin.load_json(admin.NOTIFICATION_COORDINATOR_FILE, {"peers": {}})
+    peer_states = state.get("peers", {}) if isinstance(state.get("peers"), dict) else {}
+    configured_peers = set(settings.get("peers", []))
+    peer_states = {peer: value for peer, value in peer_states.items() if peer in configured_peers}
+    if settings.get("enabled") and len(settings.get("token", "")) >= 32:
+        for peer in settings.get("peers", []):
+            try:
+                request = urllib.request.Request(admin.validate_peer_url(peer) + "/api/v3/health-summary",
+                    headers={"Authorization": "Bearer " + settings["token"], "Accept": "application/json"})
+                with opener(request, timeout=5) as response:
+                    result = json.loads(response.read().decode("utf-8"))
+                health = result.get("health", {}) if result.get("ok") else {}
+                node_id = str(health.get("node_id", ""))
+                if not re.fullmatch(r"[a-f0-9]{32}", node_id):
+                    raise ValueError("对端未返回有效节点编号")
+                peer_states[peer] = {"node_id": node_id, "last_seen": now,
+                    "name": str(health.get("name", peer))[:80]}
+            except (OSError, ValueError, urllib.error.URLError, json.JSONDecodeError) as exc:
+                previous = peer_states.get(peer, {})
+                peer_states[peer] = {**previous, "last_error": str(exc)[:180]}
+    recent = [value for value in peer_states.values() if now - int(value.get("last_seen", 0) or 0) <= PEER_ACTIVE_SECONDS]
+    candidates = [local_id] + [str(value.get("node_id")) for value in recent]
+    leader = min(candidates)
+    if mode == "always":
+        active, role, message = True, "本机固定发送", "已选择本机始终发送"
+    elif mode == "off":
+        active, role, message = False, "本机已停用", "本机仅记录事件，不发送自动通知"
+    elif not settings.get("enabled") or not settings.get("peers"):
+        active, role, message = True, "单机发送", "双 VPS 同步未开启"
+    elif local_id == leader:
+        active, role, message = True, "通知主节点", "对端在线时只由本机发送"
+    else:
+        active, role, message = False, "通知备用节点", "主节点失联超过 2 分钟后本机自动接管"
+    value = {"version": 1, "updated_at": now, "mode": mode, "active": active,
+        "role": role, "message": message, "local_node_id": local_id, "leader_node_id": leader,
+        "peers": peer_states}
+    admin.ConfigStore._atomic_write(admin.NOTIFICATION_COORDINATOR_FILE,
+        json.dumps(value, ensure_ascii=False, indent=2) + "\n", mode=0o640)
+    return value
 
 
 def trial_result(canary, inspector):
@@ -175,11 +229,15 @@ def main():
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     last_inspection = 0
+    last_coordination = 0
     while True:
         try:
             evaluate_due()
             flush_peer_outbox()
             now = int(time.time())
+            if now - last_coordination >= 30:
+                refresh_notification_coordinator(now)
+                last_coordination = now
             if now - last_inspection >= 300:
                 admin.record_daily_inspection(now)
                 last_inspection = now
