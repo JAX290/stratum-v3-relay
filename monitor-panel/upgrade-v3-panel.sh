@@ -114,6 +114,10 @@ if [[ "$current_config" != "$canonical_config" ]]; then
   install -o root -g stratum-proxy -m 0640 "$current_config" "$canonical_config"
 fi
 ln -sfn "$canonical_config" /etc/stratum-v3.json
+if [[ -e "$canonical_config.lock" ]]; then
+  chown stratum-admin:stratum-proxy "$canonical_config.lock"
+  chmod 0660 "$canonical_config.lock"
+fi
 current_inspector=$(readlink -f /etc/stratum-inspector.json)
 if [[ "$current_inspector" != "$canonical_inspector" ]]; then
   install -o root -g stratum-proxy -m 0640 "$current_inspector" "$canonical_inspector"

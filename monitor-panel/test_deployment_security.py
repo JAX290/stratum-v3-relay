@@ -87,6 +87,10 @@ class DeploymentSecurityTest(unittest.TestCase):
     def test_peer_coordination_state_permissions_are_migrated(self):
         for name in ("install-v3.sh", "upgrade-v3-panel.sh"):
             script = (ROOT / "monitor-panel" / name).read_text(encoding="utf-8")
+            config_lock = ("/var/lib/stratum-monitor/config/stratum-v3.json.lock"
+                if name == "install-v3.sh" else '"$canonical_config.lock"')
+            self.assertIn(f"chown stratum-admin:stratum-proxy {config_lock}", script)
+            self.assertIn(f"chmod 0660 {config_lock}", script)
             self.assertIn("/var/lib/stratum-monitor/peer-sync-state.json", script)
             self.assertIn("/var/lib/stratum-monitor/peer-sync-outbox.json", script)
             self.assertIn("chown stratum-admin:stratum-proxy /var/lib/stratum-monitor/peer-sync.lock", script)

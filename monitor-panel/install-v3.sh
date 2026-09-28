@@ -52,6 +52,10 @@ install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor/history
 install -d -o root -g stratum-admin -m 0750 /var/lib/stratum-monitor/candidates
 install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor/repair-backups
 install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor/config
+if [[ -e /var/lib/stratum-monitor/config/stratum-v3.json.lock ]]; then
+  chown stratum-admin:stratum-proxy /var/lib/stratum-monitor/config/stratum-v3.json.lock
+  chmod 0660 /var/lib/stratum-monitor/config/stratum-v3.json.lock
+fi
 for state_file in /var/lib/stratum-monitor/peer-sync-state.json /var/lib/stratum-monitor/peer-sync-outbox.json; do
   if [[ -e "$state_file" ]]; then chown stratum-admin:stratum-proxy "$state_file"; chmod 0640 "$state_file"; fi
 done
