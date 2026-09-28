@@ -2177,12 +2177,24 @@ def load_peer_settings():
         "token": str(value.get("token", ""))}
 
 
+def local_node_id():
+    state = load_json(PEER_STATE_FILE, {})
+    node_id = str(state.get("node_id", ""))
+    if re.fullmatch(r"[a-f0-9]{32}", node_id):
+        return node_id
+    try:
+        machine = Path("/etc/machine-id").read_text(encoding="ascii").strip()
+    except OSError:
+        machine = socket.gethostname()
+    return hashlib.sha256((machine + "|stratum-v3").encode()).hexdigest()[:32]
+
+
 def ensure_local_node_id():
     with file_lock(PEER_STATE_FILE.parent / "peer-sync"):
         state = load_json(PEER_STATE_FILE, {"received": []})
         node_id = str(state.get("node_id", ""))
         if not re.fullmatch(r"[a-f0-9]{32}", node_id):
-            node_id = secrets.token_hex(16)
+            node_id = local_node_id()
             state["node_id"] = node_id
             ConfigStore._atomic_write(PEER_STATE_FILE,
                 json.dumps(state, ensure_ascii=False, indent=2) + "\n", mode=0o640)
@@ -2223,7 +2235,7 @@ def local_vps_health_summary(config=None, services=None, metrics=None):
     abnormal = [name for name, value in services.items() if value != "active"]
     now = int(time.time())
     last_received = max(received_times, default=0)
-    return {"name": socket.gethostname(), "node_id": ensure_local_node_id(), "checked_at": now, "panel_version": PANEL_VERSION,
+    return {"name": socket.gethostname(), "node_id": local_node_id(), "checked_at": now, "panel_version": PANEL_VERSION,
         "relay_version": CURRENT_RELAY_VERSION, "route_digest": route_configuration_digest(config),
         "services_total": len(services), "services_active": len(services) - len(abnormal),
         "abnormal_services": abnormal, "memory": (metrics or server_metrics()).get("memory", "-"),

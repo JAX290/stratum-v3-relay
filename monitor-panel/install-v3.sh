@@ -52,6 +52,13 @@ install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor/history
 install -d -o root -g stratum-admin -m 0750 /var/lib/stratum-monitor/candidates
 install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor/repair-backups
 install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor/config
+for state_file in /var/lib/stratum-monitor/peer-sync-state.json /var/lib/stratum-monitor/peer-sync-outbox.json; do
+  if [[ -e "$state_file" ]]; then chown stratum-admin:stratum-proxy "$state_file"; chmod 0640 "$state_file"; fi
+done
+if [[ -e /var/lib/stratum-monitor/peer-sync.lock ]]; then
+  chown stratum-admin:stratum-proxy /var/lib/stratum-monitor/peer-sync.lock
+  chmod 0660 /var/lib/stratum-monitor/peer-sync.lock
+fi
 install -d -o root -g root -m 0700 /var/lib/stratum-recovery
 install -m 0755 v3_manager.py version_info.py admin_auth.py endpoint_monitor.py operations_center.py high_risk_wizard.py privileged_helper.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py recovery_guard.py reset-panel-password.sh install-public-status.sh /opt/stratum-admin/
 install -o root -g root -m 0644 ../version.json /etc/stratum-version.json

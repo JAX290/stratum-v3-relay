@@ -996,6 +996,14 @@ class AdminV3Test(unittest.TestCase):
         self.assertIn("管理面板版本不一致", summary["differences"])
         self.assertIn("线路配置不一致", summary["differences"])
 
+    def test_health_summary_never_requires_writable_peer_state(self):
+        services = {"HAProxy": "active", "管理面板": "active"}
+        with patch.object(admin, "ensure_local_node_id", side_effect=PermissionError("root-owned state")):
+            health = admin.local_vps_health_summary(admin.store.load(), services,
+                {"memory": "20%", "disk": "30%"})
+        self.assertRegex(health["node_id"], r"^[a-f0-9]{32}$")
+        self.assertEqual(health["services_active"], 2)
+
     def test_overview_renders_unified_dual_vps_health(self):
         with patch.object(admin, "detect_relay_public_ip", return_value={"ok": True,
                 "host": "93.184.216.34", "source": "test", "message": ""}):

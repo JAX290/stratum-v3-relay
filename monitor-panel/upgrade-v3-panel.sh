@@ -102,6 +102,13 @@ install -d -o root -g stratum-proxy -m 0770 "$(dirname "$canonical_config")"
 install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor/history
 install -d -o root -g stratum-admin -m 0750 /var/lib/stratum-monitor/candidates
 install -d -o root -g stratum-proxy -m 0770 /var/lib/stratum-monitor/repair-backups
+for state_file in /var/lib/stratum-monitor/peer-sync-state.json /var/lib/stratum-monitor/peer-sync-outbox.json; do
+  if [[ -e "$state_file" ]]; then chown stratum-admin:stratum-proxy "$state_file"; chmod 0640 "$state_file"; fi
+done
+if [[ -e /var/lib/stratum-monitor/peer-sync.lock ]]; then
+  chown stratum-admin:stratum-proxy /var/lib/stratum-monitor/peer-sync.lock
+  chmod 0660 /var/lib/stratum-monitor/peer-sync.lock
+fi
 current_config=$(readlink -f /etc/stratum-v3.json)
 if [[ "$current_config" != "$canonical_config" ]]; then
   install -o root -g stratum-proxy -m 0640 "$current_config" "$canonical_config"

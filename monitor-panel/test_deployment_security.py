@@ -84,6 +84,14 @@ class DeploymentSecurityTest(unittest.TestCase):
             self.assertIn("NOTIFY_CLUSTER_MODE", script)
             self.assertIn("</etc/stratum-monitor.env", script)
 
+    def test_peer_coordination_state_permissions_are_migrated(self):
+        for name in ("install-v3.sh", "upgrade-v3-panel.sh"):
+            script = (ROOT / "monitor-panel" / name).read_text(encoding="utf-8")
+            self.assertIn("/var/lib/stratum-monitor/peer-sync-state.json", script)
+            self.assertIn("/var/lib/stratum-monitor/peer-sync-outbox.json", script)
+            self.assertIn("chown stratum-admin:stratum-proxy /var/lib/stratum-monitor/peer-sync.lock", script)
+            self.assertIn("chmod 0660 /var/lib/stratum-monitor/peer-sync.lock", script)
+
     def test_admin_panel_is_unprivileged_and_root_helper_is_allowlisted(self):
         helper = (ROOT / "monitor-panel" / "privileged_helper.py").read_text(encoding="utf-8")
         self.assertIn("ALLOWED_SERVICES", helper)
