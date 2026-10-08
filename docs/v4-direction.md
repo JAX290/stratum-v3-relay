@@ -88,9 +88,14 @@ Share。HAProxy 按公网端口把流量送到固定的 `127.0.0.1:20000+` 内�
 `upgrade-v3-panel.sh`（升级）→ `secure-relay/server/install-secure-relay.sh`。
 systemd 单元全部由 shell heredoc 生成（`install-v3.sh:116-361` 一次写了 8 个单元）。
 
-`install-v3.sh`（350 行）与 `upgrade-v3-panel.sh`（389 行）有大量逐字重复的单元定义、
-目录创建和权限迁移逻辑，两边必须手工保持同步——`test_deployment_security.py` 正是
-靠 `assertIn` 逐一检查两边都含有某段字符串来防止漂移。这是 V4 最该消除的结构性负担。
+`install-v3.sh`（386 行）与 `upgrade-v3-panel.sh`（421 行）有大量逐字重复的单元定义、
+目录创建和权限迁移逻辑（6 个 systemd 单元 + 8 个 drop-in 逐字重复），两边必须手工保持
+同步——`test_deployment_security.py` 正是靠 `assertIn` 逐一检查两边都含有某段字符串来
+防止漂移。同一份"环境变量键白名单"正则写了 **3 遍**（`install-v3.sh:106` 与
+`upgrade-v3-panel.sh:91` 是 bash 正则，`privileged_helper.py:39-43` 是 Python 正则），
+"监控开关"的 cron 文本有 **4 份字面量**，`haproxy -c` 预检逻辑有 **3 条独立路径**
+（`v3_manager.py:318`、`privileged_helper.py:103`、`recovery_guard.py:246`）。
+这是 V4 最该消除的结构性负担。
 
 ## 三、技术债清单
 
@@ -107,6 +112,15 @@ systemd 单元全部由 shell heredoc 生成（`install-v3.sh:116-361` 一次写
 | 配置存储靠文件约定 | `v3-config.json` + `.lock` 文件 + `generation` 计数器 + `os.chown` 分组保持，权限迁移散落在两个安装脚本里 | 每次动配置结构都有升级后 500 的历史（roadmap 里 `面板 3.2.21`、`3.2.22` 两次修正都是这个原因） |
 | 写操作面板跑 Flask 开发服务器 | `install-v3.sh:277` 直接 `ExecStart=/usr/bin/python3 /opt/stratum-admin/stratum_admin_v3.py`，末尾 `app.run(host="127.0.0.1", port=8789)`（`stratum_admin_v3.py:3108`）无 WSGI 容器；而只需读的 `stratum-public-status` 反而用了 `gunicorn --workers 2 --threads 2`（`install-v3.sh:312`） | 权力最大、任务最重（全面诊断、矿池探测、支持包导出都是数十秒级）的面板用的是仅适合开发的服务器；并发行为依赖 Werkzeug 默认值，无进程管理、无优雅重启、无 worker 隔离 |
 | `upgrade` 特权操作面偏大 | `privileged_helper.py:141-151`：只要 `/var/lib/stratum-monitor/candidates` 下有 root 持有的目录，就以 root 执行其中的 `upgrade-v3-panel.sh` | 目录权限是 0750 root:stratum-admin（面板账户**可读可执行**）；面板一旦被攻破即可触发 root 级代码执行 |
+| **完整性基线监控错了文件** | `security_monitor.py:27` 的基线覆盖 `/etc/haproxy/stratum-v3.cfg`，但生产实际加载的是 `/etc/haproxy/haproxy.cfg`（`install-v3.sh:375`、`upgrade-v3-panel.sh:399`） | **正在生效的 HAProxy 配置不在哈希基线内**，篡改只能靠 `recovery_guard` 的"重新渲染"兜底，第二道防线形同虚设 |
+| 面板有一条必然失败的回退分支 | `stratum_admin_v3.py:1216` 在 helper 不可用时直写 `/etc/haproxy/haproxy.cfg`，但生产单元是 `ProtectSystem=strict` + `ReadWritePaths=/var/lib/stratum-monitor`（`install-v3.sh:285-286`） | 该分支在生产**永远失败**；而测试默认环境恰好走这条分支（未设 `V3_PRIVILEGED_HELPER_SOCKET`），所以测试覆盖的是一条线上不存在的路径 |
+| 通知密钥暴露面偏大 | `/etc/stratum-v3.env` 0640 root:stratum-proxy，内含企微/钉钉 Webhook 与 `SMTP_PASSWORD`；而 `stratum-proxy` 组被 inspector、endpoint-monitor 直接持有，admin / route-switch / public-status 又通过 `SupplementaryGroups` 加入 | 六个服务都能读到全部通知凭据；任意一个被攻破等于凭据泄露 |
+| 审计日志无前后值 | `v3_manager.py:291` 每条审计只有 `{time, actor, action}`，不含 diff；审计文件 0660 root:**stratum-proxy**（`install-v3.sh:77-83`），无追加完整性保护 | 出事时无法回答"改成了什么"；被审计的组恰好对该文件有写权限，可污染且无法检测 |
+| 限流状态是进程内字典 | `admin_auth.py:10-14` 的 `LOGIN_FAILURES` 是进程内 dict | 多 worker 下失效。只读面板已用 `--workers 2`（`install-v3.sh:312`），**它当前的登录限流实际是失效的** |
+| 管理面板 XSS 缓解弱于只读面板 | `stratum_admin_v3.py:1675` 的 CSP 允许 `'unsafe-inline'`（模板有内联 JS），而 `stratum_public_status.py:270-280` 不带该放行 | 权限更高的面板防护反而更弱 |
+| 零覆盖的部署脚本 | `deploy.sh`、`install-v3.sh`、`upgrade-v3-panel.sh`、`install-public-status.sh`、`install-secure-relay.sh`、`bootstrap-vps.sh` 及全部回滚脚本**从不被真正执行**，只有字符串断言 + `bash -n` | 部署是本项目最容易出事的环节，却是测试最薄的地方 |
+| 死代码与死数据 | `stratum_admin.py` / `stratum_admin_server.py`（后者 `from metrics import collector`，而仓库里没有 `metrics.py`）；`stratum_admin_v3.py:1267-1294` 的模板常量 `PAGE` 无引用；`pool-benchmark-stratum-hk.json`（733 行）全仓无任何代码或测试引用 | 阅读成本、误导后续开发者 |
+| 子进程注入面其实很小 | 全仓 `shell=True` / `os.system` **零命中**，所有调用都是 list argv | 这点值得表扬，V4 应保持 |
 
 ### 3.2 Windows 客户端
 
@@ -214,8 +228,11 @@ V4 如果只做一件事，建议是这一件。
 | **M4 跨矿池容灾** | 自动切换按"矿池结算方式 + 地域 + 最近成功率"排序，跨矿池候选；提供单机试切验证门禁 | 注入一家矿池整体不可达，验证流量按序切到另一家且 Share 恢复 |
 | **M5 部署收敛** | `install` / `upgrade` 共用单元定义与迁移逻辑；安装器幂等且可重复执行 | 在干净容器里从零装、连装两次、从 v3 升级三种路径都通过；断言最终文件系统与单元内容 |
 | **M6 Windows 工程化** | `Relay.Core` 类库、csproj、`dotnet test`；`MainForm` 六条工作流抽成协调器 | 现有 247 项隔离检查全部保留并转为 `dotnet test`；六条工作流各有行为测试 |
-| **M7 安全收口** | 收紧 `upgrade` 特权操作面（改为校验签名的发布包，不再是 candidates 里的任意脚本）；统一共享密钥校验规则；`ConfigStore.Save` 不再明文落盘密钥；`recovery.json` 加完整性保护 | 每项有对应的负向测试 |
+| **M7 安全收口** | 修 `security_monitor` 基线路径（改为监控真正生效的 `/etc/haproxy/haproxy.cfg`）；收紧 `upgrade` 特权操作面（改为校验签名/清单的发布包，不再是 candidates 里的任意脚本）；`firewall_allow` 加端口白名单；通知密钥从共享 env 拆出、按服务最小化授权；审计日志记录前后值并加防篡改；CSP 去掉 `unsafe-inline`；统一共享密钥校验规则；客户端 `ConfigStore.Save` 不再明文落盘密钥；`recovery.json` 加完整性保护 | 每项有对应的负向测试；且都能在测试里复现修复前的失败 |
 | **M8 发布流水线** | 单点版本、指纹注入、CI 生成校验清单；决定是申请可导出的代码签名证书还是保留手工签名 | 一次打标签能产出可验证的完整发布包 |
+
+补充分解顺序上的说明：**M7 里的前两项是独立于重写的纯缺陷修复**，可以现在就单独发一个
+3.3.x 补丁到现有 V3 生产上，不必等 V4。它们的影响面小、收益明确，建议优先做掉。
 
 ## 六、需要你决定的几个问题
 
@@ -232,6 +249,8 @@ V4 如果只做一件事，建议是这一件。
    可先摘掉那 6 个 EXE 和 `secure-relay/local-archives/`）、是否继续 MIT。
 6. **签名证书**：是否值得为 CI 自动发布申请一张私钥可导出的代码签名证书？
    这决定了 M8 是"自动化"还是"继续手工"。
+7. **要不要先发一个 V3 补丁**：把"基线监控错文件""面板必然失败的回退分支"
+   "只读面板限流失效"这三条低风险高收益的缺陷先修掉？
 
 ## 七、附：上游值得保留的设计（V4 不要丢）
 
@@ -245,4 +264,6 @@ V4 如果只做一件事，建议是这一件。
 - 双 VPS 节点编号选举通知主节点、备用抑制重复通知；
 - 高危操作向导（候选验证 → 影响说明 → 复核 → 二次验证）；
 - 单机试切（只让一台矿机改道，验证 Share 后才全量）；
-- `docs/vps-service-boundaries.md` 这份共存边界文档，以及 `AGENTS.md` 的强制约束。
+- `docs/vps-service-boundaries.md` 这份共存边界文档，以及 `AGENTS.md` 的强制约束；
+- 全仓 `shell=True` / `os.system` **零使用**，所有子进程都是 list argv；
+- 支持包导出前的两层脱敏与失败关闭自检（`operations_center.py:175-211`）。
