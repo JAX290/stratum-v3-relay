@@ -110,7 +110,7 @@ systemd 单元全部由 shell heredoc 生成（`install-v3.sh:116-361` 一次写
 | 部署逻辑三套并存 | `install.sh` / `install-phase2.sh` / `rollback-phase2.sh` 是 v2 时代残留，仍在安装 `stratum_admin.py`、`stratum_admin_server.py`（两个各 200+ 行的旧面板） | 死代码、双份维护、误用时会把 v2 面板装回生产 |
 | 手工分片升级脚本 | `upgrade-dashboard.sh`（25 行）、`upgrade-alert-monitor.sh`（18）、`upgrade-integrity-monitor.sh`（17）、`upgrade-probe-settings.sh`（33）、`upgrade-worker-view.sh`（26） | 与 `upgrade-v3-panel.sh` 部分重叠，历史包袱 |
 | 配置存储靠文件约定 | `v3-config.json` + `.lock` 文件 + `generation` 计数器 + `os.chown` 分组保持，权限迁移散落在两个安装脚本里 | 每次动配置结构都有升级后 500 的历史（roadmap 里 `面板 3.2.21`、`3.2.22` 两次修正都是这个原因） |
-| 写操作面板跑 Flask 开发服务器 | `install-v3.sh:277` 直接 `ExecStart=/usr/bin/python3 /opt/stratum-admin/stratum_admin_v3.py`，末尾 `app.run(host="127.0.0.1", port=8789)`（`stratum_admin_v3.py:3108`）无 WSGI 容器；而只需读的 `stratum-public-status` 反而用了 `gunicorn --workers 2 --threads 2`（`install-v3.sh:312`） | 权力最大、任务最重（全面诊断、矿池探测、支持包导出都是数十秒级）的面板用的是仅适合开发的服务器；并发行为依赖 Werkzeug 默认值，无进程管理、无优雅重启、无 worker 隔离 |
+| 写操作面板跑 Flask 开发服务器 | `install-v3.sh` 的 `stratum-admin.service` 直接 `ExecStart=/usr/bin/python3 /opt/stratum-admin/stratum_admin_v3.py`，末尾 `app.run(host="127.0.0.1", port=8789)`（`stratum_admin_v3.py:3108`）无 WSGI 容器；而只需读的 `stratum-public-status` 反而用了 `gunicorn --workers 2 --threads 2`（`install-v3.sh:312`） | 权力最大、任务最重（全面诊断、矿池探测、支持包导出都是数十秒级）的面板用的是仅适合开发的服务器；并发行为依赖 Werkzeug 默认值，无进程管理、无优雅重启、无 worker 隔离 |
 | `upgrade` 特权操作面偏大 | `privileged_helper.py:141-151`：只要 `/var/lib/stratum-monitor/candidates` 下有 root 持有的目录，就以 root 执行其中的 `upgrade-v3-panel.sh` | 目录权限是 0750 root:stratum-admin（面板账户**可读可执行**）；面板一旦被攻破即可触发 root 级代码执行 |
 | **完整性基线监控错了文件** | `security_monitor.py:27` 的基线覆盖 `/etc/haproxy/stratum-v3.cfg`，但生产实际加载的是 `/etc/haproxy/haproxy.cfg`（`install-v3.sh:375`、`upgrade-v3-panel.sh:399`） | **正在生效的 HAProxy 配置不在哈希基线内**，篡改只能靠 `recovery_guard` 的"重新渲染"兜底，第二道防线形同虚设 |
 | 面板有一条必然失败的回退分支 | `stratum_admin_v3.py:1216` 在 helper 不可用时直写 `/etc/haproxy/haproxy.cfg`，但生产单元是 `ProtectSystem=strict` + `ReadWritePaths=/var/lib/stratum-monitor`（`install-v3.sh:285-286`） | 该分支在生产**永远失败**；而测试默认环境恰好走这条分支（未设 `V3_PRIVILEGED_HELPER_SOCKET`），所以测试覆盖的是一条线上不存在的路径 |
@@ -145,18 +145,39 @@ systemd 单元全部由 shell heredoc 生成（`install-v3.sh:116-361` 一次写
 - `scripts/check-version.py` 只校验 `version.json` 三个字段格式和 README 里的一句话，
   不校验各组件源码里的实际版本。
 
-### 3.4 运维层面的一个真实风险（不是代码问题，但优先级更高）
+### 3.4 运维层面的一个真实风险（**已修复**，见提交 `836a16b`）
 
-`monitor-panel/v3-config.json` 里**四个动态端口组（`9999`/`10001-10002`、
+原 `monitor-panel/v3-config.json` 里**四个动态端口组（`9999`/`10001-10002`、
 `10010-10012`、`10020-10022`、`10030-10032`，共 12 个端口）全部指向 Hash-Hut 一家矿池**
 （`hashhut-eu` / `hashhut-ru` / `hashhut-by` 三个地域节点）。
 
 也就是说：四个"备用端口组"其实只是同一家矿池的三个区域入口，**它们不构成跨矿池容灾**。
-Hash-Hut 整体故障、被攻击、或停止对特定地区结算时，12 条主线一起断，而面板的
-`templates` 机制结构上只支持"一个模板 = 一家矿池的三个地域"。这是当前架构里
-**最大的单点**，而且它藏在配置语义里，不读配置看不出来。
+Hash-Hut 整体故障、被攻击、或停止对特定地区结算时，12 条主线一起断。
 
-V4 如果只做一件事，建议是这一件。
+现在每组端口指向一家不同矿池：
+
+| 端口组 | 端口 | 矿池 |
+| --- | --- | --- |
+| `private` | `9999` / `10001` / `10002` | Hash-Hut |
+| `backup-1` | `10010` / `10011` / `10012` | LitecoinPool.org |
+| `backup-2` | `10020` / `10021` / `10022` | ViaBTC |
+| `backup-3` | `10030` / `10031` / `10032` | F2Pool |
+
+同时加了 `pool_discovery.py --coverage-only`，随时可以复查分布，出现"一家矿池被多组
+端口共用"时会告警。
+
+**这只改默认值**：`upgrade-v3-panel.sh` 把现有配置复制到
+`/var/lib/stratum-monitor/config/stratum-v3.json` 并重建符号链接，**不会用仓库里的
+默认配置覆盖生产配置**，所以**已有部署不会被动改变**，新默认只对全新安装生效。
+要让已有 VPS 也改成跨矿池分布，需要在面板上手工调整四组端口，或用
+`pool_discovery.py` 的结果重新生成配置。
+
+### 3.5 尚未处理的同类问题
+
+`templates` 的结构本身仍然只支持"一个模板 = 一家矿池的三个地域"。也就是说跨矿池容灾
+目前是**靠每个端口组各挑一家矿池**实现的，而不是靠"一条线路内部按顺序尝试多家矿池"。
+自动切换（`canary` / 线路恢复）仍然只在同一家矿池的地域入口之间进行。要真正做到
+"线路级跨矿池故障转移"，需要改配置模型——这是 V4 方向 B 第 1 项。
 
 ## 四、V4 的三个候选方向
 
