@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import asyncio
 import json
+import logging
 import os
 import signal
 import time
@@ -13,7 +14,14 @@ from zoneinfo import ZoneInfo
 
 CONFIG_FILE = Path(os.getenv("CONFIG_FILE", "/etc/stratum-inspector.json"))
 STATE_FILE = Path(os.getenv("STATE_FILE", "/var/lib/stratum-inspector/state.json"))
-MAX_CONNECTIONS = int(os.getenv("MAX_CONNECTIONS", "500"))
+# Per internal port, not global: every relay instance carries its own semaphore. A single
+# 1000-machine site spreads over the six assigned ports at roughly 4 connections per
+# machine, so ~670 concurrent connections land on one port. The old default of 500 was
+# below that and closed excess miner connections silently.
+MAX_CONNECTIONS = max(1, int(os.getenv("MAX_CONNECTIONS", "4096")))
+# One miner board opens 3-5 connections. This ceiling only exists to stop one address from
+# consuming the whole port; it is far above any real board.
+MAX_CONNECTIONS_PER_SOURCE = max(1, int(os.getenv("MAX_CONNECTIONS_PER_SOURCE", "64")))
 HASHRATE_WINDOW = int(os.getenv("HASHRATE_WINDOW", "1800"))
 WORKER_OFFLINE_AFTER = int(os.getenv("WORKER_OFFLINE_AFTER", "900"))
 WORKER_INVALID_AFTER = int(os.getenv("WORKER_INVALID_AFTER", "86400"))
@@ -112,10 +120,18 @@ class Inspector:
         self.accepted_events = defaultdict(deque)
         self.connection_counter = 0
         self.semaphore = asyncio.Semaphore(MAX_CONNECTIONS)
+        # Live connection count per miner address, so one address cannot occupy the port.
+        self.source_connections = defaultdict(int)
         self.upstream_ok = False
         self.upstream_latency_ms = None
         self.anomalies = deque(maxlen=200)
         self.last_history_cleanup = 0
+
+    def source_allowed(self, source_ip, limit=None):
+        """Cheap per-address guard; counts only connections currently open."""
+        if limit is None:
+            limit = MAX_CONNECTIONS_PER_SOURCE
+        return self.source_connections[source_ip] < limit
 
     def worker(self, name):
         if name not in self.workers:
@@ -158,9 +174,10 @@ class Inspector:
                 except (OSError, ValueError, UnicodeError, asyncio.TimeoutError):
                     await close_writer(client_writer)
                     return
+            source_ip = str(peer[0])
             connection = {
                 "id": connection_id,
-                "source_ip": str(peer[0]),
+                "source_ip": source_ip,
                 "source_port": int(peer[1]),
                 "public_port": public_port,
                 "connected_at": time.time(),
@@ -179,6 +196,14 @@ class Inspector:
                 "latency_total_ms": 0.0,
                 "latency_samples": 0,
             }
+            if not self.source_allowed(source_ip):
+                logging.warning("source connection limit reached source=%s limit=%s port=%s",
+                                source_ip, MAX_CONNECTIONS_PER_SOURCE, public_port)
+                await close_writer(client_writer)
+                return
+            # Registered and charged together, and released together in the finally block
+            # below, so the counter can never drift from the live connection set.
+            self.source_connections[source_ip] += 1
             self.connections[connection_id] = connection
             upstream_writer = None
             try:
@@ -204,6 +229,11 @@ class Inspector:
             except (OSError, asyncio.TimeoutError):
                 pass
             finally:
+                remaining = self.source_connections.get(source_ip, 0) - 1
+                if remaining > 0:
+                    self.source_connections[source_ip] = remaining
+                else:
+                    self.source_connections.pop(source_ip, None)
                 worker_name = connection.get("worker")
                 if worker_name and worker_name in self.workers:
                     worker = self.workers[worker_name]

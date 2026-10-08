@@ -37,6 +37,23 @@ MAX_HEADER = 8192
 DRAIN_TIMEOUT = 120
 INTERNAL_START = 20000
 DEFAULT_STATE_FILE = Path("/var/lib/stratum-secure-relay/sites.json")
+# ``max_connections`` caps every accepted TLS connection at once, across all sites and all
+# ports. It is an abuse ceiling, not a per-site capacity: one site with 1000 machines at 5
+# concurrent connections needs 5000 slots by itself, so a low global value silently starves
+# every other site. Real capacity is enforced per site by ``max_site_connections``.
+DEFAULT_MAX_CONNECTIONS = 20000
+# One site's own ceiling. A 1000-machine site peaks near 5000; the default leaves room for
+# reconnects. Exceeding it closes the newest connection of that site only.
+DEFAULT_MAX_SITE_CONNECTIONS = 6000
+
+
+def positive_int(value, fallback, minimum=1, maximum=1000000):
+    """Read a tunable that may be absent, non-numeric or hostile in the config file."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return max(minimum, min(maximum, number))
 SERVER_VERSION = load_versions()["secure_relay"]
 CONTROL_FILE = Path(os.getenv("SECURE_RELAY_CONTROL", "/var/lib/stratum-secure-relay/control.json"))
 CLIENT_ACTION_FILE = Path(os.getenv("SECURE_RELAY_CLIENT_ACTIONS", "/var/lib/stratum-secure-relay/client-actions.json"))
@@ -318,7 +335,9 @@ def proxy_header(headers, peer, destination_port):
 class SecureRelay:
     def __init__(self, config):
         self.config = config
-        self.semaphore = asyncio.Semaphore(int(config.get("max_connections", 1000)))
+        self.max_connections = positive_int(
+            config.get("max_connections"), DEFAULT_MAX_CONNECTIONS, minimum=1)
+        self.semaphore = asyncio.Semaphore(self.max_connections)
         self.state = SiteState(config.get("state_file", str(DEFAULT_STATE_FILE)))
         self.connections = {}
         self.last_control_id = str(load_control().get("id", ""))
@@ -333,6 +352,34 @@ class SecureRelay:
             return self.config
         except (OSError, ValueError):
             return self.config
+
+    def site_budget(self):
+        # Floor of 10, not 1: a malformed or absurd value must degrade to "small but
+        # usable" rather than silently throttling a whole site to a single connection.
+        return positive_int(self.current_config().get("max_site_connections"),
+                            DEFAULT_MAX_SITE_CONNECTIONS, minimum=10)
+
+    def site_budget_spent(self, client):
+        """True when this site already holds its whole share of the global pool.
+
+        ``SiteState`` already keeps the authoritative per-site active count, so this reads
+        it instead of maintaining a second counter that could drift out of sync.
+        """
+        site = self.state.sites.get(client["id"])
+        if not isinstance(site, dict):
+            return False
+        return max(0, int(site.get("active", 0) or 0)) >= self.site_budget()
+
+    def note_site_exhausted(self, client, peer):
+        """Record and report the exact condition, so a starved site is never silent."""
+        now = int(time.time())
+        site = self.state.sites.get(client["id"])
+        if isinstance(site, dict):
+            site["exhausted_at"] = now
+            site["exhausted_limit"] = self.site_budget()
+            self.state.dirty = True
+        logging.warning("site connection limit reached client=%s site=%s source=%s limit=%s",
+                        client["id"], client.get("name", ""), peer[0], self.site_budget())
 
     async def state_loop(self):
         """Coalesce reconnect storms into at most one small state write per second."""
@@ -366,11 +413,13 @@ class SecureRelay:
         upstream_writer = None
         client = None
         active_counted = False
-        # Do not let excess or abusive connections wait inside Python while
-        # retaining TLS stream buffers. Existing authenticated miners keep
-        # their slots; callers above the configured ceiling reconnect later.
+        # Abuse ceiling only. ``max_connections`` is deliberately far above any single
+        # site's peak so one large site cannot starve the others; per-site fairness is
+        # enforced after authentication. Rejecting before reading the header keeps an
+        # unauthenticated flood from parking TLS buffers inside Python.
         if self.semaphore.locked():
-            logging.warning("relay connection limit reached source=%s", peer[0])
+            logging.warning("relay global connection limit reached source=%s limit=%s",
+                            peer[0], self.max_connections)
             await close_writer(writer)
             return
         async with self.semaphore:
@@ -382,6 +431,14 @@ class SecureRelay:
                 client = authenticate(self.current_config(), supplied_token)
                 client_version = headers.get("x-client-version", "")
                 local_watchdog = is_local_watchdog(port, headers, peer)
+                # Only authenticated miner traffic is charged to a site. The loopback
+                # watchdog health check must keep working even at full capacity, otherwise
+                # a saturated relay would be reported as offline.
+                if not local_watchdog and self.site_budget_spent(client):
+                    self.note_site_exhausted(client, peer)
+                    writer.write(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+                    await writer.drain()
+                    return
                 if not local_watchdog:
                     self.state.update(client, peer, client_version=client_version,
                         reported_miner_count=optional_count(headers, "x-miner-count"),

@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import stratum_secure_server as secure
@@ -276,6 +277,77 @@ class CredentialTests(unittest.TestCase):
                 self.assertEqual(data["clients"][0]["token"], "a" * 64)
                 credentials.save(data)
                 self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["clients"][0]["id"], "default")
+
+
+class ConnectionBudgetTests(unittest.TestCase):
+    """One site must not be able to starve the others, and a big site must still fit.
+
+    These build the object without SiteState file IO, so they need no temporary directory.
+    """
+
+    def make_relay(self, config, sites):
+        relay = secure.SecureRelay.__new__(secure.SecureRelay)
+        relay.config = config
+        relay.max_connections = secure.positive_int(
+            config.get("max_connections"), secure.DEFAULT_MAX_CONNECTIONS, minimum=1)
+        relay.semaphore = asyncio.Semaphore(relay.max_connections)
+        relay.connections = {}
+        relay.state = SimpleNamespace(sites=sites, dirty=False)
+        return relay
+
+    def test_tunables_survive_missing_and_hostile_values(self):
+        self.assertEqual(secure.positive_int(None, 7), 7)
+        self.assertEqual(secure.positive_int("not-a-number", 7), 7)
+        self.assertEqual(secure.positive_int(0, 7, minimum=1), 1)
+        self.assertEqual(secure.positive_int(10 ** 9, 7, maximum=100), 100)
+        self.assertEqual(secure.positive_int("6000", 7), 6000)
+
+    def test_defaults_hold_a_thousand_machine_site(self):
+        peak = 1000 * 5
+        self.assertLess(peak, secure.DEFAULT_MAX_SITE_CONNECTIONS,
+            "a 1000-machine site at 5 connections each must fit inside the per-site default")
+        self.assertLess(peak, secure.DEFAULT_MAX_CONNECTIONS,
+            "and inside the global default, so it cannot starve other sites")
+
+    def test_site_budget_is_per_site(self):
+        relay = self.make_relay({"max_connections": 20000, "max_site_connections": 6000},
+                                {"mine-a": {"active": 5999}, "mine-b": {"active": 1}})
+        self.assertEqual(relay.site_budget(), 6000)
+        self.assertFalse(relay.site_budget_spent({"id": "mine-a"}))
+        relay.state.sites["mine-a"]["active"] = 6000
+        self.assertTrue(relay.site_budget_spent({"id": "mine-a"}), "a full site is refused")
+        self.assertFalse(relay.site_budget_spent({"id": "mine-b"}), "other sites keep working")
+        self.assertFalse(relay.site_budget_spent({"id": "unknown"}), "an unknown site is never blocked")
+
+    def test_exhaustion_is_recorded_for_diagnosis(self):
+        relay = self.make_relay({"max_connections": 20000, "max_site_connections": 6000},
+                                {"mine-a": {"active": 6000}})
+        relay.note_site_exhausted({"id": "mine-a", "name": "一号矿场"}, ("203.0.113.9", 1234))
+        site = relay.state.sites["mine-a"]
+        self.assertIsInstance(site["exhausted_at"], int)
+        self.assertEqual(site["exhausted_limit"], 6000)
+        self.assertTrue(relay.state.dirty, "the site state must persist the exhaustion marker")
+
+    def test_malformed_site_limit_degrades_to_the_default(self):
+        """Garbage in the config must not thin a site down to a token connection."""
+        for bad in ("xyz", None, ""):
+            relay = self.make_relay({"max_connections": 20000, "max_site_connections": bad},
+                                    {"mine-a": {"active": 5}})
+            self.assertEqual(relay.site_budget(), secure.DEFAULT_MAX_SITE_CONNECTIONS,
+                "an unusable value must fall back to the default, not to a tiny number")
+            self.assertFalse(relay.site_budget_spent({"id": "mine-a"}))
+
+    def test_non_positive_site_limit_is_raised_to_the_floor(self):
+        """Zero or negative must be clamped up to the floor, never treated as 'block all'."""
+        for bad in (0, -5, -1000):
+            relay = self.make_relay({"max_connections": 20000, "max_site_connections": bad},
+                                    {"mine-a": {"active": 5}})
+            self.assertEqual(relay.site_budget(), 10)
+            self.assertFalse(relay.site_budget_spent({"id": "mine-a"}),
+                "5 connections must still be allowed under the floor")
+            relay.state.sites["mine-a"]["active"] = 10
+            self.assertTrue(relay.site_budget_spent({"id": "mine-a"}),
+                "the floor still refuses once it is reached")
 
 
 if __name__ == "__main__":

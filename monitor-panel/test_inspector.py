@@ -171,6 +171,29 @@ class InspectorProtocolTest(unittest.TestCase):
                 inspector.attach_worker(connection, "owner.sources")
         self.assertEqual(len(inspector.workers["owner.sources"]["sources"]), 8)
 
+    def test_one_source_cannot_occupy_the_whole_port(self):
+        """A single miner address is capped; a real board only opens a handful."""
+        import stratum_inspector
+        inspector = Inspector()
+        limit = 8
+        for _ in range(7):
+            self.assertTrue(inspector.source_allowed("192.0.2.60", limit))
+            inspector.source_connections["192.0.2.60"] += 1
+        self.assertTrue(inspector.source_allowed("192.0.2.60", limit), "8th connection is still allowed")
+        inspector.source_connections["192.0.2.60"] += 1
+        self.assertFalse(inspector.source_allowed("192.0.2.60", limit), "9th must be refused")
+        self.assertTrue(inspector.source_allowed("192.0.2.61", limit),
+            "a different address must not be affected by a greedy neighbour")
+        self.assertEqual(stratum_inspector.MAX_CONNECTIONS_PER_SOURCE, 64)
+
+    def test_port_ceiling_clears_a_full_1000_machine_site(self):
+        """1000 machines over the six assigned ports must fit under the per-port ceiling."""
+        import stratum_inspector
+        per_port = 1000 * 5 / 6
+        self.assertGreater(stratum_inspector.MAX_CONNECTIONS, per_port,
+            "the per-port ceiling must exceed one large site's share, or miners are dropped silently")
+        self.assertLess(stratum_inspector.MAX_CONNECTIONS_PER_SOURCE, stratum_inspector.MAX_CONNECTIONS)
+
     def test_disconnect_history_is_written_without_credentials(self):
         inspector = Inspector()
         with tempfile.TemporaryDirectory() as folder, \

@@ -78,6 +78,41 @@ systemctl restart stratum-secure-monitor
 
 公网 TLS 入口由专用的 `stratum-relay` 系统账户运行。它只拥有绑定低端口的能力；配置、证书和私钥为组只读，只能写入 `/var/lib/stratum-secure-relay`。已有 VPS 运行最新版 `monitor-panel/upgrade-v3-panel.sh` 时会自动完成权限迁移。
 
+### 连接容量与矿场配额
+
+入口有两个独立的上限，都在 `/etc/stratum-secure-relay.json` 里，改完重启生效：
+
+| 参数 | 默认值 | 作用 |
+| --- | --- | --- |
+| `max_connections` | `20000` | 所有矿场、所有端口加起来同时在线的 TLS 连接总数。这是防滥用兜底，不是单场容量 |
+| `max_site_connections` | `6000` | 单个矿场的连接上限。超出时只拒绝该矿场的新连接，其他矿场不受影响 |
+
+分开设两个值是有原因的。**1000 台矿机、每台最多 5 条连接，一个矿场峰值就是 5000 条。** 旧版本只有一个全局 `max_connections: 1000`，等于一个场地就能占满全部名额，把其他矿场一起挤掉——而且它在认证之前就判断，被关掉的连接连是哪个矿场都看不出来。现在全局上限退为兜底，真正的容量按矿场算。
+
+某个矿场达到自己的上限时，入口会：
+
+- 只关闭**该矿场**的新连接，返回 `HTTP/1.1 503`，其他矿场继续正常工作；
+- 在日志里写明矿场编号、名称、来源 IP 和上限值；
+- 把 `exhausted_at` 和 `exhausted_limit` 写进 `/var/lib/stratum-secure-relay/sites.json`，便于事后确认是哪个矿场被限流、什么时候。
+
+本机看门狗的健康检查走回环地址，**不计入任何矿场配额**，所以即使入口满载，监控也不会误报矿场离线。
+
+调整示例——两个各约 1000 台的矿场，并留出余量：
+
+```bash
+python3 - <<'PY'
+import json
+path = "/etc/stratum-secure-relay.json"
+data = json.load(open(path, encoding="utf-8"))
+data["max_connections"] = 30000        # 全局兜底
+data["max_site_connections"] = 6000    # 单场
+json.dump(data, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+PY
+systemctl restart stratum-secure-relay
+```
+
+升级脚本会保留这两个值，不会把手工调整过的容量重置回默认。服务端的文件句柄上限已经是 `LimitNOFILE=65536`，两个值合起来不要超过这个数。
+
 ### 更改 TLS 端口
 
 例如把 TLS 入口改为 `8443`：
