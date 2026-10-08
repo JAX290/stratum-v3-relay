@@ -30,17 +30,17 @@
     {"id":"longpool-usw","pool":"LongPool","region":"美国西部","host":"ltc-doge-usw-01.longpool.org","port":8443,"algorithm":"scrypt","coins":"LTC/DOGE","transport":"tcp","source":"https://longpool.org/","enabled":true}
   ],
   "templates": [
-    {"id":"hashhut-default","name":"Hash-Hut Scrypt","algorithm":"scrypt","settlement":"PPLNS","endpoint_ids":["hashhut-ru","hashhut-eu","hashhut-by"],"worker_pattern":"{wallet}.{worker}","password_pattern":"{password}","enabled":true},
+    {"id":"hashhut-default","name":"Hash-Hut Scrypt","algorithm":"scrypt","settlement":"PPLNS","endpoint_ids":["hashhut-eu","hashhut-ru","hashhut-by"],"worker_pattern":"{wallet}.{worker}","password_pattern":"{password}","enabled":true},
     {"id":"litecoinpool-default","name":"LitecoinPool Scrypt","algorithm":"scrypt","settlement":"PPS","endpoint_ids":["litecoinpool-usw","litecoinpool-use","litecoinpool-eu"],"worker_pattern":"{account}.{worker}","password_pattern":"{password}","enabled":true},
     {"id":"viabtc-default","name":"ViaBTC Scrypt","algorithm":"scrypt","settlement":"PPS+","endpoint_ids":["viabtc-io","viabtc-top","viabtc-cc"],"worker_pattern":"{account}.{worker}","password_pattern":"{password}","enabled":true},
     {"id":"f2pool-default","name":"F2Pool Scrypt","algorithm":"scrypt","settlement":"PPS","endpoint_ids":["f2pool-global","f2pool-asia","f2pool-eu"],"worker_pattern":"{account}.{worker}","password_pattern":"{password}","enabled":true},
     {"id":"longpool-default","name":"LongPool Scrypt","algorithm":"scrypt","settlement":"PPLNS","endpoint_ids":["longpool-asia-8080","longpool-asia-8880","longpool-usw"],"worker_pattern":"{wallet}.{worker}","password_pattern":"{password}","enabled":true}
   ],
   "port_groups": [
-    {"id":"private","name":"自用端口组","ports":[9999,10001,10002],"template_id":"hashhut-default","endpoint_ids":["hashhut-eu","hashhut-ru","hashhut-by"]},
-    {"id":"backup-1","name":"备用端口组1","ports":[10010,10011,10012],"template_id":"hashhut-default","endpoint_ids":["hashhut-ru","hashhut-eu","hashhut-by"]},
-    {"id":"backup-2","name":"备用端口组2","ports":[10020,10021,10022],"template_id":"hashhut-default","endpoint_ids":["hashhut-ru","hashhut-eu","hashhut-by"]},
-    {"id":"backup-3","name":"备用端口组3","ports":[10030,10031,10032],"template_id":"hashhut-default","endpoint_ids":["hashhut-ru","hashhut-eu","hashhut-by"]}
+    {"id":"private","name":"端口组1 Hash-Hut","ports":[9999,10001,10002],"template_id":"hashhut-default","endpoint_ids":["hashhut-eu","hashhut-ru","hashhut-by"]},
+    {"id":"backup-1","name":"端口组2 LitecoinPool","ports":[10010,10011,10012],"template_id":"litecoinpool-default","endpoint_ids":["litecoinpool-usw","litecoinpool-use","litecoinpool-eu"]},
+    {"id":"backup-2","name":"端口组3 ViaBTC","ports":[10020,10021,10022],"template_id":"viabtc-default","endpoint_ids":["viabtc-io","viabtc-top","viabtc-cc"]},
+    {"id":"backup-3","name":"端口组4 F2Pool","ports":[10030,10031,10032],"template_id":"f2pool-default","endpoint_ids":["f2pool-global","f2pool-asia","f2pool-eu"]}
   ],
   "fixed_routes": [
     {"port":11001,"endpoint_id":"litecoinpool-usw"},{"port":11002,"endpoint_id":"litecoinpool-use"},{"port":11003,"endpoint_id":"litecoinpool-eu"},

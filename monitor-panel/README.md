@@ -334,6 +334,40 @@ cd /root/stratum-v3/monitor-panel
 
 也可以根据升级脚本输出的 backup 路径手动恢复对应文件。
 
+## 新币种矿池发现
+
+出现新币、需要给它找矿池时，用 `pool_discovery.py`。它做两件事：探测某个币种当前可用的矿池，以及检查现有中转配置的矿池分布是否有单点。
+
+```bash
+cd /root/stratum-v3/monitor-panel
+
+# 1. 先看当前配置的矿池分布（不联网，1 秒内出结果）
+python3 pool_discovery.py --coin LTC --coverage-only
+
+# 2. 探测 LTC 可用矿池
+python3 pool_discovery.py --coin LTC --rounds 3 --timeout 3
+
+# 3. 新币没有现成种子时，自己给候选列表
+cat > newpools.txt <<'EOF'
+# host:port 后面可跟 pool= 和 region=
+newpool.example.com:3333 pool=NewPool region=亚洲
+EOF
+python3 pool_discovery.py --coin XYZ --candidates newpools.txt --output /root/xyz-pools.json
+```
+
+**它不会猜域名。** 矿池域名没有统一规律（`ltc.f2pool.com`、`ltc-doge-asia.longpool.org`、`us2.litecoinpool.org`），靠猜只会得到一堆超时。候选来自四个地方：当前中转配置、种子目录 `pool-catalog.json`、`--candidates` 指定的文件、以及可选的在线目录（`--registry`，经常连不上，失败会自动跳过，不影响探测）。
+
+每个候选都会做真探测：TCP 连接、`mining.subscribe` 握手，加 `--authorize 账号.矿工名` 还会验证登录。报告里的「建议线路」**每个矿池最多取一条**——同一家矿池的两个地域入口不是冗余，这正是四个动态端口组要分开指向不同矿池的原因。
+
+几点说明：
+
+- 只读工具，不会改动中转配置；`--output` 只是把结果写成 JSON 供你查看。
+- 探测只接受公网地址，与中转本身的校验规则一致。
+- 会拒绝非公网地址，也会拒绝只有 TCP 通、但说不出 Stratum 话的端口。
+- 新增矿池先改 `pool-catalog.json`（加一条就行，不用改代码），长期就积累成自己的地址库。
+
+改完中转配置后，用 `--coverage-only` 复查一遍：四组动态端口应该分别指向四个不同矿池，否则会给出告警。
+
 ## 部署后检查
 
 检查服务状态：

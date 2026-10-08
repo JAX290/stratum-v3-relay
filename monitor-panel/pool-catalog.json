@@ -1,0 +1,78 @@
+{
+  "_comment": [
+    "种子矿池目录：pool_discovery.py 从这里取候选端点，再逐个做真实 Stratum 探测。",
+    "这里只放「已知存在」的矿池家族和端点，不放猜测出来的域名。",
+    "发现新矿池时直接往 pools 里加一条即可，无需改代码。",
+    "coins 用于按币种过滤；algorithm 用于判断是否与 scrypt 矿机兼容。"
+  ],
+  "pools": [
+    {
+      "name": "Hash-Hut",
+      "algorithm": "scrypt",
+      "coins": ["LTC", "DOGE"],
+      "endpoints": [
+        {"region": "欧洲", "host": "eu.pool.hash-hut.net", "port": 9999},
+        {"region": "俄罗斯", "host": "ru.pool.hash-hut.net", "port": 9999},
+        {"region": "白俄罗斯", "host": "by.pool.hash-hut.net", "port": 9999}
+      ]
+    },
+    {
+      "name": "LitecoinPool.org",
+      "algorithm": "scrypt",
+      "coins": ["LTC", "DOGE"],
+      "endpoints": [
+        {"region": "美国西部", "host": "us2.litecoinpool.org", "port": 8080},
+        {"region": "美国东部", "host": "us.litecoinpool.org", "port": 3333},
+        {"region": "欧洲", "host": "eu.litecoinpool.org", "port": 8080}
+      ]
+    },
+    {
+      "name": "ViaBTC",
+      "algorithm": "scrypt",
+      "coins": ["LTC", "DOGE"],
+      "endpoints": [
+        {"region": "全球 IO", "host": "ltc.viabtc.io", "port": 443},
+        {"region": "全球 TOP", "host": "ltc.viabtc.top", "port": 443},
+        {"region": "全球 CC", "host": "ltc.viabtc.cc", "port": 443}
+      ]
+    },
+    {
+      "name": "F2Pool",
+      "algorithm": "scrypt",
+      "coins": ["LTC", "DOGE"],
+      "endpoints": [
+        {"region": "全球", "host": "ltc.f2pool.com", "port": 3335},
+        {"region": "亚洲", "host": "ltc-asia.f2pool.com", "port": 3335},
+        {"region": "欧洲", "host": "ltc-euro.f2pool.com", "port": 8888}
+      ]
+    },
+    {
+      "name": "LongPool",
+      "algorithm": "scrypt",
+      "coins": ["LTC", "DOGE"],
+      "endpoints": [
+        {"region": "亚洲 8080", "host": "ltc-doge-asia.longpool.org", "port": 8080},
+        {"region": "亚洲 8880", "host": "ltc-doge-asia.longpool.org", "port": 8880},
+        {"region": "美国西部", "host": "ltc-doge-usw-01.longpool.org", "port": 8443}
+      ]
+    },
+    {
+      "name": "ProHashing",
+      "algorithm": "multi",
+      "coins": ["LTC", "DOGE", "DGB", "BCH", "BTC", "DASH", "RDD", "VTC", "NMC", "POT", "XPM", "XMY"],
+      "endpoints": [
+        {"region": "美国东部", "host": "prohashing.com", "port": 3333},
+        {"region": "欧洲", "host": "eu.prohashing.com", "port": 3333}
+      ]
+    },
+    {
+      "name": "Zergpool",
+      "algorithm": "multi",
+      "coins": ["LTC", "DOGE", "DGB", "BCH", "BTC", "DASH", "VTC", "RDD", "NMC", "POT", "XPM", "XMY", "GRS", "FLS"],
+      "endpoints": [
+        {"region": "欧洲", "host": "zergpool.com", "port": 3333},
+        {"region": "欧洲 EU", "host": "eu.zergpool.com", "port": 3333}
+      ]
+    }
+  ]
+}

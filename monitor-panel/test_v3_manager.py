@@ -28,6 +28,36 @@ class V3ManagerTest(unittest.TestCase):
         self.assertEqual(len(inspector["relays"]), len(self.config["endpoints"]))
         self.assertTrue(all(item["proxy_protocol"] for item in inspector["relays"]))
 
+    def test_shipped_default_assigns_each_port_group_to_a_different_pool(self):
+        """The shipped default must not concentrate every dynamic port group on one pool.
+
+        Four port groups that all resolve to the same pool are three redundant names for
+        one point of failure. The operator can still point them anywhere from the panel;
+        only the default that ships and gets installed is constrained here.
+        """
+        pool_of = {item["id"]: item["pool"] for item in self.config["endpoints"]}
+        groups = self.config["port_groups"]
+        self.assertEqual(len(groups), 4)
+        seen = {}
+        for group in groups:
+            pools = {pool_of[endpoint_id] for endpoint_id in group["endpoint_ids"]}
+            self.assertEqual(len(pools), 1,
+                f"{group['id']} mixes pools {sorted(pools)}; one group must serve one pool")
+            pool = pools.pop()
+            self.assertNotIn(pool, seen,
+                f"{group['id']} and {seen.get(pool)} both serve {pool}; the four port groups "
+                "must stay on four different pools so one pool outage cannot take them all down")
+            seen[pool] = group["id"]
+        self.assertEqual(len(seen), 4)
+
+    def test_port_group_template_matches_its_endpoints(self):
+        """A group's template_id and its endpoint_ids must describe the same pool."""
+        template_map = {item["id"]: item for item in self.config["templates"]}
+        for group in self.config["port_groups"]:
+            template = template_map[group["template_id"]]
+            self.assertEqual(group["endpoint_ids"], template["endpoint_ids"],
+                f"{group['id']} no longer matches its template {template['id']}")
+
     def test_rejects_sensitive_and_private_targets(self):
         config = json.loads(json.dumps(self.config))
         config["endpoints"][0]["host"] = "127.0.0.1"
