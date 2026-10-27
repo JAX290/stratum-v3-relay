@@ -210,8 +210,7 @@ def read_mirror_state(release_dir):
     """Last sync summary written by release_mirror.py; empty when it never ran."""
     try:
         payload = json.loads((Path(release_dir) / "sync.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    except (OSError, ValueError):        return {}
     return payload if isinstance(payload, dict) else {}
 
 
@@ -248,6 +247,37 @@ def create_app(gate_state_path, release_dir, admin_token=""):
     def latest_route():
         """Bare URL that downloads whatever is currently published."""
         return serve_current()
+
+    def resolve_setup(release_dir):
+        """Locate the one-file setup tool: manifest hint first, then the newest bundle."""
+        release_dir = Path(release_dir)
+        try:
+            payload = json.loads((release_dir / "latest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = {}
+        name = str(payload.get("setup", "")) if isinstance(payload, dict) else ""
+        if name and Path(name).name == name and (release_dir / name).is_file():
+            return release_dir / name
+        candidates = sorted(release_dir.glob("watch-pc-setup-*.bat"))
+        return candidates[-1] if candidates else None
+
+    @app.route("/update/setup")
+    def setup_route():
+        """The one-click setup tool.
+
+        Deliberately NOT metered: it is a few kilobytes of script with no payload, and the
+        installer it fetches is what the gate is there to limit. Handing out the script while
+        the gate is closed lets the operator read its clear message instead of a bare 410.
+        """
+        path = resolve_setup(app.config["RELEASE_DIR"])
+        if path is None:
+            return jsonify({"error": "setup file is not published"}), 404
+        response = send_file(path, mimetype="application/octet-stream",
+                             as_attachment=True, download_name=path.name,
+                             conditional=False)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
 
     @app.route("/update/manifest")
     def manifest_route():

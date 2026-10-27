@@ -195,6 +195,34 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(client.get("/update/other.exe").status_code, 404)
         self.assertEqual(client.get("/update/../etc/passwd").status_code, 404)
 
+    def test_setup_tool_is_served_while_the_gate_is_closed(self):
+        """The one-click script must be reachable even when the installer itself is not."""
+        (self.releases / "watch-pc-setup-2.3.16.bat").write_bytes(b"@echo off\r\nrem setup\r\n")
+        gate.save_state(self.state, gate.close(now=1))
+        response = self.app.test_client().get("/update/setup")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, b"@echo off\r\nrem setup\r\n")
+        self.assertIn("watch-pc-setup", response.headers.get("Content-Disposition", ""))
+
+    def test_setup_tool_does_not_consume_the_download_budget(self):
+        (self.releases / "watch-pc-setup-2.3.16.bat").write_bytes(b"@echo off\r\n")
+        gate.save_state(self.state, gate.open_for_downloads(1, now=1))
+        client = self.app.test_client()
+        client.get("/update/setup")
+        self.assertEqual(client.get("/update/" + self.name).status_code, 200,
+                         "fetching the setup script must not spend the installer budget")
+
+    def test_setup_tool_prefers_the_manifest_hint(self):
+        (self.releases / "watch-pc-setup-2.3.16.bat").write_bytes(b"old\r\n")
+        (self.releases / "watch-pc-setup-2.3.17.bat").write_bytes(b"new\r\n")
+        manifest = json.loads((self.releases / "latest.json").read_text(encoding="utf-8"))
+        manifest["setup"] = "watch-pc-setup-2.3.16.bat"
+        (self.releases / "latest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        self.assertEqual(self.app.test_client().get("/update/setup").data, b"old\r\n")
+
+    def test_setup_tool_is_404_when_not_published(self):
+        self.assertEqual(self.app.test_client().get("/update/setup").status_code, 404)
+
     def test_bare_latest_serves_the_published_file(self):
         """A browser hitting the bare /exe URL must get the installer, not an index."""
         gate.save_state(self.state, gate.open_for_downloads(1, now=1))
