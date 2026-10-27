@@ -485,7 +485,15 @@ public sealed class MainForm : Form
         List<string> endpoints=new List<string>(); foreach(EndpointState e in s.Endpoints) { string phase=e.Recovering?"恢复观察":(e.CooldownUntilUtc>DateTime.UtcNow?"冷却至 "+e.CooldownUntilUtc.ToLocalTime().ToString("HH:mm:ss"):(e.Online?"正常 "+e.LatencyMs+"ms":"异常 "+e.LastError));endpoints.Add((e.Selected?"当前·":"")+e.Name+":"+phase+"（"+(e.LastCheck==DateTime.MinValue?"未检测":e.LastCheck.ToString("HH:mm:ss"))+"）"); }
         start.Enabled=!manager.IsRunning;
         string recovery=String.IsNullOrWhiteSpace(s.RecoveryPhase)?"":("\r\n网络恢复："+s.RecoveryPhase+" · "+s.RecoveryMessage);
-        status.Text="总状态："+duty.Overall+"    受影响矿机："+duty.AffectedMiners+" 台\r\n"+duty.Guidance+"\r\n运行："+line+"    当前连接："+s.Active+"    累计连接："+s.Total+"    失败："+s.Failures+"    时长："+uptime+"\r\n线路："+(endpoints.Count==0 ? "启动后自动检测" : String.Join("，",endpoints.ToArray()))+recovery;
+        string ports;
+        if(!manager.IsRunning&&manager.ListeningPorts.Count==0&&manager.PortFailures.Count==0) ports="\r\n端口：未启动";
+        else {
+            List<int> live=manager.ListeningPorts; List<string> failed=manager.PortFailures;
+            List<string> liveText=new List<string>(); foreach(int port in live) liveText.Add(port.ToString());
+            ports="\r\n监听端口："+(live.Count==0?"无":live.Count+" 个（"+String.Join("，",liveText.ToArray())+"）");
+            if(failed.Count>0) ports+="    无法监听："+String.Join("，",failed.ToArray());
+        }
+        status.Text="总状态："+duty.Overall+"    受影响矿机："+duty.AffectedMiners+" 台\r\n"+duty.Guidance+"\r\n运行："+line+"    当前连接："+s.Active+"    累计连接："+s.Total+"    失败："+s.Failures+"    时长："+uptime+ports+"\r\n线路："+(endpoints.Count==0 ? "启动后自动检测" : String.Join("，",endpoints.ToArray()))+recovery;
     }
     private static string FormatDuration(TimeSpan t){ return ((int)t.TotalDays>0 ? ((int)t.TotalDays)+"天 " : "")+t.Hours.ToString("00")+":"+t.Minutes.ToString("00")+":"+t.Seconds.ToString("00"); }
     private static string FormatBytes(long value){ string[] u={"B","KB","MB","GB","TB"}; double n=value; int i=0; while(n>=1024&&i<u.Length-1){n/=1024;i++;} return n.ToString(i==0?"0":"0.0")+" "+u[i]; }

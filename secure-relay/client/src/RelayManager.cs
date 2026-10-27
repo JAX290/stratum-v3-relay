@@ -27,6 +27,11 @@ public sealed class RelayManager
     private readonly Action<string> log;
     private CancellationTokenSource stop;
     private readonly List<TcpListener> listeners = new List<TcpListener>();
+    // A port already taken by another program must not stop the relay: the miner-facing
+    // ports are independent, and losing one is far better than losing all of them. The
+    // home page reports both lists so the operator can see what is missing.
+    private readonly List<int> listeningPorts = new List<int>();
+    private readonly List<string> portFailures = new List<string>();
     private int active;
     private long totalConnections, failedConnections, uploadedBytes, downloadedBytes;
     private DateTime startedAt;
@@ -67,14 +72,36 @@ public sealed class RelayManager
             foreach (PortRoute route in routes) {
                 TcpListener listener = new TcpListener(listenIp, route.LocalPort);
                 try { listener.Start(256); }
-                catch (SocketException ex) { throw new InvalidOperationException("本地端口 " + route.LocalPort + " 无法监听，可能已被其他程序占用。", ex); }
+                catch (SocketException ex) {
+                    try { listener.Stop(); } catch { }
+                    lock (stateLock) portFailures.Add(route.LocalPort + "（" + DescribeSocketFailure(ex) + "）");
+                    log("端口 " + route.LocalPort + " 无法监听，已跳过：" + DescribeSocketFailure(ex) + "。");
+                    continue;
+                }
                 listeners.Add(listener);
+                lock (stateLock) listeningPorts.Add(route.LocalPort);
                 AcceptLoop(listener, config, route, stop.Token);
             }
+            if (listeners.Count == 0) throw new InvalidOperationException("所有本地端口都无法监听：" + String.Join("，", portFailures.ToArray()));
         } catch { Stop(); throw; }
         HealthLoop(config, stop.Token);
-        log("已启动，共监听 " + routes.Count + " 个端口。矿机请连接这台电脑的局域网 IP。");
+        if (portFailures.Count == 0) log("已启动，共监听 " + listeningPorts.Count + " 个端口。矿机请连接这台电脑的局域网 IP。");
+        else log("已启动，正在监听 " + listeningPorts.Count + " 个端口；" + portFailures.Count + " 个端口无法监听，已跳过（首页会显示明细）。");
     }
+
+    private static string DescribeSocketFailure(SocketException error)
+    {
+        if (error == null) return "未知原因";
+        switch (error.SocketErrorCode) {
+            case SocketError.AddressAlreadyInUse: return "已被其他程序占用";
+            case SocketError.AccessDenied: return "端口被系统保留或权限不足";
+            case SocketError.AddressNotAvailable: return "监听地址在这台电脑上不存在";
+            default: return error.SocketErrorCode.ToString();
+        }
+    }
+
+    public List<int> ListeningPorts { get { lock (stateLock) return new List<int>(listeningPorts); } }
+    public List<string> PortFailures { get { lock (stateLock) return new List<string>(portFailures); } }
 
     public void Stop()
     {
@@ -83,6 +110,7 @@ public sealed class RelayManager
         if (source != null) source.Cancel();
         foreach (TcpListener listener in listeners) { try { listener.Stop(); } catch { } }
         listeners.Clear();
+        lock (stateLock) { listeningPorts.Clear(); portFailures.Clear(); }
         if (source != null) source.Dispose();
         log("已停止监听。");
     }

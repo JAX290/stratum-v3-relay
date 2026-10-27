@@ -105,9 +105,14 @@ public static class ClientCoreTests
         } catch(InvalidOperationException){rejected=true;}
         finally {occupied.Stop();}
         var field=typeof(RelayManager).GetField("listeners",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic);
-        Check(rejected&&!relay.IsRunning&&((System.Collections.ICollection)field.GetValue(relay)).Count==0,"port conflict rolls back all partially started listeners");
+        // 一个端口被占用不再导致整体启动失败：其余端口照常监听，占用情况记录给首页显示
+        Check(!rejected&&relay.IsRunning,"an occupied port no longer aborts startup");
+        Check(((System.Collections.ICollection)field.GetValue(relay)).Count==1,"the free port keeps listening while the occupied one is skipped");
+        Check(relay.ListeningPorts.Count==1&&relay.PortFailures.Count==1,"listening and failed ports are reported separately");
+        Check(relay.PortFailures[0].Contains(port.ToString()),"the failure names the port that could not be bound");
+        Check(relay.Snapshot().Running,"relay reports running with a partially bound port set");
         relay.Stop();
-        Check(!relay.Snapshot().Running,"stop remains safe after startup rollback");
+        Check(!relay.Snapshot().Running&&relay.ListeningPorts.Count==0&&relay.PortFailures.Count==0,"stop clears the port report");
     }
     private static void CheckLocalHealth()
     {
@@ -200,7 +205,8 @@ public static class ClientCoreTests
             AppConfig occupiedConfig=ValidationConfig(occupied);int occupiedProbes=0;bool portFailure=false;
             try{validator.ValidateAsync(occupiedConfig,delegate(ServerProfile profile,string site,CancellationToken cancellation){occupiedProbes++;return System.Threading.Tasks.Task.FromResult(new EndpointState());},CancellationToken.None).GetAwaiter().GetResult();}
             catch(InvalidOperationException){portFailure=true;}
-            Check(portFailure&&occupiedProbes==0,"occupied local port stops validation before VPS probes");
+            // 端口被占用不再阻断启动：校验不再拦，交给 RelayManager 跳过该端口并在首页展示
+            Check(!portFailure&&occupiedProbes==2,"occupied local port no longer blocks validation");
 
             AppConfig invalid=ValidationConfig(FreeTcpPort());invalid.Servers[0].SharedKey="short";int invalidProbes=0;bool invalidRejected=false;
             try{validator.ValidateAsync(invalid,delegate(ServerProfile profile,string site,CancellationToken cancellation){invalidProbes++;return System.Threading.Tasks.Task.FromResult(new EndpointState());},CancellationToken.None).GetAwaiter().GetResult();}

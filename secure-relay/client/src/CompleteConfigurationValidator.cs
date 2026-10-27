@@ -20,7 +20,6 @@ public sealed class CompleteConfigurationValidator
         IPAddress listenAddress;
         if (!IPAddress.TryParse(config.ListenAddress, out listenAddress))
             throw new InvalidOperationException("本地监听地址格式不正确。");
-        List<PortRoute> routes = PortRoute.Parse(config.Ports);
         List<ServerProfile> enabled = new List<ServerProfile>();
         if (config.Servers != null) foreach (ServerProfile profile in config.Servers) {
             if (profile == null || !profile.Enabled) continue;
@@ -29,7 +28,9 @@ public sealed class CompleteConfigurationValidator
         }
         if (enabled.Count == 0) throw new InvalidOperationException("至少启用一个 VPS。");
 
-        ValidateLocalPorts(listenAddress, routes, cancellation);
+        // Port availability is intentionally NOT part of validation anymore: a port taken by
+        // another program must not prevent the relay from starting. RelayManager skips the
+        // busy port and the home page reports both the live and the failed ports.
         foreach (ServerProfile profile in enabled) {
             cancellation.ThrowIfCancellationRequested();
             await profileProbe(profile, config.SiteName, cancellation).ConfigureAwait(false);
@@ -51,23 +52,4 @@ public sealed class CompleteConfigurationValidator
             throw new InvalidOperationException(profile.Name + "：请填写证书名称或证书 SHA-256 指纹。");
     }
 
-    private static void ValidateLocalPorts(IPAddress address, List<PortRoute> routes, CancellationToken cancellation)
-    {
-        List<TcpListener> listeners = new List<TcpListener>();
-        try {
-            foreach (PortRoute route in routes) {
-                cancellation.ThrowIfCancellationRequested();
-                TcpListener listener = new TcpListener(address, route.LocalPort);
-                listener.Server.ExclusiveAddressUse = true;
-                try { listener.Start(1); }
-                catch (SocketException ex) {
-                    listener.Stop();
-                    throw new InvalidOperationException("本地端口 " + route.LocalPort + " 无法使用，可能已被其他程序占用。", ex);
-                }
-                listeners.Add(listener);
-            }
-        } finally {
-            foreach (TcpListener listener in listeners) try { listener.Stop(); } catch { }
-        }
-    }
 }
