@@ -163,8 +163,26 @@ def dispatch(request):
             entry = repository / name
             if entry.exists() and entry.lstat().st_uid != 0:
                 raise ValueError("部署仓库必须由 root 持有")
-        return {"output": run_checked(["/bin/bash", str(DEPLOY_SCRIPT), "--upgrade"],
-            timeout=1800, cwd=str(repository))}
+        # This helper runs with ProtectHome=read-only, and systemd will not re-open a path
+        # inside ProtectHome through ReadWritePaths. deploy.sh has to update a git checkout
+        # and stage its backups under root's home, so run it in a transient unit of its own
+        # rather than weakening the hardening of the long-lived privileged service.
+        #
+        # The upgrade restarts this very helper, so waiting for it here would kill the
+        # process that still has to send the reply. Start it detached and answer at once;
+        # the operator confirms the result from the version manifest and service state.
+        busy = run_checked(["/usr/bin/systemctl", "list-units", "--all", "--no-legend",
+                            "--no-pager", "stratum-deploy-*.service"], timeout=15)
+        if busy.strip():
+            raise ValueError("已有升级任务在进行中，请等待它结束。")
+        unit = "stratum-deploy-" + str(int(time.time()))
+        run_checked([
+            "/usr/bin/systemd-run", "--quiet", "--collect",
+            f"--unit={unit}",
+            f"--working-directory={repository}",
+            "--property=ProtectHome=no",
+            "/bin/bash", str(DEPLOY_SCRIPT), "--upgrade"], timeout=30)
+        return {"output": f"升级已在后台开始（{unit}），服务会依次重启，完成后版本清单会更新。"}
     if operation == "write_managed":
         name, content = str(request.get("name", "")), request.get("content")
         if name not in MANAGED_FILES or not isinstance(content, str) or len(content.encode()) > MAX_REQUEST:

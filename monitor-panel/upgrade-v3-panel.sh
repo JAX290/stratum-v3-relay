@@ -247,7 +247,11 @@ Restart=always
 RestartSec=2
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectHome=true
+# Read-only rather than true: the helper must stat deploy.sh under /root, and systemd
+# will not re-open a ProtectHome path through ReadWritePaths. The upgrade itself runs
+# in a transient unit; the path below only makes the script statable, not editable.
+ProtectHome=read-only
+ReadWritePaths=/root/stratum-v3
 
 [Install]
 WantedBy=multi-user.target
