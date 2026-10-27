@@ -297,7 +297,12 @@
       const currentMain = document.querySelector('[data-dashboard-main]');
       const scrollPosition = {x: window.scrollX, y: window.scrollY};
       const openIndexes = openDetailIndexes(currentMain);
-      const action = button && button.formAction ? button.formAction : form.action;
+      // Neither form.action nor button.formAction can be trusted here: a control named
+      // "action" (several forms here have <button name="action">) shadows form.action with
+      // that element or a RadioNodeList, and button.formAction resolves to the current page
+      // when the attribute is absent. Read both attributes directly instead.
+      const explicitAction = button ? button.getAttribute('formaction') : '';
+      const action = explicitAction || form.getAttribute('action') || window.location.href;
       try {
         const response = await fetch(action, {
           method: 'POST', body: new FormData(form), credentials: 'same-origin',

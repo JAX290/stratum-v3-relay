@@ -445,7 +445,10 @@ systemctl reload haproxy
 systemctl restart stratum-admin.service
 
 python3 /opt/stratum-admin/security_monitor.py --initialize
-chown root:stratum-proxy /var/lib/stratum-monitor/integrity.json
+# The panel rewrites this baseline after a config change. The parent directory is
+# sticky (1770), so replacing a file owned by another user is refused even for a
+# group member: it has to be owned by the account that rewrites it.
+chown stratum-admin:stratum-proxy /var/lib/stratum-monitor/integrity.json
 chmod 0660 /var/lib/stratum-monitor/integrity.json
 systemctl enable --now stratum-security-monitor.service
 systemctl --no-pager --full status stratum-inspector-v3.service stratum-endpoint-monitor.service stratum-route-switch-monitor.service stratum-security-monitor.service stratum-admin-helper.service stratum-admin.service stratum-release-gate.service stratum-public-status.service stratum-vps-watchdog.timer haproxy

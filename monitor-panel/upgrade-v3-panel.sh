@@ -477,7 +477,10 @@ systemctl start stratum-route-switch-monitor.service
 systemctl start stratum-vps-watchdog.timer
 
 PYTHONPATH=/opt/stratum-admin python3 -c "from security_monitor import BASELINE_FILE,DEFAULT_PATHS,atomic_write,load,snapshot; p=DEFAULT_PATHS+['/opt/stratum-secure-server.py','/opt/version_info.py','/opt/stratum-secure-monitor.py']; b=load(BASELINE_FILE,{}); b.update(snapshot(p)); atomic_write(BASELINE_FILE,b)"
-chown root:stratum-proxy /var/lib/stratum-monitor/integrity.json
+# The panel rewrites this baseline after a config change. The parent directory is
+# sticky (1770), so replacing a file owned by another user is refused even for a
+# group member: it has to be owned by the account that rewrites it.
+chown stratum-admin:stratum-proxy /var/lib/stratum-monitor/integrity.json
 chmod 0660 /var/lib/stratum-monitor/integrity.json
 rm -f "$candidate_inspector" "$candidate_haproxy"
 systemctl start stratum-security-monitor.service
