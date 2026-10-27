@@ -216,7 +216,7 @@ public sealed class RelayManager
                 if(!failover.ShouldProbe(profile,DateTime.UtcNow))continue;
                 bool primary=Object.ReferenceEquals(profile,config.Servers[0]);
                 try {
-                    await TestProfileAsync(profile, config.SiteName, cancellation).ConfigureAwait(false);
+                    await TestProfileAsync(profile, config.SiteName, cancellation, config).ConfigureAwait(false);
                     string previousEndpoint=failover.CurrentEndpoint;
                     failover.HealthSucceeded(profile,primary,DateTime.UtcNow);
                     if(primary&&!String.Equals(previousEndpoint,failover.CurrentEndpoint,StringComparison.OrdinalIgnoreCase))log("主线路已通过恢复观察："+previousEndpoint+" → "+failover.CurrentEndpoint+"。后续新连接恢复使用主线路。");
@@ -226,7 +226,7 @@ public sealed class RelayManager
         }
     }
 
-    public async Task<EndpointState> TestProfileAsync(ServerProfile profile, string siteName, CancellationToken cancellation)
+    public async Task<EndpointState> TestProfileAsync(ServerProfile profile, string siteName, CancellationToken cancellation, AppConfig settingsTarget = null)
     {
         DateTime begin = DateTime.UtcNow;
         try {
@@ -238,6 +238,7 @@ public sealed class RelayManager
                 byte[] bytes = Encoding.ASCII.GetBytes("CONNECT /relay/v2/health HTTP/1.1\r\nHost: " + host + "\r\nAuthorization: Bearer " + profile.SharedKey + "\r\nX-Site-Name: " + SafeHeader(siteName) + "\r\nX-Client-Version: " + AppBrand.Version + "\r\nX-Miner-Count: " + status.ActiveMiners + "\r\nX-Active-Connections: " + status.Active + "\r\nX-Current-VPS: " + SafeHeader(failover.CurrentEndpoint) + "\r\nX-Last-Share: " + (lastShare==DateTime.MinValue?0:new DateTimeOffset(lastShare).ToUnixTimeSeconds()) + "\r\nX-Reconnect-Count: " + status.Failures + "\r\n"+receiptHeaders+"\r\n");
                 string response = await ExchangeHeaderWithTimeout(tls, connection.Client, bytes, 8000, cancellation).ConfigureAwait(false);
                 if (!response.StartsWith("HTTP/1.1 200 ", StringComparison.Ordinal)) throw new IOException("VPS拒绝认证，请检查共享密钥和服务版本。");
+                if(settingsTarget!=null)ApplyServerSettings(settingsTarget,response);
                 RemoteClientAction remote=RemoteActionPolicy.ParseResponse(response);Action<RemoteClientAction> handler=null;if(remote!=null){lock(stateLock){if(remoteActionIds.Add(remote.Id))handler=RemoteActionRequested;}}if(handler!=null)handler(remote);
             }
             MarkSuccess(profile, (int)(DateTime.UtcNow - begin).TotalMilliseconds);
@@ -246,6 +247,24 @@ public sealed class RelayManager
             string message = FriendlyError(ex); MarkFailure(profile, message);
             throw new IOException(message, ex);
         }
+    }
+
+    /// <summary>
+    /// 采用服务端在心跳回执里下发的运行参数，并落盘保存。
+    /// 只从健康循环调用：诊断、验证、连接测试都不应改写生产配置。
+    /// </summary>
+    private void ApplyServerSettings(AppConfig config, string response)
+    {
+        ServerSettings settings = ServerSettings.Parse(response);
+        if (settings.IsEmpty) return;
+        ServerSettingsChange change = ServerSettingsPolicy.Apply(config, settings);
+        if (!change.Changed) return;
+        try { ConfigStore.Save(config); }
+        catch (Exception ex) { log("服务端参数已生效，但保存失败：" + ex.Message); }
+        if (change.HealthCheckMinutesChanged)
+            log("已采用服务端参数：心跳间隔 " + config.HealthCheckMinutes + " 分钟。");
+        if (change.PortsChanged)
+            log("已采用服务端参数：本地端口 " + config.Ports + "，重启中转后生效。");
     }
 
     private static List<ServerProfile> EnabledProfiles(AppConfig config)

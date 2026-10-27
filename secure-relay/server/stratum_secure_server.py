@@ -54,6 +54,41 @@ def positive_int(value, fallback, minimum=1, maximum=1000000):
     except (TypeError, ValueError):
         return fallback
     return max(minimum, min(maximum, number))
+
+
+# Server-authoritative runtime parameters. The watch computer keeps only its identity —
+# VPS address, certificate fingerprint and shared key — and adopts these on every
+# heartbeat reply, so one value change covers every site instead of editing each machine.
+SETTINGS_HEALTH_HEADER = "X-Setting-Health-Check-Minutes"
+SETTINGS_PORTS_HEADER = "X-Setting-Ports"
+_PORT_CHARS = set("0123456789,=")
+
+
+def runtime_settings(config):
+    """Validated (header, value) pairs to push to an authenticated client.
+
+    Anything that fails validation is dropped rather than forwarded: a bad port list must
+    never reach a client's listener configuration, because the client would then fail to
+    start its relay.
+    """
+    raw = config.get("runtime_settings") if isinstance(config, dict) else None
+    if not isinstance(raw, dict):
+        return []
+    settings = []
+    # Strict, not clamped: a value an operator typed wrong must be ignored here and keep
+    # the client's current setting, rather than being silently rewritten to some other
+    # number. That is exactly how a wrong "1440" survived unnoticed.
+    try:
+        minutes = int(raw.get("health_check_minutes"))
+    except (TypeError, ValueError):
+        minutes = 0
+    if 1 <= minutes <= 1440:
+        settings.append((SETTINGS_HEALTH_HEADER, str(minutes)))
+    ports = str(raw.get("ports") or "").strip()
+    if ports and len(ports) <= 1024 and set(ports) <= _PORT_CHARS \
+            and ports[0].isdigit() and ports[-1].isdigit():
+        settings.append((SETTINGS_PORTS_HEADER, ports))
+    return settings
 SERVER_VERSION = load_versions()["secure_relay"]
 CONTROL_FILE = Path(os.getenv("SECURE_RELAY_CONTROL", "/var/lib/stratum-secure-relay/control.json"))
 CLIENT_ACTION_FILE = Path(os.getenv("SECURE_RELAY_CLIENT_ACTIONS", "/var/lib/stratum-secure-relay/client-actions.json"))
@@ -453,6 +488,11 @@ class SecureRelay:
                     response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n"
                     if action:
                         response += "X-Client-Action: " + action["action"] + "\r\nX-Action-Id: " + action["id"] + "\r\n"
+                    # Only authenticated sites get settings; the loopback watchdog is a
+                    # health probe, not a site, and has nothing to adopt.
+                    if not local_watchdog:
+                        for header, value in runtime_settings(self.current_config()):
+                            response += header + ": " + value + "\r\n"
                     writer.write((response + "\r\n").encode("ascii"))
                     await writer.drain()
                     return

@@ -122,6 +122,10 @@ data = {
     "clients": [{"id": "default", "name": "默认矿场", "token": sys.argv[4], "enabled": True, "alert_enabled": True}],
     "max_connections": 20000,
     "max_site_connections": 6000,
+    "runtime_settings": {
+        "health_check_minutes": 1,
+        "ports": "9999,10001,10002,10010,10011,10012,10020,10021,10022,10030,10031,10032,11001,11002,11003,11101,11102,11103,11201,11202,11203,11301,11302,11303",
+    },
     "offline_after_seconds": 180,
     "offline_confirm_checks": 2,
     "recovery_confirm_checks": 2,
@@ -135,7 +139,7 @@ if os.path.exists(target):
         data["clients"] = clients
     # Operator-tuned limits must survive every upgrade. Historically max_connections was
     # not in this list, so any manual capacity tuning was silently reset on upgrade.
-    for key in ("max_connections", "max_site_connections", "offline_after_seconds",
+    for key in ("max_connections", "max_site_connections", "runtime_settings", "offline_after_seconds",
                 "offline_confirm_checks", "recovery_confirm_checks", "notification_dedup_seconds"):
         if key in old:
             data[key] = old[key]

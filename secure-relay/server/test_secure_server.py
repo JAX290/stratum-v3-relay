@@ -350,5 +350,35 @@ class ConnectionBudgetTests(unittest.TestCase):
                 "the floor still refuses once it is reached")
 
 
+class RuntimeSettingsTests(unittest.TestCase):
+    """Runtime parameters the server pushes so the client keeps only its identity."""
+
+    def test_missing_section_pushes_nothing(self):
+        self.assertEqual(secure.runtime_settings({}), [])
+        self.assertEqual(secure.runtime_settings({"runtime_settings": None}), [])
+        self.assertEqual(secure.runtime_settings({"runtime_settings": "nonsense"}), [])
+
+    def test_valid_values_are_pushed(self):
+        settings = secure.runtime_settings({"runtime_settings": {
+            "health_check_minutes": 1, "ports": "9999,10001,11001=452"}})
+        self.assertIn((secure.SETTINGS_HEALTH_HEADER, "1"), settings)
+        self.assertIn((secure.SETTINGS_PORTS_HEADER, "9999,10001,11001=452"), settings)
+
+    def test_out_of_range_interval_is_dropped(self):
+        for value in (0, -5, 1441, "abc", None):
+            settings = secure.runtime_settings({"runtime_settings": {
+                "health_check_minutes": value, "ports": ""}})
+            self.assertEqual(settings, [], f"{value!r} must not be pushed to clients")
+
+    def test_unusable_port_list_is_dropped(self):
+        for value in ("9999,abc", ",9999", "9999,", "9 9 9 9", "", "x" * 2000):
+            settings = secure.runtime_settings({"runtime_settings": {"ports": value}})
+            self.assertEqual(settings, [], f"ports {value[:20]!r} must never reach a client")
+
+    def test_non_dict_sections_are_ignored(self):
+        self.assertEqual(secure.runtime_settings(None), [])
+        self.assertEqual(secure.runtime_settings({"runtime_settings": []}), [])
+
+
 if __name__ == "__main__":
     unittest.main()
