@@ -2,3 +2,7 @@
 *.exe
 *.exe.sha256
 src/releases/
+# Generated release artifacts (versioned copies of tracked sources / published bundles).
+install-service-*.ps1
+publisher-certificate-tools-*.zip
+SHA256SUMS.txt
