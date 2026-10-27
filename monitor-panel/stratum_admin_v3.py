@@ -1460,15 +1460,37 @@ def index():
     return redirect(url_for("dashboard_page", page="overview"))
 
 
+DASHBOARD_PAGES = {"overview", "miners", "routes", "alerts", "settings", "logs", "access"}
+
+
 @app.route("/<page>")
 def dashboard_page(page):
     if not authorized():
         return redirect(url_for("login"))
-    if page not in {"overview", "miners", "routes", "alerts", "settings", "logs", "access"}:
+    if page not in DASHBOARD_PAGES:
         return "Not found", 404
     if page == "access" and not current_tailscale_admin():
         return "Not found", 404
     return render_template("v3_dashboard.html", **build_page_context(page))
+
+
+@app.route("/<page>", methods=["POST"])
+def stale_page_submit(page):
+    """Catch a submit from a page loaded before an upgrade.
+
+    Older builds posted some forms back to the page's own URL. After an upgrade those
+    requests land here with no handler, which produced a bare 405 and an unhelpful "页面
+    没有更新" toast in the browser. Answer with an actionable message instead.
+    """
+    if page not in DASHBOARD_PAGES:
+        return "Not found", 404
+    if not authorized():
+        return redirect(url_for("login"))
+    app.logger.warning("stale form submit to /%s from %s", page, request.remote_addr)
+    flash("这个页面是在升级前打开的，提交地址已经失效。请刷新页面后重新操作。")
+    # 303 is what tells a POSTing client to follow up with GET; a 302 lets a client that
+    # keeps resending the POST bounce between this handler and itself forever.
+    return redirect(url_for("dashboard_page", page=page), code=303)
 
 
 def find_relay_client(client_id):
