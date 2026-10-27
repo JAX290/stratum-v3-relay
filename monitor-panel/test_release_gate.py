@@ -195,24 +195,32 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(client.get("/update/other.exe").status_code, 404)
         self.assertEqual(client.get("/update/../etc/passwd").status_code, 404)
 
-    def test_setup_tool_is_served_while_the_gate_is_closed(self):
-        """The one-click script must be reachable even when the installer itself is not."""
+    def test_setup_tool_is_refused_while_the_gate_is_closed(self):
+        """The script is a release artifact too, so the gate covers it as well."""
         (self.releases / "watch-pc-setup-2.3.16.bat").write_bytes(b"@echo off\r\nrem setup\r\n")
         gate.save_state(self.state, gate.close(now=1))
+        response = self.app.test_client().get("/update/setup")
+        self.assertEqual(response.status_code, 410)
+        self.assertIn("gate", response.get_json()["error"])
+
+    def test_setup_tool_is_served_when_open(self):
+        (self.releases / "watch-pc-setup-2.3.16.bat").write_bytes(b"@echo off\r\nrem setup\r\n")
+        gate.save_state(self.state, gate.open_for_downloads(1, now=1))
         response = self.app.test_client().get("/update/setup")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data, b"@echo off\r\nrem setup\r\n")
         self.assertIn("watch-pc-setup", response.headers.get("Content-Disposition", ""))
 
-    def test_setup_tool_does_not_consume_the_download_budget(self):
+    def test_setup_tool_consumes_one_download(self):
         (self.releases / "watch-pc-setup-2.3.16.bat").write_bytes(b"@echo off\r\n")
         gate.save_state(self.state, gate.open_for_downloads(1, now=1))
         client = self.app.test_client()
-        client.get("/update/setup")
-        self.assertEqual(client.get("/update/" + self.name).status_code, 200,
-                         "fetching the setup script must not spend the installer budget")
+        self.assertEqual(client.get("/update/setup").status_code, 200)
+        self.assertEqual(client.get("/update/setup").status_code, 410,
+                         "the setup script must spend the budget like any other release file")
 
     def test_setup_tool_prefers_the_manifest_hint(self):
+        gate.save_state(self.state, gate.open_for_downloads(1, now=1))
         (self.releases / "watch-pc-setup-2.3.16.bat").write_bytes(b"old\r\n")
         (self.releases / "watch-pc-setup-2.3.17.bat").write_bytes(b"new\r\n")
         manifest = json.loads((self.releases / "latest.json").read_text(encoding="utf-8"))

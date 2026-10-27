@@ -263,15 +263,23 @@ def create_app(gate_state_path, release_dir, admin_token=""):
 
     @app.route("/update/setup")
     def setup_route():
-        """The one-click setup tool.
+        """The one-click setup tool, metered by the same gate as the installer.
 
-        Deliberately NOT metered: it is a few kilobytes of script with no payload, and the
-        installer it fetches is what the gate is there to limit. Handing out the script while
-        the gate is closed lets the operator read its clear message instead of a bare 410.
+        The operator downloads exactly one file, and that file is as much a release artifact
+        as the installer, so it goes through the same budget instead of being freely
+        downloadable.
         """
         path = resolve_setup(app.config["RELEASE_DIR"])
         if path is None:
             return jsonify({"error": "setup file is not published"}), 404
+
+        with file_lock(app.config["GATE_STATE"]):
+            current = load_state(app.config["GATE_STATE"])
+            allowed, reason, updated = consume(current)
+            save_state(app.config["GATE_STATE"], updated)
+        if not allowed:
+            return jsonify({"error": "download gate is not open", "reason": reason}), 410
+
         response = send_file(path, mimetype="application/octet-stream",
                              as_attachment=True, download_name=path.name,
                              conditional=False)
