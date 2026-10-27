@@ -19,3 +19,4 @@ pool-benchmark-results*.json
 .gate-panel-*
 .gate-rel-*
 .gate-app-*
+.mirror-test-*

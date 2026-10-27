@@ -61,7 +61,7 @@ postconf -e 'smtp_tls_security_level = may'
 systemctl enable postfix
 systemctl restart postfix
 install -d -o root -g root -m 0700 /var/lib/stratum-recovery
-install -m 0755 ./stratum_admin_v3.py ./stratum_public_status.py ./stratum_inspector.py ./endpoint_monitor.py ./operations_center.py ./high_risk_wizard.py ./update_check.py ./release_gate.py ./privileged_helper.py ./security_monitor.py ./v3_manager.py ./version_info.py ./admin_auth.py ./route_switch_monitor.py ./vps_watchdog.py ./recovery_guard.py ./reset-panel-password.sh ./install-public-status.sh /opt/stratum-admin/
+install -m 0755 ./stratum_admin_v3.py ./stratum_public_status.py ./stratum_inspector.py ./endpoint_monitor.py ./operations_center.py ./high_risk_wizard.py ./update_check.py ./release_gate.py ./release_mirror.py ./privileged_helper.py ./security_monitor.py ./v3_manager.py ./version_info.py ./admin_auth.py ./route_switch_monitor.py ./vps_watchdog.py ./recovery_guard.py ./reset-panel-password.sh ./install-public-status.sh /opt/stratum-admin/
 install -o root -g root -m 0755 ./version_info.py /opt/version_info.py
 install -o root -g root -m 0644 ../version.json /etc/stratum-version.json
 if ! grep -q '^TAILSCALE_AUTO_LOGIN=' /etc/stratum-admin.env; then echo 'TAILSCALE_AUTO_LOGIN=1' >>/etc/stratum-admin.env; fi
@@ -324,6 +324,37 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 WantedBy=multi-user.target
 EOF
 
+cat >/etc/systemd/system/stratum-release-mirror.service <<'EOF'
+[Unit]
+Description=Mirror published client installer from GitHub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=stratum-admin
+Group=stratum-admin
+Environment=RELEASE_GATE_DIR=/var/lib/stratum-gate/releases
+ExecStart=/usr/bin/python3 /opt/stratum-admin/release_mirror.py --release-dir /var/lib/stratum-gate/releases
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/stratum-gate
+EOF
+
+cat >/etc/systemd/system/stratum-release-mirror.timer <<'EOF'
+[Unit]
+Description=Daily check for a newer published client installer
+
+[Timer]
+OnCalendar=*-*-* 04:17:00
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
 cat >/etc/systemd/system/stratum-public-status.service <<'EOF'
 [Unit]
 Description=Stratum public read-only status panel

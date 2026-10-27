@@ -195,6 +195,31 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(client.get("/update/other.exe").status_code, 404)
         self.assertEqual(client.get("/update/../etc/passwd").status_code, 404)
 
+    def test_bare_latest_serves_the_published_file(self):
+        """A browser hitting the bare /exe URL must get the installer, not an index."""
+        gate.save_state(self.state, gate.open_for_downloads(1, now=1))
+        response = self.app.test_client().get("/update/latest")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 4098)
+        self.assertIn("attachment", response.headers.get("Content-Disposition", ""))
+
+    def test_bare_latest_is_also_metered(self):
+        gate.save_state(self.state, gate.open_for_downloads(1, now=1))
+        client = self.app.test_client()
+        self.assertEqual(client.get("/update/latest").status_code, 200)
+        self.assertEqual(client.get("/update/latest").status_code, 410,
+                         "the bare URL must consume the same budget as the named file")
+
+    def test_bare_latest_is_refused_while_closed(self):
+        gate.save_state(self.state, gate.close(now=1))
+        self.assertEqual(self.app.test_client().get("/update/latest").status_code, 410)
+
+    def test_status_reports_mirror_state(self):
+        (self.releases / "sync.json").write_text(json.dumps({
+            "action": "none", "local": "2.3.15", "remote": "2.3.13"}), encoding="utf-8")
+        payload = self.app.test_client().get("/update/status").get_json()
+        self.assertEqual(payload["mirror"]["local"], "2.3.15")
+
     def test_status_endpoint_reports_the_window(self):
         # The route reads the wall clock, so the window has to be opened relative to now.
         gate.save_state(self.state, gate.open_for_minutes(10))

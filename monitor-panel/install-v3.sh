@@ -6,7 +6,7 @@ if [[ $(id -u) -ne 0 ]]; then
   exit 1
 fi
 
-required=(v3-config.json v3_manager.py version_info.py admin_auth.py endpoint_monitor.py operations_center.py high_risk_wizard.py update_check.py release_gate.py privileged_helper.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py recovery_guard.py reset-panel-password.sh install-public-status.sh)
+required=(v3-config.json v3_manager.py version_info.py admin_auth.py endpoint_monitor.py operations_center.py high_risk_wizard.py update_check.py release_gate.py release_mirror.py privileged_helper.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py recovery_guard.py reset-panel-password.sh install-public-status.sh)
 for file in "${required[@]}"; do
   test -f "./$file" || { echo "Missing $file" >&2; exit 1; }
 done
@@ -64,7 +64,7 @@ if [[ -e /var/lib/stratum-monitor/peer-sync.lock ]]; then
   chmod 0660 /var/lib/stratum-monitor/peer-sync.lock
 fi
 install -d -o root -g root -m 0700 /var/lib/stratum-recovery
-install -m 0755 v3_manager.py version_info.py admin_auth.py endpoint_monitor.py operations_center.py high_risk_wizard.py update_check.py release_gate.py privileged_helper.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py recovery_guard.py reset-panel-password.sh install-public-status.sh /opt/stratum-admin/
+install -m 0755 v3_manager.py version_info.py admin_auth.py endpoint_monitor.py operations_center.py high_risk_wizard.py update_check.py release_gate.py release_mirror.py privileged_helper.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py recovery_guard.py reset-panel-password.sh install-public-status.sh /opt/stratum-admin/
 install -o root -g root -m 0644 ../version.json /etc/stratum-version.json
 install -m 0644 templates/v3_dashboard.html /opt/stratum-admin/templates/v3_dashboard.html
 install -m 0644 templates/public_status.html /opt/stratum-admin/templates/public_status.html
@@ -323,6 +323,37 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 WantedBy=multi-user.target
 EOF
 
+cat >/etc/systemd/system/stratum-release-mirror.service <<'EOF'
+[Unit]
+Description=Mirror published client installer from GitHub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=stratum-admin
+Group=stratum-admin
+Environment=RELEASE_GATE_DIR=/var/lib/stratum-gate/releases
+ExecStart=/usr/bin/python3 /opt/stratum-admin/release_mirror.py --release-dir /var/lib/stratum-gate/releases
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/stratum-gate
+EOF
+
+cat >/etc/systemd/system/stratum-release-mirror.timer <<'EOF'
+[Unit]
+Description=Daily check for a newer published client installer
+
+[Timer]
+OnCalendar=*-*-* 04:17:00
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
 cat >/etc/systemd/system/stratum-public-status.service <<'EOF'
 [Unit]
 Description=Stratum public read-only status panel
@@ -404,6 +435,7 @@ systemctl enable --now stratum-route-switch-monitor.service
 systemctl enable --now stratum-release-gate.service
 systemctl enable --now stratum-public-status.service
 systemctl enable --now stratum-vps-watchdog.timer
+systemctl enable --now stratum-release-mirror.timer
 
 # Existing public listeners are released only after internal V3 listeners pass checks.
 systemctl disable --now stratum-inspector.service 2>/dev/null || true

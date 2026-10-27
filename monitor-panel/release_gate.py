@@ -206,11 +206,48 @@ def load_manifest(release_dir):
             "size": target.stat().st_size}, ""
 
 
+def read_mirror_state(release_dir):
+    """Last sync summary written by release_mirror.py; empty when it never ran."""
+    try:
+        payload = json.loads((Path(release_dir) / "sync.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def create_app(gate_state_path, release_dir, admin_token=""):
     app = Flask(__name__)
     app.config["GATE_STATE"] = Path(gate_state_path)
     app.config["RELEASE_DIR"] = Path(release_dir)
     app.config["ADMIN_TOKEN"] = admin_token
+
+    def serve_current(name=None):
+        """Serve the published installer, charging one download against the gate."""
+        manifest, error = load_manifest(app.config["RELEASE_DIR"])
+        if error:
+            return jsonify({"error": error}), 404
+        if name is not None and not hmac.compare_digest(name, manifest["file"]):
+            return jsonify({"error": "file is not published"}), 404
+
+        with file_lock(app.config["GATE_STATE"]):
+            current = load_state(app.config["GATE_STATE"])
+            allowed, reason, updated = consume(current)
+            save_state(app.config["GATE_STATE"], updated)
+        if not allowed:
+            return jsonify({"error": "download gate is not open", "reason": reason}), 410
+
+        path = app.config["RELEASE_DIR"] / manifest["file"]
+        response = send_file(path, mimetype="application/octet-stream",
+                             as_attachment=True, download_name=manifest["file"],
+                             conditional=False)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
+    @app.route("/update/latest")
+    def latest_route():
+        """Bare URL that downloads whatever is currently published."""
+        return serve_current()
 
     @app.route("/update/manifest")
     def manifest_route():
@@ -223,31 +260,15 @@ def create_app(gate_state_path, release_dir, admin_token=""):
 
     @app.route("/update/status")
     def status_route():
-        return jsonify(status(load_state(app.config["GATE_STATE"])))
+        payload = status(load_state(app.config["GATE_STATE"]))
+        payload["mirror"] = read_mirror_state(app.config["RELEASE_DIR"])
+        return jsonify(payload)
 
     @app.route("/update/<name>")
     def download_route(name):
         if Path(name).name != name:
             return jsonify({"error": "invalid name"}), 400
-        manifest, error = load_manifest(app.config["RELEASE_DIR"])
-        if error:
-            return jsonify({"error": error}), 404
-        if not hmac.compare_digest(name, manifest["file"]):
-            return jsonify({"error": "file is not published"}), 404
-
-        with file_lock(app.config["GATE_STATE"]):
-            current = load_state(app.config["GATE_STATE"])
-            allowed, reason, updated = consume(current)
-            save_state(app.config["GATE_STATE"], updated)
-        if not allowed:
-            return jsonify({"error": "download gate is not open", "reason": reason}), 410
-
-        path = app.config["RELEASE_DIR"] / name
-        response = send_file(path, mimetype="application/octet-stream",
-                             as_attachment=True, download_name=name, conditional=False)
-        response.headers["Cache-Control"] = "no-store"
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        return response
+        return serve_current(name)
 
     @app.after_request
     def security_headers(response):
