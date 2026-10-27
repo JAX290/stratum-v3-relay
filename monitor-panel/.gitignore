@@ -12,3 +12,6 @@ __pycache__/
 local-*.json
 *-backup*/
 pool-benchmark-results*.json
+# Scratch paths used by update_check tests.
+.update-test-*/
+.update-*.json

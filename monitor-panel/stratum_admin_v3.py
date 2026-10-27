@@ -38,6 +38,7 @@ from privileged_helper import request_helper
 from security_monitor import atomic_write as write_integrity, load as load_integrity, snapshot
 from v3_manager import ConfigError, ConfigStore, append_bounded_jsonl, file_lock, render_haproxy_config, render_inspector_config, route_map, validate_config
 from version_info import load_versions
+import update_check
 
 
 CONFIG_FILE = Path(os.getenv("V3_CONFIG_FILE", "/etc/stratum-v3.json"))
@@ -53,6 +54,7 @@ CRON_FILE = Path(os.getenv("MONITOR_CRON_FILE", "/etc/cron.d/stratum-monitor"))
 ENDPOINT_EVENT_FILE = Path(os.getenv("ENDPOINT_EVENT_FILE", "/var/lib/stratum-monitor/endpoint-events.jsonl"))
 SECURITY_STATE_FILE = Path(os.getenv("INTEGRITY_STATE_FILE", "/var/lib/stratum-monitor/security-state.json"))
 PUBLIC_IP_ALERT_STATE_FILE = Path(os.getenv("PUBLIC_IP_ALERT_STATE_FILE", "/var/lib/stratum-monitor/public-ip-alert.json"))
+UPDATE_STATE_FILE = Path(os.getenv("UPDATE_STATE_FILE", "/var/lib/stratum-monitor/update-check.json"))
 RELAY_CONTROL_FILE = Path(os.getenv("SECURE_RELAY_CONTROL", "/var/lib/stratum-secure-relay/control.json"))
 PEER_SYNC_FILE = Path(os.getenv("V3_PEER_SYNC_FILE", "/etc/stratum-v3-peer.json"))
 PEER_OUTBOX_FILE = Path(os.getenv("V3_PEER_OUTBOX_FILE", "/var/lib/stratum-monitor/peer-sync-outbox.json"))
@@ -1429,6 +1431,7 @@ def build_page_context(page):
         client_access=access, tailscale_access_available=bool(tailscale_identity()),
         remote_actions_available=current_tailscale_admin(), safe_service_repairs=SAFE_SERVICE_REPAIRS,
         high_risk_plan=session.get("high_risk_plan"),
+        update_state=update_check.build_update_context(UPDATE_STATE_FILE),
         csrf=session["csrf"])
 
 
@@ -3098,6 +3101,42 @@ def rollback():
     except (KeyError, OSError, ValueError) as exc:
         flash(f"回滚失败：{exc}")
     return redirect(url_for("dashboard_page", page="logs"))
+
+
+@app.route("/update/check", methods=["POST"])
+def check_update():
+    """Compare installed versions with the published manifest. Read-only, no privilege."""
+    if not authorized() or not csrf_ok():
+        return "Forbidden", 403
+    state = update_check.record_check(UPDATE_STATE_FILE)
+    append_audit("检查更新")
+    if state["error"]:
+        flash("检查更新失败：" + state["error"])
+    elif state["has_newer"]:
+        newer = [f"{row['label']} {row['current']} → {row['latest']}" for row in state["rows"] if row["newer"]]
+        flash("发现新版本：" + "；".join(newer) + "。")
+    else:
+        flash("当前全部组件已是最新版本。")
+    return redirect(url_for("dashboard_page", page="settings"))
+
+
+@app.route("/update/apply", methods=["POST"])
+def apply_update():
+    """One-click upgrade: the project's own deploy script, run by the root helper."""
+    if not authorized() or not csrf_ok():
+        return "Forbidden", 403
+    if not current_tailscale_admin():
+        flash("一键升级只允许通过 Tailscale 管理地址执行。")
+        return redirect(url_for("dashboard_page", page="settings"))
+    try:
+        result = request_helper("deploy_upgrade")
+        append_audit("一键升级")
+        output = str(result.get("output", "")).strip()
+        flash("升级脚本已执行完成。请核对下方核心服务状态与最近日志。" + (f"（{output[-160:]}）" if output else ""))
+    except (OSError, ValueError) as exc:
+        append_audit(f"一键升级失败:{exc}")
+        flash(f"一键升级失败：{exc}")
+    return redirect(url_for("dashboard_page", page="settings"))
 
 
 if __name__ == "__main__":

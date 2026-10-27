@@ -26,6 +26,10 @@ except ImportError:  # Windows development and unit-test hosts
 
 
 SOCKET_PATH = Path(os.getenv("V3_PRIVILEGED_HELPER_SOCKET", "/run/stratum-admin-helper.sock"))
+# One-click upgrade reuses the project's own deploy script: it already performs the
+# backup, ff-only update, component upgrade and post-install service verification, so
+# re-implementing an upgrade path here would be strictly worse.
+DEPLOY_SCRIPT = Path(os.getenv("STRATUM_DEPLOY_SCRIPT", "/root/stratum-v3/deploy.sh"))
 MAX_REQUEST = 2 * 1024 * 1024
 ALLOWED_SERVICES = {"haproxy", "stratum-secure-relay", "stratum-endpoint-monitor",
     "stratum-inspector-v3", "stratum-security-monitor", "stratum-route-switch-monitor", "stratum-secure-monitor"}
@@ -149,6 +153,18 @@ def dispatch(request):
             raise ValueError("升级脚本不存在")
         return {"output": run_checked(["/bin/bash", str(script)], timeout=900,
             cwd=str(directory / "monitor-panel"))}
+    if operation == "deploy_upgrade":
+        # The panel runs unprivileged, so "one-click upgrade" must not become a root code
+        # execution gadget: the script and its repository have to be root-owned and free
+        # of group/world write bits before root will run anything from them.
+        require_root_owned_tree(DEPLOY_SCRIPT)
+        repository = DEPLOY_SCRIPT.parent
+        for name in (".git", "monitor-panel", "secure-relay"):
+            entry = repository / name
+            if entry.exists() and entry.lstat().st_uid != 0:
+                raise ValueError("部署仓库必须由 root 持有")
+        return {"output": run_checked(["/bin/bash", str(DEPLOY_SCRIPT), "--upgrade"],
+            timeout=1800, cwd=str(repository))}
     if operation == "write_managed":
         name, content = str(request.get("name", "")), request.get("content")
         if name not in MANAGED_FILES or not isinstance(content, str) or len(content.encode()) > MAX_REQUEST:
