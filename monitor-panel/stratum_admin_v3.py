@@ -38,6 +38,7 @@ from privileged_helper import request_helper
 from security_monitor import atomic_write as write_integrity, load as load_integrity, snapshot
 from v3_manager import ConfigError, ConfigStore, append_bounded_jsonl, file_lock, render_haproxy_config, render_inspector_config, route_map, validate_config
 from version_info import load_versions
+import release_gate
 import update_check
 
 
@@ -55,6 +56,9 @@ ENDPOINT_EVENT_FILE = Path(os.getenv("ENDPOINT_EVENT_FILE", "/var/lib/stratum-mo
 SECURITY_STATE_FILE = Path(os.getenv("INTEGRITY_STATE_FILE", "/var/lib/stratum-monitor/security-state.json"))
 PUBLIC_IP_ALERT_STATE_FILE = Path(os.getenv("PUBLIC_IP_ALERT_STATE_FILE", "/var/lib/stratum-monitor/public-ip-alert.json"))
 UPDATE_STATE_FILE = Path(os.getenv("UPDATE_STATE_FILE", "/var/lib/stratum-monitor/update-check.json"))
+# Written by this panel, read by stratum-release-gate.service. Both run as stratum-admin,
+# so the panel needs no privileged path to open or close the public download.
+GATE_STATE_FILE = Path(os.getenv("RELEASE_GATE_STATE", "/var/lib/stratum-gate/gate.json"))
 RELAY_CONTROL_FILE = Path(os.getenv("SECURE_RELAY_CONTROL", "/var/lib/stratum-secure-relay/control.json"))
 PEER_SYNC_FILE = Path(os.getenv("V3_PEER_SYNC_FILE", "/etc/stratum-v3-peer.json"))
 PEER_OUTBOX_FILE = Path(os.getenv("V3_PEER_OUTBOX_FILE", "/var/lib/stratum-monitor/peer-sync-outbox.json"))
@@ -1432,6 +1436,7 @@ def build_page_context(page):
         remote_actions_available=current_tailscale_admin(), safe_service_repairs=SAFE_SERVICE_REPAIRS,
         high_risk_plan=session.get("high_risk_plan"),
         update_state=update_check.build_update_context(UPDATE_STATE_FILE),
+        gate_state=release_gate.status(release_gate.load_state(GATE_STATE_FILE)),
         csrf=session["csrf"])
 
 
@@ -3136,6 +3141,43 @@ def apply_update():
     except (OSError, ValueError) as exc:
         append_audit(f"一键升级失败:{exc}")
         flash(f"一键升级失败：{exc}")
+    return redirect(url_for("dashboard_page", page="settings"))
+
+
+@app.route("/update/gate", methods=["POST"])
+def update_gate():
+    """Open or close the public installer download gate.
+
+    The gate is closed by default; opening it exposes the installer to anyone who knows
+    the URL, so it is deliberately bounded by a time window or a download count.
+    """
+    if not authorized() or not csrf_ok():
+        return "Forbidden", 403
+    if not current_tailscale_admin():
+        flash("下载闸门只允许通过 Tailscale 管理地址修改。")
+        return redirect(url_for("dashboard_page", page="settings"))
+    action = str(request.form.get("action", ""))
+    try:
+        with release_gate.file_lock(GATE_STATE_FILE):
+            current = release_gate.load_state(GATE_STATE_FILE)
+            if action == "open_minutes":
+                minutes = int(request.form.get("minutes", "30"))
+                state = release_gate.open_for_minutes(minutes)
+                message = f"下载闸门已开放 {minutes} 分钟。"
+            elif action == "open_downloads":
+                count = int(request.form.get("downloads", "3"))
+                state = release_gate.open_for_downloads(count)
+                message = f"下载闸门已开放 {count} 次下载。"
+            elif action == "close":
+                state = release_gate.close(previous=current)
+                message = "下载闸门已关闭。"
+            else:
+                raise ValueError("不支持的闸门操作")
+            release_gate.save_state(GATE_STATE_FILE, state)
+        append_audit(f"下载闸门:{action}")
+        flash(message)
+    except (OSError, ValueError) as exc:
+        flash(f"下载闸门设置失败：{exc}")
     return redirect(url_for("dashboard_page", page="settings"))
 
 

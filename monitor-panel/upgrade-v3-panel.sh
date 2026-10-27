@@ -61,7 +61,7 @@ postconf -e 'smtp_tls_security_level = may'
 systemctl enable postfix
 systemctl restart postfix
 install -d -o root -g root -m 0700 /var/lib/stratum-recovery
-install -m 0755 ./stratum_admin_v3.py ./stratum_public_status.py ./stratum_inspector.py ./endpoint_monitor.py ./operations_center.py ./high_risk_wizard.py ./update_check.py ./privileged_helper.py ./security_monitor.py ./v3_manager.py ./version_info.py ./admin_auth.py ./route_switch_monitor.py ./vps_watchdog.py ./recovery_guard.py ./reset-panel-password.sh ./install-public-status.sh /opt/stratum-admin/
+install -m 0755 ./stratum_admin_v3.py ./stratum_public_status.py ./stratum_inspector.py ./endpoint_monitor.py ./operations_center.py ./high_risk_wizard.py ./update_check.py ./release_gate.py ./privileged_helper.py ./security_monitor.py ./v3_manager.py ./version_info.py ./admin_auth.py ./route_switch_monitor.py ./vps_watchdog.py ./recovery_guard.py ./reset-panel-password.sh ./install-public-status.sh /opt/stratum-admin/
 install -o root -g root -m 0755 ./version_info.py /opt/version_info.py
 install -o root -g root -m 0644 ../version.json /etc/stratum-version.json
 if ! grep -q '^TAILSCALE_AUTO_LOGIN=' /etc/stratum-admin.env; then echo 'TAILSCALE_AUTO_LOGIN=1' >>/etc/stratum-admin.env; fi
@@ -284,7 +284,7 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/stratum-monitor -/var/lib/stratum-secure-relay -/var/log/stratum-audit.jsonl
+ReadWritePaths=/var/lib/stratum-monitor -/var/lib/stratum-secure-relay -/var/lib/stratum-gate -/var/log/stratum-audit.jsonl
 
 [Install]
 WantedBy=multi-user.target

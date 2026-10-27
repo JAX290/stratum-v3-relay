@@ -15,3 +15,7 @@ pool-benchmark-results*.json
 # Scratch paths used by update_check tests.
 .update-test-*/
 .update-*.json
+.gate-test-*.json
+.gate-panel-*
+.gate-rel-*
+.gate-app-*

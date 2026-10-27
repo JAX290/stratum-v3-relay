@@ -6,7 +6,7 @@ if [[ $(id -u) -ne 0 ]]; then
   exit 1
 fi
 
-required=(v3-config.json v3_manager.py version_info.py admin_auth.py endpoint_monitor.py operations_center.py high_risk_wizard.py update_check.py privileged_helper.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py recovery_guard.py reset-panel-password.sh install-public-status.sh)
+required=(v3-config.json v3_manager.py version_info.py admin_auth.py endpoint_monitor.py operations_center.py high_risk_wizard.py update_check.py release_gate.py privileged_helper.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py recovery_guard.py reset-panel-password.sh install-public-status.sh)
 for file in "${required[@]}"; do
   test -f "./$file" || { echo "Missing $file" >&2; exit 1; }
 done
@@ -64,7 +64,7 @@ if [[ -e /var/lib/stratum-monitor/peer-sync.lock ]]; then
   chmod 0660 /var/lib/stratum-monitor/peer-sync.lock
 fi
 install -d -o root -g root -m 0700 /var/lib/stratum-recovery
-install -m 0755 v3_manager.py version_info.py admin_auth.py endpoint_monitor.py operations_center.py high_risk_wizard.py update_check.py privileged_helper.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py recovery_guard.py reset-panel-password.sh install-public-status.sh /opt/stratum-admin/
+install -m 0755 v3_manager.py version_info.py admin_auth.py endpoint_monitor.py operations_center.py high_risk_wizard.py update_check.py release_gate.py privileged_helper.py security_monitor.py stratum_inspector.py stratum_admin_v3.py stratum_public_status.py route_switch_monitor.py vps_watchdog.py recovery_guard.py reset-panel-password.sh install-public-status.sh /opt/stratum-admin/
 install -o root -g root -m 0644 ../version.json /etc/stratum-version.json
 install -m 0644 templates/v3_dashboard.html /opt/stratum-admin/templates/v3_dashboard.html
 install -m 0644 templates/public_status.html /opt/stratum-admin/templates/public_status.html
@@ -283,7 +283,7 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/stratum-monitor -/var/lib/stratum-secure-relay -/var/log/stratum-audit.jsonl
+ReadWritePaths=/var/lib/stratum-monitor -/var/lib/stratum-secure-relay -/var/lib/stratum-gate -/var/log/stratum-audit.jsonl
 
 [Install]
 WantedBy=multi-user.target
