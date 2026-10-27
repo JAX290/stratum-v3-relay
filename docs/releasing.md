@@ -23,7 +23,8 @@
 - 2.3.15 起客户端会从 VPS 下载升级包，Windows Defender 的机器学习规则会把它判为
   `Trojan:Script/Conteban.A!ml`（`!ml` 表示按行为判定，不是特征匹配）并隔离，
   文件会被移出原目录，表现为"程序自己停了、文件也不见了"。
-- 因此发布包附带 `watch-pc-setup-<版本>.bat`：解压后双击 `值守电脑初始化.bat`，
+- 因此发布包附带单文件 `watch-pc-setup-<版本>.bat`（批处理 + 内嵌 PowerShell，由 `build-setup.ps1` 生成，不要手工编辑生成的 .bat）：双击这个文件，
+- 同一个文件也发布到 VPS 闸门的 releases 目录，访问裸链接 `https://status1.mulinsen.win/exe` 直接下载它；`/exe/manifest` 与 `/exe/<安装包>` 仍供自动升级使用。工具本身不计次，只有它下载安装包时才消耗闸门额度。
   脚本会申请管理员权限，把 `C:\MulinSenRelay` 与配置目录加入 Defender 排除，
   尝试恢复被隔离的文件，再从 VPS 下载当前版本、校验 SHA-256 后启动。
   每台值守电脑只需运行一次，之后升级不再需要它。生成单文件时注意：批处理头部必须纯 ASCII，PowerShell 主体按 UTF-8 读取，整个文件保存为无 BOM、CRLF。
