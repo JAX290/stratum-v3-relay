@@ -113,6 +113,18 @@ if($Mode -eq 'Status') {
   return
 }
 
+# Defender 的机器学习启发式会把本客户端误判为 Trojan:Script/Conteban.A!ml（!ml 表示按行为判定，
+# 不是特征匹配）。服务程序一旦被隔离就无法启动，因此把安装目录与数据目录加入排除。
+try {
+  Add-MpPreference -ExclusionPath $InstallDirectory -ErrorAction Stop | Out-Null
+  Write-Host "已把 $InstallDirectory 加入 Defender 排除。"
+} catch {
+  Write-Warning "无法写入 Defender 排除：$($_.Exception.Message)"
+}
+try {
+  if(Test-Path -LiteralPath $DataDirectory) { Add-MpPreference -ExclusionPath $DataDirectory -ErrorAction Stop | Out-Null }
+} catch { }
+
 if($Mode -eq 'Install') {
   $source=Assert-SignedService $ServiceExecutable
   $config=Get-Item -LiteralPath $DesktopConfig -ErrorAction Stop
