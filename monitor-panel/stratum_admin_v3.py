@@ -123,7 +123,20 @@ def tailscale_auto_login():
     if identity:
         session["authenticated"] = True
         session["tailscale_identity"] = identity
-        session.setdefault("csrf", secrets.token_urlsafe(24))
+    session.setdefault("csrf", secrets.token_urlsafe(24))
+
+
+@app.after_request
+def no_store_pages(response):
+    """An admin page must never be served from cache.
+
+    Without this a browser can keep running an older page whose forms and JavaScript no
+    longer match the deployed code, which produces confusing failures at click time.
+    """
+    if response.mimetype == "text/html":
+        response.headers["Cache-Control"] = "no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+    return response
 
 
 def load_json(path, fallback):
