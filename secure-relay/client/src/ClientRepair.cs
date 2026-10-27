@@ -75,7 +75,9 @@ public static class FirewallRuleManager
 
 public sealed class LatestClientRelease
 {
-    public string Version="",Url="",DesktopDownloadUrl="",ChecksumsDownloadUrl="";
+    // DesktopSha256 is set when the release came from the VPS download gate, which carries
+    // the hash inline instead of a separate SHA256SUMS.txt attachment.
+    public string Version="",Url="",DesktopDownloadUrl="",ChecksumsDownloadUrl="",DesktopSha256="";
     public int RolloutPercent=100;
     public bool IsNewerThan(string current){return CompareVersions(Version,current)>0;}
     public static int CompareVersions(string left,string right)
@@ -86,7 +88,35 @@ public sealed class LatestClientRelease
 
 public static class LatestClientReleaseChecker
 {
+    // The installer is published on GitHub Releases and mirrored through the VPS download
+    // gate. The gate is tried first: a watch computer in China may not reach GitHub at all,
+    // and the gate serves the same signed binary with its hash in the manifest.
+    public const string GateBase="https://status1.mulinsen.win/exe";
+
     public static async Task<LatestClientRelease> CheckAsync(CancellationToken cancellation)
+    {
+        try{LatestClientRelease gated=await CheckGateAsync(cancellation).ConfigureAwait(false);if(gated!=null)return gated;}
+        catch(InvalidDataException){}catch(WebException){}catch(IOException){}catch(NotSupportedException){}
+        return await CheckGitHubAsync(cancellation).ConfigureAwait(false);
+    }
+
+    private static async Task<LatestClientRelease> CheckGateAsync(CancellationToken cancellation)
+    {
+        HttpWebRequest request=(HttpWebRequest)WebRequest.Create(GateBase+"/manifest");
+        request.UserAgent="MulinSenRelay/"+AppBrand.Version;request.Accept="application/json";request.Timeout=5000;request.ReadWriteTimeout=5000;
+        using(cancellation.Register(delegate{request.Abort();}))using(WebResponse response=await request.GetResponseAsync().ConfigureAwait(false))using(StreamReader reader=new StreamReader(response.GetResponseStream())){
+            string json=await reader.ReadToEndAsync().ConfigureAwait(false);
+            Match version=Regex.Match(json,"\\\"version\\\"\\s*:\\s*\\\"([0-9]+\\.[0-9]+\\.[0-9]+)\\\"");
+            Match file=Regex.Match(json,"\\\"file\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
+            Match hash=Regex.Match(json,"\\\"sha256\\\"\\s*:\\s*\\\"([A-Fa-f0-9]{64})\\\"");
+            if(!version.Success||!file.Success||!hash.Success)throw new InvalidDataException("下载闸门返回的版本清单格式不正确。");
+            string name=file.Groups[1].Value;
+            if(Path.GetFileName(name)!=name||!name.StartsWith("MulinSenRelay-",StringComparison.Ordinal))throw new InvalidDataException("下载闸门返回的文件名不安全。");
+            return new LatestClientRelease{Version=version.Groups[1].Value,Url=GateBase,DesktopDownloadUrl=GateBase+"/"+name,DesktopSha256=hash.Groups[1].Value,RolloutPercent=100};
+        }
+    }
+
+    private static async Task<LatestClientRelease> CheckGitHubAsync(CancellationToken cancellation)
     {
         HttpWebRequest request=(HttpWebRequest)WebRequest.Create("https://api.github.com/repos/JAX290/stratum-v3-relay/releases/latest");
         request.UserAgent="MulinSenRelay/"+AppBrand.Version;request.Accept="application/vnd.github+json";request.Timeout=5000;request.ReadWriteTimeout=5000;

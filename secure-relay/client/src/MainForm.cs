@@ -142,7 +142,8 @@ public sealed class MainForm : Form
         Button save = new Button(); save.Text = "保存设置"; save.AutoSize = true; save.Click += delegate { SaveConfig(true); };
         validateConfig.Text = "验证并设为可用配置"; validateConfig.AutoSize = true; validateConfig.Click += delegate { ValidateAndPromoteConfig(); };
         Button backups = new Button(); backups.Text = "备用 VPS 设置"; backups.AutoSize = true; backups.Click += delegate { EditBackups(); };
-        Button updateClient=new Button();updateClient.Text="检查并升级";updateClient.AutoSize=true;updateClient.Click+=delegate{CheckAndInstallUpdate(updateClient,null);};
+        Button checkUpdate=new Button();checkUpdate.Text="检查更新";checkUpdate.AutoSize=true;checkUpdate.Click+=delegate{CheckForUpdates(checkUpdate);};
+        Button updateClient=new Button();updateClient.Text="一键升级";updateClient.AutoSize=true;updateClient.Click+=delegate{CheckAndInstallUpdate(updateClient,null);};
         Button miners = new Button(); miners.Text="矿机状态"; miners.AutoSize=true; miners.Click+=delegate{new MinerStatusForm(manager).Show(this);};
         diagnostics.Text="一键诊断"; diagnostics.AutoSize=true; diagnostics.Click+=delegate{RunDiagnostics();};
         repair.Text="检查并修复";repair.AutoSize=true;repair.Click+=delegate{RunCheckAndRepair();};
@@ -402,6 +403,21 @@ public sealed class MainForm : Form
     {
         try{using(SaveFileDialog file=new SaveFileDialog()){file.Filter="木林森技术支持包|*.zip";file.DefaultExt="zip";file.AddExtension=true;file.FileName="木林森技术支持包-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+".zip";if(file.ShowDialog(this)!=DialogResult.OK)return;SupportBundleExporter.Create(file.FileName,CurrentConfig(),manager.Snapshot(),manager.MinerSnapshots(),logs.Text,ConfigStore.Folder);Log("脱敏技术支持包已导出："+file.FileName);MessageBox.Show(this,"技术支持包已生成。\r\n\r\n程序已扫描并排除共享密钥、密码、证书私钥、完整公网地址和完整矿机 IP。可以把这个 ZIP 交给技术人员。","导出完成",MessageBoxButtons.OK,MessageBoxIcon.Information);}}
         catch(Exception ex){Log("技术支持包导出失败："+ex.Message);MessageBox.Show(this,"支持包没有生成。\r\n\r\n"+ex.Message,"导出失败",MessageBoxButtons.OK,MessageBoxIcon.Warning);}
+    }
+
+    private async void CheckForUpdates(Button button)
+    {
+        string original=button==null?"":button.Text;
+        try{
+            if(button!=null){button.Enabled=false;button.Text="检查中…";}
+            LatestClientRelease release=await LatestClientReleaseChecker.CheckAsync(CancellationToken.None);
+            string detail="当前版本 "+AppBrand.Version+"，最新版本 "+release.Version+"。";
+            if(!release.IsNewerThan(AppBrand.Version)){Log("检查更新："+detail+"已是最新。");MessageBox.Show(this,detail+"\r\n\r\n当前已是最新版本。","检查更新",MessageBoxButtons.OK,MessageBoxIcon.Information);return;}
+            if(!UpdateRolloutPolicy.IsEligible(Environment.MachineName,release.RolloutPercent)){Log("检查更新："+detail+"本机暂未进入本批次（"+release.RolloutPercent+"%）。");MessageBox.Show(this,detail+"\r\n\r\n新版正在分批发布，这台电脑暂未进入本批次，稍后再检查即可。","检查更新",MessageBoxButtons.OK,MessageBoxIcon.Information);return;}
+            Log("检查更新："+detail+"可以升级。");
+            MessageBox.Show(this,detail+"\r\n\r\n可以点击「一键升级」安装。","检查更新",MessageBoxButtons.OK,MessageBoxIcon.Information);
+        }catch(Exception ex){Log("检查更新失败："+ex.Message);MessageBox.Show(this,"检查更新失败："+ex.Message,"检查更新",MessageBoxButtons.OK,MessageBoxIcon.Warning);}
+        finally{if(button!=null&&!IsDisposed){button.Enabled=true;button.Text=original;}}
     }
 
     private async void CheckAndInstallUpdate(Button button,RemoteClientAction remoteAction)

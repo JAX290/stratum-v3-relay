@@ -290,6 +290,40 @@ ReadWritePaths=/var/lib/stratum-monitor -/var/lib/stratum-secure-relay -/var/lib
 WantedBy=multi-user.target
 EOF
 
+install -d -o stratum-admin -g stratum-admin -m 0750 /var/lib/stratum-gate
+install -d -o stratum-admin -g stratum-admin -m 0755 /var/lib/stratum-gate/releases
+
+cat >/etc/systemd/system/stratum-release-gate.service <<'EOF'
+[Unit]
+Description=Stratum client installer download gate
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=stratum-admin
+Group=stratum-admin
+WorkingDirectory=/opt/stratum-admin
+Environment=PYTHONUNBUFFERED=1
+Environment=RELEASE_GATE_STATE=/var/lib/stratum-gate/gate.json
+Environment=RELEASE_GATE_DIR=/var/lib/stratum-gate/releases
+Environment=RELEASE_GATE_PORT=12050
+ExecStart=/usr/bin/python3 /opt/stratum-admin/release_gate.py --host 127.0.0.1 --port 12050 --state /var/lib/stratum-gate/gate.json --releases /var/lib/stratum-gate/releases
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/stratum-gate
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 cat >/etc/systemd/system/stratum-public-status.service <<'EOF'
 [Unit]
 Description=Stratum public read-only status panel
@@ -404,6 +438,7 @@ systemctl reload haproxy.service
 systemctl restart stratum-endpoint-monitor.service
 systemctl restart stratum-admin-helper.service
 systemctl restart stratum-admin.service
+systemctl restart stratum-release-gate.service
 systemctl restart stratum-public-status.service
 systemctl start stratum-secure-relay.service
 systemctl restart stratum-secure-monitor.service
@@ -416,5 +451,5 @@ chmod 0660 /var/lib/stratum-monitor/integrity.json
 rm -f "$candidate_inspector" "$candidate_haproxy"
 systemctl start stratum-security-monitor.service
 trap - EXIT
-systemctl --no-pager --full status haproxy.service stratum-inspector-v3.service stratum-endpoint-monitor.service stratum-route-switch-monitor.service stratum-security-monitor.service stratum-admin-helper.service stratum-admin.service stratum-public-status.service stratum-secure-relay.service stratum-secure-monitor.service stratum-vps-watchdog.timer
+systemctl --no-pager --full status haproxy.service stratum-inspector-v3.service stratum-endpoint-monitor.service stratum-route-switch-monitor.service stratum-security-monitor.service stratum-admin-helper.service stratum-admin.service stratum-release-gate.service stratum-public-status.service stratum-secure-relay.service stratum-secure-monitor.service stratum-vps-watchdog.timer
 echo "Panel upgrade complete. Backup: $backup"
