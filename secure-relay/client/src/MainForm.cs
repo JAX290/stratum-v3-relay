@@ -54,7 +54,19 @@ public sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer logTimer = new System.Windows.Forms.Timer();
     private readonly Queue<string> pendingLogs = new Queue<string>();
     private readonly object logLock = new object();
-    private readonly Label status = new Label();
+    // 首页分区展示：状态条 + 指标卡片 + 端口 + 线路，避免把一切塞进一个 Label 导致折叠截断
+    private readonly Panel bannerBar = new Panel();
+    private readonly Label bannerTitle = new Label();
+    private readonly Label bannerDetail = new Label();
+    private readonly Label cardActive = new Label();
+    private readonly Label cardTotal = new Label();
+    private readonly Label cardFailures = new Label();
+    private readonly Label cardUptime = new Label();
+    private readonly FlowLayoutPanel portStats = new FlowLayoutPanel();
+    private readonly Label portList = new Label();
+    private readonly Label portFailed = new Label();
+    private readonly FlowLayoutPanel endpointList = new FlowLayoutPanel();
+    private string portSignature = "", endpointSignature = "";
     private readonly TabControl pages=new TabControl();
     private readonly TabPage homePage=new TabPage("值守首页"),settingsPage=new TabPage("设置");
     private List<ServerProfile> backupProfiles = new List<ServerProfile>();
@@ -160,10 +172,8 @@ public sealed class MainForm : Form
         dutyButtons.Controls.Add(repair);dutyButtons.Controls.Add(diagnostics);dutyButtons.Controls.Add(miners);dutyButtons.Controls.Add(start);dutyButtons.Controls.Add(stop);dutyButtons.Controls.Add(supportBundle);dutyButtons.Controls.Add(contact);dutyButtons.Controls.Add(admin);
         homePage.Controls.Add(dutyButtons);
 
-        status.Text = "状态：未启动"; status.Dock = DockStyle.Top; status.Height = 122; status.Padding = new Padding(18, 12, 18, 4);
-        status.Font=new Font("Microsoft YaHei UI",11F,FontStyle.Bold);
-        status.BackColor = Color.FromArgb(236, 244, 252); status.AutoEllipsis = true;
-        homePage.Controls.Add(status); status.BringToFront();
+        Panel summary = BuildHomeSummary();
+        homePage.Controls.Add(summary); summary.BringToFront();
 
         Label logLabel = new Label(); logLabel.Text = "运行记录"; logLabel.Dock = DockStyle.Top; logLabel.Height = 28; logLabel.Padding = new Padding(18, 5, 0, 0);
         homePage.Controls.Add(logLabel); logLabel.BringToFront();
@@ -174,8 +184,122 @@ public sealed class MainForm : Form
         Controls.Add(pages);
     }
 
-    private static void AddRow(TableLayoutPanel grid, int row, string labelText, Control control, string hint)
+    // 首页信息分区：状态条（先给结论）、指标卡片、端口明细、线路明细。
+    // 配色只区分「正常／需关注／异常」三种语气，饱和度压低，长时间看不刺眼。
+    private static readonly Color InkStrong = Color.FromArgb(38, 50, 56);
+    private static readonly Color InkMuted = Color.FromArgb(108, 118, 128);
+    private static readonly Color ToneOk = Color.FromArgb(45, 105, 58);
+    private static readonly Color ToneWarn = Color.FromArgb(158, 100, 4);
+    private static readonly Color ToneBad = Color.FromArgb(170, 56, 56);
+    private static readonly Color SurfaceSubtle = Color.FromArgb(247, 250, 252);
+    private static readonly Color SurfaceOk = Color.FromArgb(233, 244, 235);
+    private static readonly Color SurfaceWarn = Color.FromArgb(252, 245, 230);
+    private static readonly Color SurfaceIdle = Color.FromArgb(240, 243, 246);
+
+    private Panel BuildHomeSummary()
     {
+        TableLayoutPanel host = new TableLayoutPanel();
+        host.Dock = DockStyle.Top; host.Height = 356; host.ColumnCount = 1; host.RowCount = 4;
+        host.BackColor = Color.White; host.Padding = new Padding(0); host.Margin = new Padding(0);
+        host.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        host.RowStyles.Add(new RowStyle(SizeType.Absolute, 66));
+        host.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
+        host.RowStyles.Add(new RowStyle(SizeType.Absolute, 114));
+        host.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
+
+        // 1) 状态条
+        bannerBar.Dock = DockStyle.Fill; bannerBar.Margin = new Padding(18, 6, 18, 0); bannerBar.BackColor = SurfaceIdle;
+        bannerBar.Padding = new Padding(0);
+        bannerTitle.AutoSize = false; bannerTitle.Dock = DockStyle.Top; bannerTitle.Height = 34;
+        bannerTitle.TextAlign = ContentAlignment.MiddleLeft; bannerTitle.Padding = new Padding(14, 0, 14, 0);
+        bannerTitle.Font = new Font("Microsoft YaHei UI", 14F, FontStyle.Bold);
+        bannerTitle.ForeColor = InkStrong; bannerTitle.BackColor = SurfaceIdle; bannerTitle.Text = "未启动";
+        bannerDetail.AutoSize = false; bannerDetail.Dock = DockStyle.Fill;
+        bannerDetail.TextAlign = ContentAlignment.TopLeft; bannerDetail.Padding = new Padding(15, 0, 14, 4);
+        bannerDetail.Font = new Font("Microsoft YaHei UI", 9F);
+        bannerDetail.ForeColor = InkMuted; bannerDetail.BackColor = SurfaceIdle;
+        bannerDetail.Text = "点上面的「启动中转」开始转发。";
+        bannerBar.Controls.Add(bannerDetail); bannerBar.Controls.Add(bannerTitle);
+        host.Controls.Add(bannerBar, 0, 0);
+
+        // 2) 指标卡片
+        FlowLayoutPanel cards = new FlowLayoutPanel();
+        cards.Dock = DockStyle.Fill; cards.Margin = new Padding(18, 4, 18, 6);
+        cards.WrapContents = false; cards.BackColor = Color.White;
+        cards.Controls.Add(BuildCard("当前连接", cardActive));
+        cards.Controls.Add(BuildCard("累计连接", cardTotal));
+        cards.Controls.Add(BuildCard("失败次数", cardFailures));
+        cards.Controls.Add(BuildCard("已运行", cardUptime));
+        host.Controls.Add(cards, 0, 1);
+
+        // 3) 端口
+        Panel ports = new Panel();
+        ports.Dock = DockStyle.Fill; ports.Margin = new Padding(18, 2, 18, 2); ports.BackColor = Color.White;
+        Label portsHead = new Label();
+        portsHead.Dock = DockStyle.Top; portsHead.Height = 22; portsHead.Text = "端口";
+        portsHead.TextAlign = ContentAlignment.MiddleLeft; portsHead.Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold);
+        portsHead.ForeColor = InkStrong;
+        portFailed.Dock = DockStyle.Top; portFailed.Height = 20; portFailed.AutoSize = false;
+        portFailed.Font = new Font("Microsoft YaHei UI", 9F); portFailed.ForeColor = ToneWarn;
+        portFailed.TextAlign = ContentAlignment.MiddleLeft; portFailed.BackColor = Color.White; portFailed.Text = "";
+        portList.Dock = DockStyle.Top; portList.Height = 40; portList.AutoSize = false;
+        portList.Font = new Font("Microsoft YaHei UI", 9F); portList.ForeColor = InkMuted;
+        portList.TextAlign = ContentAlignment.TopLeft; portList.BackColor = Color.White; portList.Text = "";
+        portStats.Dock = DockStyle.Top; portStats.Height = 24; portStats.WrapContents = false;
+        portStats.BackColor = Color.White; portStats.Margin = new Padding(0); portStats.Padding = new Padding(0);
+        // Dock=Top 的堆叠顺序与添加顺序相反，因此按「失败行 → 列表 → 统计 → 标题」反向添加，
+        // 视觉上才是「标题 / 统计 / 端口列表 / 失败行」
+        ports.Controls.Add(portFailed);
+        ports.Controls.Add(portList);
+        ports.Controls.Add(portStats);
+        ports.Controls.Add(portsHead);
+        host.Controls.Add(ports, 0, 2);
+
+        // 4) 线路
+        Panel endpoints = new Panel();
+        endpoints.Dock = DockStyle.Fill; endpoints.Margin = new Padding(18, 2, 18, 2); endpoints.BackColor = Color.White;
+        Label endpointsHead = new Label();
+        endpointsHead.Dock = DockStyle.Top; endpointsHead.Height = 22; endpointsHead.Text = "线路";
+        endpointsHead.TextAlign = ContentAlignment.MiddleLeft; endpointsHead.Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold);
+        endpointsHead.ForeColor = InkStrong; endpointsHead.BackColor = Color.White;
+        endpointList.Dock = DockStyle.Fill; endpointList.WrapContents = false;
+        endpointList.FlowDirection = FlowDirection.TopDown; endpointList.AutoScroll = false;
+        endpointList.BackColor = Color.White; endpointList.Margin = new Padding(0); endpointList.Padding = new Padding(0);
+        endpoints.Controls.Add(endpointList); endpoints.Controls.Add(endpointsHead);
+        host.Controls.Add(endpoints, 0, 3);
+        return host;
+    }
+
+    private static Label StatChip(string text, Color color, bool bold)
+    {
+        Label chip = new Label();
+        chip.AutoSize = true; chip.Text = text; chip.ForeColor = color; chip.BackColor = Color.White;
+        chip.Font = new Font("Microsoft YaHei UI", 9F, bold ? FontStyle.Bold : FontStyle.Regular);
+        chip.Margin = new Padding(0, 2, 4, 0);
+        return chip;
+    }
+
+    private static Panel BuildCard(string caption, Label value)
+    {
+        Panel card = new Panel();
+        card.Width = 148; card.Height = 68; card.Margin = new Padding(0, 0, 10, 0);
+        card.BackColor = SurfaceSubtle;
+        Panel top = new Panel(); top.Dock = DockStyle.Top; top.Height = 40; top.BackColor = SurfaceSubtle;
+        value.AutoSize = false; value.Dock = DockStyle.Fill;
+        value.TextAlign = ContentAlignment.MiddleLeft;
+        value.Font = new Font("Microsoft YaHei UI", 15F, FontStyle.Bold);
+        value.ForeColor = InkStrong; value.Text = "--"; value.Padding = new Padding(12, 0, 8, 0);
+        value.BackColor = SurfaceSubtle;
+        top.Controls.Add(value);
+        Label title = new Label();
+        title.Dock = DockStyle.Fill; title.Text = caption; title.TextAlign = ContentAlignment.MiddleLeft;
+        title.Padding = new Padding(12, 0, 8, 6); title.Font = new Font("Microsoft YaHei UI", 8.5F);
+        title.ForeColor = InkMuted; title.BackColor = SurfaceSubtle;
+        card.Controls.Add(title); card.Controls.Add(top);
+        return card;
+    }
+
+    private static void AddRow(TableLayoutPanel grid, int row, string labelText, Control control, string hint)    {
         Label label = new Label(); label.Text = labelText; label.TextAlign = ContentAlignment.MiddleLeft; label.Dock = DockStyle.Fill;
         ToolTip tip = new ToolTip(); tip.SetToolTip(control, hint);
         control.Dock = DockStyle.Fill; control.Margin = new Padding(3, 4, 3, 4);
@@ -480,21 +604,99 @@ public sealed class MainForm : Form
         if(++statusTicks>=30){statusTicks=0;manager.SaveMinerHistory();}
         RelaySnapshot s=manager.Snapshot();
         DutyHomeSummary duty=DutyHomeSummary.Create(s,manager.MinerSnapshots());
-        string line=s.Running ? "运行中" : "未启动";
-        string uptime=s.Running ? FormatDuration(DateTime.Now-s.StartedAt) : "--";
-        List<string> endpoints=new List<string>(); foreach(EndpointState e in s.Endpoints) { string phase=e.Recovering?"恢复观察":(e.CooldownUntilUtc>DateTime.UtcNow?"冷却至 "+e.CooldownUntilUtc.ToLocalTime().ToString("HH:mm:ss"):(e.Online?"正常 "+e.LatencyMs+"ms":"异常 "+e.LastError));endpoints.Add((e.Selected?"当前·":"")+e.Name+":"+phase+"（"+(e.LastCheck==DateTime.MinValue?"未检测":e.LastCheck.ToString("HH:mm:ss"))+"）"); }
         start.Enabled=!manager.IsRunning;
-        string recovery=String.IsNullOrWhiteSpace(s.RecoveryPhase)?"":("\r\n网络恢复："+s.RecoveryPhase+" · "+s.RecoveryMessage);
-        string ports;
-        if(!manager.IsRunning&&manager.ListeningPorts.Count==0&&manager.PortFailures.Count==0) ports="\r\n端口：未启动";
-        else {
-            List<int> live=manager.ListeningPorts; List<string> failed=manager.PortFailures;
-            List<string> liveText=new List<string>(); foreach(int port in live) liveText.Add(port.ToString());
-            ports="\r\n监听端口："+(live.Count==0?"无":live.Count+" 个（"+String.Join("，",liveText.ToArray())+"）");
-            if(failed.Count>0) ports+="    无法监听："+String.Join("，",failed.ToArray());
+
+        List<int> livePorts=manager.ListeningPorts;
+        List<string> failedPorts=manager.PortFailures;
+        DateTime nowUtc=DateTime.UtcNow;
+        bool endpointTrouble=false;
+        foreach(EndpointState e in s.Endpoints) if(!e.Online||e.Recovering||e.CooldownUntilUtc>nowUtc) endpointTrouble=true;
+
+        // 状态条：先给一句结论
+        bool needsAttention=s.Running&&(failedPorts.Count>0||endpointTrouble||duty.AffectedMiners>0);
+        if(!s.Running){
+            PaintBanner(SurfaceIdle,InkStrong,"未启动",InkMuted,"点上面的「启动中转」开始转发。");
+        } else if(needsAttention){
+            string detail=String.IsNullOrWhiteSpace(duty.Guidance)?("受影响矿机 "+duty.AffectedMiners+" 台"):duty.Guidance;
+            if(failedPorts.Count>0) detail="有 "+failedPorts.Count+" 个端口被占用已跳过；"+detail;
+            PaintBanner(SurfaceWarn,ToneWarn,"运行中 · 有需要关注的项目",ToneWarn,detail);
+        } else {
+            PaintBanner(SurfaceOk,ToneOk,"运行正常",ToneOk,"受影响矿机 0 台，当前不需要值守员操作。");
         }
-        status.Text="总状态："+duty.Overall+"    受影响矿机："+duty.AffectedMiners+" 台\r\n"+duty.Guidance+"\r\n运行："+line+"    当前连接："+s.Active+"    累计连接："+s.Total+"    失败："+s.Failures+"    时长："+uptime+ports+"\r\n线路："+(endpoints.Count==0 ? "启动后自动检测" : String.Join("，",endpoints.ToArray()))+recovery;
+
+        cardActive.Text=s.Active.ToString();
+        cardTotal.Text=s.Total.ToString();
+        cardFailures.Text=s.Failures.ToString();
+        cardFailures.ForeColor=s.Failures>0?ToneBad:InkStrong;
+        cardUptime.Text=s.Running?FormatDuration(DateTime.Now-s.StartedAt):"--";
+        cardUptime.ForeColor=s.Running?InkStrong:InkMuted;
+
+        // 端口：只在内容变化时重建，避免每秒刷新闪动
+        List<string> liveText=new List<string>(); foreach(int port in livePorts) liveText.Add(port.ToString());
+        string portSig=String.Join(",",liveText.ToArray())+"|"+String.Join(",",failedPorts.ToArray())+"|"+s.Running;
+        if(portSig!=portSignature){
+            portSignature=portSig;
+            portStats.SuspendLayout();
+            portStats.Controls.Clear();
+            if(!s.Running&&livePorts.Count==0&&failedPorts.Count==0){
+                portStats.Controls.Add(StatChip("未启动，启动后这里会列出正在监听的端口。",InkMuted,false));
+                portList.Text=""; portFailed.Text="";
+            } else {
+                portStats.Controls.Add(StatChip("正在监听",InkMuted,false));
+                portStats.Controls.Add(StatChip(livePorts.Count+" 个",livePorts.Count>0?ToneOk:ToneBad,true));
+                if(failedPorts.Count>0){
+                    portStats.Controls.Add(StatChip("· 无法监听",InkMuted,false));
+                    portStats.Controls.Add(StatChip(failedPorts.Count+" 个",ToneWarn,true));
+                }
+                portList.Text=livePorts.Count==0?"（没有可用的监听端口）":String.Join("，",liveText.ToArray());
+                portFailed.Text=failedPorts.Count==0?"":("无法监听："+String.Join("，",failedPorts.ToArray()));
+            }
+            portStats.ResumeLayout();
+        }
+
+        // 线路：每条一行，按状态着色
+        List<string> endpointLines=new List<string>(); List<Color> endpointColors=new List<Color>();
+        bool endpointBold=true;
+        foreach(EndpointState e in s.Endpoints){
+            string phase; Color tone;
+            if(e.Recovering){phase="恢复观察";tone=ToneWarn;}
+            else if(e.CooldownUntilUtc>nowUtc){phase="冷却至 "+e.CooldownUntilUtc.ToLocalTime().ToString("HH:mm:ss");tone=ToneWarn;}
+            else if(e.Online){phase="正常 "+e.LatencyMs+"ms";tone=ToneOk;}
+            else {phase="异常 "+(String.IsNullOrWhiteSpace(e.LastError)?"连接失败":e.LastError);tone=ToneBad;}
+            endpointLines.Add((e.Selected?"▶ ":"　 ")+(String.IsNullOrWhiteSpace(e.Name)?"线路":e.Name)+"　"+phase);
+            endpointColors.Add(tone);
+        }
+        if(!String.IsNullOrWhiteSpace(s.RecoveryPhase)){
+            endpointLines.Add("网络恢复："+s.RecoveryPhase+" · "+s.RecoveryMessage);
+            endpointColors.Add(ToneWarn);
+        }
+        string endpointSig=String.Join("|",endpointLines.ToArray());
+        if(endpointSig!=endpointSignature){
+            endpointSignature=endpointSig;
+            endpointList.SuspendLayout();
+            endpointList.Controls.Clear();
+            if(endpointLines.Count==0){
+                endpointList.Controls.Add(StatChip("启动后自动检测矿池线路。",InkMuted,false));
+            } else {
+                for(int i=0;i<endpointLines.Count;i++){
+                    Label line=StatChip(endpointLines[i],endpointColors[i],endpointBold);
+                    line.Margin=new Padding(0,1,0,1);
+                    endpointList.Controls.Add(line);
+                }
+            }
+            endpointList.ResumeLayout();
+        }
     }
+
+    private void PaintBanner(Color surface, Color titleColor, string title, Color detailColor, string detail)
+    {
+        if(bannerBar.BackColor!=surface){
+            bannerBar.BackColor=surface; bannerTitle.BackColor=surface; bannerDetail.BackColor=surface;
+        }
+        bannerTitle.ForeColor=titleColor; bannerTitle.Text=title;
+        bannerDetail.ForeColor=detailColor; bannerDetail.Text=detail;
+    }
+
     private static string FormatDuration(TimeSpan t){ return ((int)t.TotalDays>0 ? ((int)t.TotalDays)+"天 " : "")+t.Hours.ToString("00")+":"+t.Minutes.ToString("00")+":"+t.Seconds.ToString("00"); }
     private static string FormatBytes(long value){ string[] u={"B","KB","MB","GB","TB"}; double n=value; int i=0; while(n>=1024&&i<u.Length-1){n/=1024;i++;} return n.ToString(i==0?"0":"0.0")+" "+u[i]; }
 
